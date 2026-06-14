@@ -1,87 +1,166 @@
 # Failure Modes & Open Problems
 
-*Companion-документ до [`swarm_architecture_spec.md`](swarm_architecture_spec.md).*
+*Companion document to [`swarm_architecture_spec.md`](swarm_architecture_spec.md).*
 
-Цей документ систематизує дві речі, навмисно винесені з основної специфікації, щоб не змішувати позитивну архітектуру з негативним досвідом:
+This document separates two things from the main specification so the positive
+architecture is not mixed with negative operational experience:
 
-1. **Failure Modes (анти-патерни)** — класи відмов, спостережені на практиці в реальній реалізації системи цього класу.
-2. **Open Problems** — питання, на які референсна архітектура поки не дає повної відповіді.
+1. **Failure Modes (anti-patterns)**: classes of failures observed in practice
+   in a real implementation of this kind of system.
+2. **Open Problems**: questions the reference architecture does not yet answer
+   completely.
 
-## Емпіричне джерело
+## Empirical Source
 
-Каталог відмов нижче походить з аналізу попередньої реалізації агента (≈11.5k LOC), зібраної ітеративно **без формальної архітектури**. Попри це вона вже містила робочі версії приблизно половини доменів специфікації: blackboard, гібридний граф+вектори, tiered router (gate/cascade), консиліум (panel + judge), self-model, фонову консолідацію, символьну логіку, local-first inference з рідкою хмарною ескалацією.
+The failure catalog below comes from analysis of a previous agent
+implementation (about 11.5k LOC), built iteratively **without a formal
+architecture**. Even so, it already contained working versions of roughly half
+of the specification domains: a blackboard, hybrid graph+vectors, a tiered
+router (gate/cascade), a consilium (panel + judge), a self-model, background
+consolidation, symbolic logic, local-first inference, and rare cloud escalation.
 
-Цінність такого джерела подвійна: воно дало і **доведені добрі патерни** (винесені в ADR-1, 4, 6, 7, 8 основного документа), і **доведені відмови** (нижче). Усі приклади узагальнено й деідентифіковано — конкретика домену застосування опущена, лишився інженерний клас проблеми.
+The source is valuable in two ways: it produced **proven good patterns** (moved
+into ADR-1, 4, 6, 7, and 8 in the main document) and **proven failures** (listed
+below). All examples are generalized and de-identified: application-domain
+details are omitted; only the engineering class of the problem remains.
 
-> **Про провенанс рішень.** ADR-1, 4, 6, 7, 8 мають емпіричне коріння (підтверджені або спростовані цією реалізацією). ADR-2 (координація рою), ADR-3 (числення впевненості) та ADR-5 (топологія/visibility) — суто архітектурні рішення, виведені з вимог, *без* емпіричного попередника. Тому в таблиці "Розв'язані проєктні питання" нижче вони присутні без кредиту джерелу — це навмисно, а не пропуск.
+> **Decision provenance.** ADR-1, 4, 6, 7, and 8 have empirical roots: they were
+> confirmed or falsified by this implementation. ADR-2 (swarm coordination),
+> ADR-3 (confidence calculus), and ADR-5 (topology/visibility) are purely
+> architectural decisions derived from requirements, without an empirical
+> predecessor. That is why the "Resolved Design Questions" table lists them
+> without source credit. This is intentional, not an omission.
 
 ---
 
-## Failure Modes (анти-патерни)
+## Failure Modes (Anti-Patterns)
 
-Кожен рядок — спостережений клас відмов, не гіпотеза. Колонка "Виправлення" вказує, де основний документ адресує проблему.
+Each row is an observed failure class, not a hypothesis. The "Fix" column points
+to the place where the main document addresses the problem.
 
-| # | Анти-патерн | Механізм відмови | Виправлення |
+| # | Anti-pattern | Failure mechanism | Fix |
 | --- | --- | --- | --- |
-| 1 | **Silent failure як success-shaped значення** | Шар доступу до зовнішнього джерела на будь-який збій повертав рядок-заглушку (напр. `"(lookup unavailable)"`). Модель-споживач не відрізняла "результат порожній" від "джерело впало" і трактувала заглушку як дані. | Fail-loud, типізована помилка (Принципи; ADR-7) |
-| 2 | **Парсинг рішення LLM з підрядка вільного тексту** | Гілкування на кшталт `decision in output` спрацьовувало на пояснювальному тексті ("this is *not* SIMPLE…"); строгий `==` мовчки давав дефолт на варіації регістру/пунктуації ("Custom."). | Structured output / token-anchored парсинг (ADR-7; Д5) |
-| 3 | **Prompt-injection до зовнішньої дії** | Недовірений зовнішній текст (заголовок запису) потрапляв у промпт без огорожі, проходив через панель/judge як "висновок" і досягав автоматичної дії (публічний пост) без валідації виходу. | Untrusted-data fencing + валідація виходу перед дією (Д12; ADR-7) |
-| 4 | **Конкурентний доступ до стореджу без локів** | Один embedded-конект (sqlite) шарився між async-тасками без локів і WAL → `database is locked`/корупція. Системно повторювалось у кожному storage-модулі. | Транзакції + WAL + busy_timeout + конект-на-таск / writer-актор (ADR-1; Д1, Д14) |
-| 5 | **Підкріплення без забування (decay)** | Стигмергічний слід мав лічильник підтверджень (`seen_count`), але не мав decay → сліди жили вічно, граф лише накопичувався і ніколи не "дихав". | Підкріплення **і** decay разом (Д1; Open Problem #1) |
-| 6 | **Знищення розбіжності моделей** | Judge колапсував розбіжні думки панелі в один вердикт; inter-model variance ("disagreement-as-signal") губився назавжди. | Вимір variance ДО синтезу (Д4) |
-| 7 | **Послідовні виклики незалежних моделей** | Панель моделей опитувалась циклом `await` по черзі замість паралельно → N× латентність (критично з повільним judge-класом). | Справжня паралельність (`gather`) (Д4) |
-| 8 | **Fallback сирим необробленим текстом** | На збій judge система повертала конкатенацію сирих думок панелі і пускала її далі як вердикт — обходячи весь сенс синтезу/грунтування. | Дроп або карантин з low-confidence (Д4; ADR-7) |
-| 9 | **Наївний час, позначений як UTC** | Зовнішній timestamp у локальному TZ джерела штампувався як UTC без конверсії → постійний зсув у кілька годин, помилки на межі доби. | tz-aware конверсія на межі інжесту (Д2) |
-| 10 | **Lossy Unicode-fold** | Нормалізація `casefold` + strip `[^a-z0-9_]` зводила не-латиницю (кирилицю/CJK) до `_`; різні ідентифікатори колапсували в один → тихий fact loss. | NFC без ASCII-folding (Д2) — критично для не-латинських ідентифікаторів |
-| 11 | **Dry-run, реалізований по call-site** | Гарантія "не пише" трималась на перевірці в кожному викликачі (`continue` у сервісі), а не в boundary. Один пропущений захист (голий доступ до поля поза `try`) валив увесь батч. | Dry-run як властивість boundary + per-item ізоляція (Д12) |
-| 12 | **Dead code розходиться з документованим шляхом** | Передбачений компонент (predictive difficulty-router) був мертвий; продакшн-шлях тихо колапсував каскад у "найдешевший + найдорожчий", середні рівні не виконувались. | Прод-шлях = документований шлях; verify-then-climb (Д5) |
-| 13 | **Boundary, що тримається на домовленості** | Інваріант "весь зовнішній доступ через один gateway" форсився лише код-рев'ю; ніщо структурно не заважало обійти. | Import-lint контракт (Д12) |
+| 1 | **Silent failure as a success-shaped value** | The external-source access layer returned a placeholder string such as `"(lookup unavailable)"` on any failure. The consuming model could not distinguish "empty result" from "source failed" and treated the placeholder as data. | Fail-loud typed errors (Principles; ADR-7) |
+| 2 | **Parsing an LLM decision by substring in free text** | Branching such as `decision in output` fired on explanatory text ("this is *not* SIMPLE..."); strict `==` silently fell back on case or punctuation variants such as `"Custom."`. | Structured output / token-anchored parsing (ADR-7; Domain 5) |
+| 3 | **Prompt injection into an external action** | Untrusted external text (a record title) entered the prompt without fencing, passed through a panel/judge as a "conclusion", and reached an automated action (public post) without output validation. | Untrusted-data fencing + output validation before action (Domain 12; ADR-7) |
+| 4 | **Concurrent storage access without locks** | One embedded connection (SQLite) was shared across async tasks without locks or WAL, causing `database is locked` errors and corruption. The pattern repeated across storage modules. | Transactions + WAL + `busy_timeout` + connection-per-task / writer actor (ADR-1; Domains 1, 14) |
+| 5 | **Reinforcement without forgetting (decay)** | The stigmergic trace had a confirmation counter (`seen_count`) but no decay, so traces lived forever; the graph only accumulated and never "breathed". | Reinforcement **and** decay together (Domain 1; Open Problem #1) |
+| 6 | **Destroying model disagreement** | The judge collapsed divergent panel opinions into one verdict; inter-model variance ("disagreement as signal") was lost permanently. | Measure variance before synthesis (Domain 4) |
+| 7 | **Sequential calls to independent models** | The model panel was queried with an `await` loop instead of true parallelism, producing N-times latency, which is critical with slow judge-class models. | True parallelism (`gather`) (Domain 4) |
+| 8 | **Fallback to raw unsynthesized text** | When the judge failed, the system returned a concatenation of raw panel opinions and passed it downstream as a verdict, bypassing the point of synthesis and grounding. | Drop or quarantine with low confidence (Domain 4; ADR-7) |
+| 9 | **Naive time stamped as UTC** | An external timestamp in the source's local timezone was stamped as UTC without conversion, creating a persistent multi-hour skew and day-boundary errors. | Timezone-aware conversion at the ingestion boundary (Domain 2) |
+| 10 | **Lossy Unicode folding** | Normalization via `casefold` plus stripping `[^a-z0-9_]` reduced non-Latin text (Cyrillic/CJK) to `_`; distinct identifiers collapsed into one, silently losing facts. | NFC without ASCII folding (Domain 2), critical for non-Latin identifiers |
+| 11 | **Dry-run implemented at each call site** | The "does not write" guarantee depended on every caller checking locally (`continue` in the service), not on the boundary. One missed guard (bare field access outside `try`) crashed the whole batch. | Dry-run as a boundary property + per-item isolation (Domain 12) |
+| 12 | **Dead code diverging from the documented path** | An intended component (predictive difficulty router) was dead; the production path silently collapsed the cascade into "cheapest + most expensive", with middle tiers never executed. | Production path equals documented path; verify-then-climb (Domain 5) |
+| 13 | **Boundary enforced by convention** | The invariant "all external access goes through one gateway" was enforced only by code review; nothing structurally prevented bypassing it. | Import-lint contract (Domain 12) |
 
-**Узагальнення.** Більшість відмов належить до трьох метакласів: (a) **довіра до неструктурованого виходу LLM** (#2, #3, #6, #8); (b) **тихе ковтання помилок** (#1, #9, #10, #11); (c) **ігнорування конкурентності/масштабу на рівні стореджу** (#4, #5, #7). Усі три адресуються наскрізними принципами та ADR-1/7 основного документа.
+**Generalization.** Most failures fall into three meta-classes:
+(a) **trusting unstructured LLM output** (#2, #3, #6, #8);
+(b) **silently swallowing errors** (#1, #9, #10, #11); and
+(c) **ignoring concurrency/scale at the storage layer** (#4, #5, #7).
+All three are addressed by cross-cutting principles and ADR-1/7 in the main
+document.
 
 ---
 
 ## Open Problems
 
-Нерозв'язані питання, на які архітектура поки не дає повної відповіді. Не компоненти, а напрями досліджень/інженерії.
+Unresolved questions the architecture does not yet answer completely. These are
+not components; they are research and engineering directions.
 
-1. **Тюнінг λ: decay vs підкріплення стигмергії.** Підкріплення (`seen_count`) і decay (`exp(−λ·age)`) специфіковані (Д1), але баланс λ — окремий регулятор. Занизьке λ = граф не забуває (повертається анти-патерн #5); зависоке = втрата валідних патернів. Швидкість випаровування — ключовий параметр у класичних ant-colony системах; потребує окремого контрольного циклу, не константи.
-2. **Cold-start гейта.** Порожній граф покрито онбордингом (Д17), але порожні *пріори гейта* — ні. До накопичення даних гейт не має емпіричних band'ів (ADR-8). Потрібні ручні пріори + процедура bootstrap-калібрації, що поступово передає рішення вимірюванню.
-3. **Стабільність зворотних зв'язків.** Predictive + action + learning утворюють замкнені цикли, здатні осцилювати або піти в рознос. Rate limits (Д12) притуплюють амплітуду, але не демпфують динаміку. Потрібен формальний аналіз стійкості (умови збіжності, демпфування).
-4. **Калібрація та threat-model фільтра видимості під масштабом.** Механізм default-deny visibility-scope визначено (ADR-5), але це security-critical компонент: потрібні крос-контекстні регресійні тести на витік приватного та повна threat-model самого фільтра, верифіковані під реалістичним навантаженням.
-5. **Виявлення незалежності шляхів для noisy-OR.** ADR-3 застосовує `1−∏(1−cᵢ)` лише до незалежних шляхів, інакше — `min` (щоб уникнути подвійного зарахування свідчення зі спільного джерела → тихого inflation впевненості). Правило визначене, але **ефективне виявлення спільних предків/першоджерела при обході графа** — нерозв'язане: наївна перевірка спільної предковості для кожної пари шляхів дорога на масштабі. Потрібен дешевий критерій (напр. провенанс-теги на ребрах, lineage-відбитки) або консервативний дефолт на `min` за сумніву.
+1. **Tuning lambda: stigmergic decay vs reinforcement.** Reinforcement
+   (`seen_count`) and decay (`exp(-lambda * age)`) are specified in Domain 1,
+   but the lambda balance is a separate control parameter. Too low: the graph
+   does not forget and anti-pattern #5 returns. Too high: valid patterns are
+   lost. Evaporation speed is a key parameter in classic ant-colony systems and
+   needs its own control loop, not a constant.
+2. **Gate cold start.** An empty graph is covered by onboarding (Domain 17), but
+   empty *gate priors* are not. Before enough data accumulates, the gate has no
+   empirical bands (ADR-8). It needs manual priors plus a bootstrap-calibration
+   procedure that gradually hands decisions over to measurement.
+3. **Feedback-loop stability.** Prediction + action + learning form closed
+   loops that can oscillate or run away. Rate limits (Domain 12) blunt
+   amplitude, but do not damp the dynamics. Formal stability analysis is needed:
+   convergence conditions and damping.
+4. **Visibility-filter calibration and threat model at scale.** The
+   default-deny visibility-scope mechanism is defined (ADR-5), but it is
+   security-critical. It needs cross-context privacy-leak regression tests and a
+   complete threat model for the filter itself, verified under realistic load.
+5. **Detecting independent paths for noisy-OR.** ADR-3 applies
+   `1 - product(1 - P_j)` only across independent path groups; within a
+   shared-ancestor group it takes `max` (the strongest representative of the
+   same evidence). Using `min` here would be wrong: it would penalize having
+   several correlated confirmations, dragging confidence down to the weakest
+   path, whereas corroboration must never hurt. This avoids double-counting
+   evidence from a shared source and silently inflating confidence. The rule is
+   defined, but **efficiently detecting shared ancestors/origin sources during
+   graph traversal** remains unresolved: naive shared-ancestry checks for every
+   path pair are expensive at scale. The system needs a cheap criterion, such as
+   provenance tags on edges or lineage fingerprints, or a conservative default
+   that treats paths as correlated (collapse with `max`) when independence is
+   unproven.
 
-### Раунд 2 (консиліум рецензентів) — статус після ревізії
+### Round 2 (Reviewer Consilium): Status After Revision
 
-Виявлені незалежними рецензентами (архітектура / probabilistic-math / red-team) другим проходом. **Більшість отримала design-відповідь у ревізії ADR — нижче статус і залишковий research-хвіст.** Це приклад роботи самого циклу: рецензія → рішення → залишковий ризик.
+Issues found by independent reviewers (architecture / probabilistic math /
+red-team) in the second pass. **Most received a design answer in the ADR
+revision; the status and remaining research tail are listed below.** This is an
+example of the system's own loop: review -> decision -> residual risk.
 
-1. **Формальна семантика числення впевненості** → **ЗАКРИТО ADR-3 (переписано).** Суміш min+noisy-OR замінено на когерентну ймовірнісну пару product (∧) / noisy-OR (∨); source/time вбираються в reliability ребра *до* агрегації; `f(seen_count)` = Hill (ADR-9). Залишок: вихід — евристичний score до калібрації (→ #7).
-2. **Інфраструктура вимірювання** → **ЗАКРИТО ADR-8/ADR-9.** Заморожений held-out (80/20), BH-корекція + δ-tolerance, bootstrap-калібрація (isotonic/Platt, ECE<поріг), gate на pass/fail до калібрації. Залишок: збір початкових зовнішніх міток (cold-start, #2).
-3. **Механічне форсування circularity guard** → **ЗАКРИТО ADR-4.** Провенанс-чек відхиляє кандидата з lineage до `origin:"learned"`; корельовані осі ("модель згодна"+"чистий текст") рахуються як одна. Статус "Internal reward" знижено до "mitigated, enforced".
-4. **Confident-wrong під verify-then-climb** → **ЗМ'ЯКШЕНО ADR-7.** judge з іншої модельної родини (декорелює blind spot) + метрика точності judge на handle-confidently (Д16). Залишок: гарантії проти корельованих помилок немає — лишається відомою межею каскаду.
-5. **Generalization leakage похідних патернів** → **ЗАКРИТО ADR-5.** Похідний вузол успадковує найвужчий scope; розширення лише при min-support k (DP-подібний поріг). Залишок: вибір k і формальна DP-гарантія — тюнінг.
-6. **Fencing leases + ідемпотентність singleton'ів** → **ЗАКРИТО ADR-1/ADR-2.** Монотонні fencing-токени на claim; консолідація ідемпотентна/фенсована; liveness-алярм. Залишок: —
-7. **Visibility-фільтр — стіна масштабування** → **ЗАКРИТО ADR-5.** Scope матеріалізується як індексована мітка/тип ребра (прунінг на рівні індексу). Залишок: вибір стратегії decay (lazy-on-read vs batch) — інженерний.
+1. **Formal semantics for confidence calculus** -> **CLOSED by ADR-3
+   (rewritten).** The min+noisy-OR mixture was replaced with the coherent
+   probabilistic pair product (AND) / noisy-OR (OR). Source/time are absorbed
+   into edge reliability *before* aggregation; `f(seen_count)` is Hill
+   saturation (ADR-9). Residual: the output is a heuristic score until
+   calibrated (see Round 2 item 2).
+2. **Measurement infrastructure** -> **CLOSED by ADR-8/ADR-9.** Frozen held-out
+   split (80/20), BH correction + delta tolerance, bootstrap calibration
+   (isotonic/Platt, ECE below threshold), and pass/fail gate before calibration.
+   Residual: collecting initial external labels (cold start, #2).
+3. **Mechanical enforcement of the circularity guard** -> **CLOSED by ADR-4.**
+   The provenance check rejects candidates with lineage to `origin:"learned"`;
+   correlated axes ("model agrees" + "clean text") count as one. "Internal
+   reward" is downgraded to "mitigated, enforced".
+4. **Confident-wrong under verify-then-climb** -> **MITIGATED by ADR-7.** The
+   judge comes from a different model family to decorrelate blind spots, with a
+   judge-accuracy metric on the handle-confidently band (Domain 16). Residual:
+   there is no guarantee against correlated errors; this remains a known limit
+   of the cascade.
+5. **Generalization leakage of derived patterns** -> **CLOSED by ADR-5.** A
+   derived node inherits the narrowest parent scope; widening requires
+   min-support `k`, a DP-like threshold. Residual: choosing `k` and formal DP
+   guarantees remain tuning work.
+6. **Fencing leases + singleton idempotency** -> **CLOSED by ADR-1/ADR-2.**
+   Monotonic fencing tokens on claim; consolidation is idempotent/fenced;
+   liveness alarm. Residual: none.
+7. **Visibility filter as a scaling wall** -> **CLOSED by ADR-5.** Scope is
+   materialized as an indexed label/edge type, enabling index-level pruning.
+   Residual: choosing the decay strategy (lazy-on-read vs batch) is an
+   engineering decision.
 
-### Розв'язані проєктні питання
+### Resolved Design Questions
 
-Для повноти — питання, які раніше були відкритими ризиками, а тепер зафіксовані рішеннями в основному документі. **"Розв'язано" = by-design.** Колонка *Basis* розрізняє емпіричне коріння від суто архітектурного; залишкові gap'и після ревізії раунду 2 — у дужках.
+For completeness, these were previously open risks and are now fixed by
+decisions in the main document. **"Resolved" means by design.** The *Basis*
+column distinguishes empirical roots from purely architectural decisions;
+remaining gaps after round-2 revision are in parentheses.
 
-| Питання | Рішення | Basis | Залишковий gap |
+| Question | Decision | Basis | Remaining gap |
 | --- | --- | --- | --- |
-| Internal reward без зовнішнього сигналу | ADR-4: зовнішня правда + gated promotion + enforced circularity guard | empirical | — |
-| Конкурентний запис у граф | ADR-1: транзакції + CAS + fencing | empirical | — |
-| Дублювання роботи воркерами | ADR-2: тип-партиція + fenced graph-lease | design | — |
-| Невизначене числення впевненості | ADR-3: product (∧) / noisy-OR (∨), єдина алгебра | design | калібрація до даних (OP #2) |
-| Корекція користувача не first-class | ADR-4: подія `user_correction` | empirical | — |
-| Топологія при кількох користувачах | ADR-5: один граф + materialized visibility-scope + min-support | design | вибір k / decay-стратегія (тюнінг) |
-| Міграція embeddings | ADR-6: namespace-stamp + self-healing | empirical | — |
-| Невизначений контракт LLM I/O | ADR-7: structured output + fencing + fail-loud + verify-then-climb | empirical | confident-wrong — відома межа (OP #9) |
-| Пороги "на відчуття" | ADR-8: емпіричне виведення + held-out + BH-корекція | empirical | cold-start збір міток (OP #2) |
-| Стабільність зворотного контуру | ADR-9: сатуруюча f + decay-домінанта + провенанс-незалежне підкріплення | design | формальний аналіз стійкості (OP #3) |
-| Масштаб visibility-фільтра | ADR-5: матеріалізований індексований scope | design | — |
-| Confident-wrong каскаду | ADR-7: judge іншої родини + Д16-метрика | design | гарантій проти корельованих помилок нема (OP #9) |
+| Internal reward without an external signal | ADR-4: external truth + gated promotion + enforced circularity guard | empirical | none |
+| Concurrent graph writes | ADR-1: transactions + CAS + fencing | empirical | none |
+| Worker duplicate work | ADR-2: type partitioning + fenced graph lease | design | none |
+| Undefined confidence calculus | ADR-3: product (AND) / noisy-OR (OR), one algebra | design | calibration to data (OP #2) |
+| User correction is not first-class | ADR-4: `user_correction` event | empirical | none |
+| Topology with multiple users | ADR-5: one graph + materialized visibility scope + min-support | design | choosing `k` / decay strategy (tuning) |
+| Embedding migration | ADR-6: namespace stamp + self-healing | empirical | none |
+| Undefined LLM I/O contract | ADR-7: structured output + fencing + fail-loud + verify-then-climb | empirical | confident-wrong is a known cascade limit |
+| Thresholds "by feel" | ADR-8: empirical derivation + held-out + BH correction | empirical | cold-start label collection (OP #2) |
+| Feedback-loop stability | ADR-9: saturating `f` + decay-dominant loop + provenance-independent reinforcement | design | formal stability analysis (OP #3) |
+| Visibility-filter scale | ADR-5: materialized indexed scope | design | none |
+| Cascade confident-wrong | ADR-7: different-family judge + Domain 16 metric | design | no guarantee against correlated errors |
 
 ---
 
-*Негативний досвід — теж дані. Каталог відмов цінний рівно тому, що кожен пункт колись коштував часу й довіри до системи.*
+*Negative experience is data too. This failure catalog is valuable precisely
+because every item once cost time and trust in the system.*
