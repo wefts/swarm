@@ -510,3 +510,68 @@ breadth:
 
 Everything else (gate, consilium, skills, learning, web front) builds on this
 proven foundation, phased in per the cognitive spec.
+
+---
+
+## 13. Repository layout and environments
+
+The clean-kernel / plugins-outside rule (§3) is made physical here, and the
+local-vs-Spark split is fixed so each side tests its own things.
+
+### What lives in the repo (clean, public)
+
+- The kernel, the ports (Protobuf contracts), and adapter **interfaces**.
+- Documentation (`docs/`), dev tooling (`.claude/skills/`, scripts).
+- Nothing else: no concrete third-party plugins, no test corpora
+  (wiki/Confluence/tickets), no secrets, no `.env`. Scratch lives in `tmp/`
+  (gitignored).
+
+### What lives outside the repo
+
+- **Plugins / adapters** — connectors, workers, channels, model providers,
+  skills — each its own package/repo, discovered at runtime via a config path.
+- **Test data / corpora** — internal wiki, Confluence, ticket exports — their own
+  project folder, never committed.
+
+### Sibling-directory convention
+
+```text
+~/Swarm/
+  swarm/      <- this repo (kernel + ports + docs). Clean, public.
+  plugins/    <- adapters. Outside the repo. Own git.
+  data/       <- corpora / test fixtures. Outside the repo. Never committed.
+```
+
+The kernel reads `SWARM_PLUGINS_DIR` and `SWARM_DATA_DIR` from env (default to
+the siblings `../plugins`, `../data`). Local and Spark differ only by these env
+values: locally they point at your own test fixtures; on Spark they point at the
+real corpora in a sibling project folder. The repo content is identical on both.
+
+```mermaid
+flowchart LR
+    subgraph Repo["~/Swarm/swarm (clean, public)"]
+        K["kernel + ports + docs"]
+    end
+    P["~/Swarm/plugins (adapters)"]
+    D["~/Swarm/data (corpora)"]
+    K -. "SWARM_PLUGINS_DIR" .-> P
+    K -. "SWARM_DATA_DIR" .-> D
+```
+
+### Runtime placement
+
+- **Stateful infra in Docker** (`docker compose`): Postgres+pgvector now,
+  Memgraph only if a later traversal re-test reopens the choice.
+- **App on the host** via `mix` (Elixir kernel) and `uv` (Python ML). Keeping the
+  app on the host — not containerized — is the simplest path and matches how the
+  storage spike ran. Python is uv-only.
+
+### Ollama from Docker
+
+Ollama runs on the Spark host with the local model fleet. Because the app runs on
+the host, it reaches Ollama as plain `http://localhost:11434` — no Docker
+networking problem. **If** a component is later containerized, give its compose
+service `extra_hosts: ["host.docker.internal:host-gateway"]` (Linux/Docker
+20.10+) and set `OLLAMA_BASE_URL=http://host.docker.internal:11434`. The URL is
+always read from env (`OLLAMA_BASE_URL`), never hardcoded, so host vs container
+vs local differ by config alone.
