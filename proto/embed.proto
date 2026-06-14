@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+// Model port (embeddings) and the Elixir<->Python boundary (system
+// architecture §7). The schema IS the contract: codegen feeds both the Elixir
+// kernel and the Python ML service. Field additions evolve without breaking
+// adapters; do not renumber.
+package swarm.ml.v1;
+
+// Intelligence pillar: turn text into vectors. The kernel calls this over gRPC;
+// real model inference replaces the stub body without changing the contract.
+service Embedder {
+  // Batch in, batch out — the kernel owns batching (perf: one round-trip per
+  // batch, never one RPC per item).
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+}
+
+message EmbedRequest {
+  // Untrusted text is data, not instructions (ADR-7). The code owns the list;
+  // the model only fills vectors.
+  repeated string texts = 1;
+  // Embedding-namespace stamp (ADR-6): which model/space these vectors belong
+  // to. Vectors from different namespaces are never mixed.
+  string namespace = 2;
+}
+
+message EmbedResponse {
+  repeated Vector vectors = 1;
+  // Echo of the namespace that actually produced these vectors (ADR-6).
+  string namespace = 2;
+  // Vector dimensionality; redundant with len(values) but explicit for callers.
+  uint32 dim = 3;
+}
+
+message Vector {
+  repeated float values = 1 [packed = true];
+}

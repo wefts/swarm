@@ -1,0 +1,28 @@
+# Stateful infra for the swarm kernel. The app runs on the host (mix / uv);
+# only Postgres+pgvector is containerized. Storage was decided by the spike:
+# Postgres + pgvector (docs/storage_engine_spike.md). No Memgraph.
+#
+# Ollama runs on the host and is reached via OLLAMA_BASE_URL
+# (http://localhost:11434) — nothing here needs it yet. If a component is later
+# containerized, give its service:
+#   extra_hosts: ["host.docker.internal:host-gateway"]
+# and set OLLAMA_BASE_URL=http://host.docker.internal:11434. Never hardcode it.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${SWARM_DB_USER:-swarm}
+      POSTGRES_PASSWORD: ${SWARM_DB_PASSWORD:-swarm}
+      POSTGRES_DB: ${SWARM_DB_NAME:-swarm_dev}
+    ports:
+      - "${SWARM_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SWARM_DB_USER:-swarm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

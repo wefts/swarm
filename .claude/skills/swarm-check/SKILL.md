@@ -12,33 +12,48 @@ description: >
 Run the project gates and report pass/fail plainly. Never claim "clean" without
 running them. Fail loud: surface the actual error output, do not summarize away.
 
-## Always
+## Preferred: the Taskfile (both stacks at once)
 
-- **Markdown** (docs are part of the public repo): run from the **repo root**
-  (the `.markdownlint.yaml` lives there; running from `docs/` misses it).
+The gates are wired into the root `Taskfile.yml`. From the repo root, with
+Postgres up (`task db:up`) and the toolchain on PATH (mise + uv):
+
+```bash
+task lint    # markdown + Python (ruff/ty) + Elixir (format/credo/dialyzer)
+task test    # Python (pytest) + Elixir (mix test)
+task check   # lint + test
+```
+
+`task` runs Elixir through `mise exec` (reads `.tool-versions`) and Python
+through `uv`. The Elixir tests auto-create + migrate the DB, so Postgres must be
+running first.
+
+## Fallback: run the underlying tools directly
+
+If `task` is unavailable, run the same gates by hand.
+
+- **Markdown** (run from the **repo root** — `.markdownlint.yaml` lives there):
 
   ```bash
-  markdownlint docs/*.md
+  npx --no-install markdownlint-cli2 "*.md" "docs/**/*.md" ".claude/**/*.md"
   ```
 
-## If a Python package is present (`pyproject.toml`)
+- **Python** (`ml/`, uv-only — never `pip`/`python`):
 
-Python is **uv-only** — never call `pip`/`python` directly.
+  ```bash
+  uv run ruff check .
+  uv run ruff format --check .
+  uv run ty check        # or: uv run mypy .
+  uv run pytest -q
+  ```
 
-```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check        # or: uv run mypy .
-uv run pytest -q
-```
+- **Elixir** (`kernel/`, via `mise exec --`):
 
-## If an Elixir project is present (`mix.exs`)
-
-```bash
-mix format --check-formatted
-mix credo --strict
-mix test
-```
+  ```bash
+  mix format --check-formatted
+  mix credo --strict
+  mix dialyzer
+  mix test
+  ```
 
 ## Rules
 

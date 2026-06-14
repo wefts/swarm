@@ -24,20 +24,22 @@ GitLab is the only CI option and is not set up; rsync is the working path.
 ## The loop
 
 ```bash
-tmp/scripts/sync.sh push             # local -> Spark, mirror (--delete)
-tmp/scripts/sync.sh pull             # Spark -> local, additive (brings results)
-tmp/scripts/run_on_spark.sh <args>   # ssh: docker compose up + uv run spike
-                                     # (runs in ~/Swarm/swarm/tmp/spike)
+scripts/sync.sh push             # local -> Spark, mirror (--delete)
+scripts/sync.sh pull             # Spark -> local, additive (brings results)
+scripts/run_on_spark.sh <args>   # ssh: docker compose up infra + `task <args>`
+                                 # (default: `task check`, runs in ~/Swarm/swarm)
 ```
 
-Targets and the exclude list live in `tmp/scripts/env.sh`. `push` mirrors —
-don't edit git on both sides between syncs. `.venv`/`_build`/`deps`/caches are
-never transferred (regenerated on each side).
+Targets and the exclude list live in `scripts/env.sh`. `push` mirrors — don't
+edit git on both sides between syncs. `.venv`/`_build`/`deps`/caches are never
+transferred (regenerated on each side).
 
-When running ad hoc over ssh, always export the uv PATH first:
+When running ad hoc over ssh, always export the tool PATH first (`mise` and `uv`
+both live in `~/.local/bin`); Elixir runs through `mise exec`:
 
 ```bash
 ssh spark.mpl.intranet 'export PATH="$HOME/.local/bin:$PATH"; cd <dir> && uv run ...'
+ssh spark.mpl.intranet 'export PATH="$HOME/.local/bin:$PATH"; cd ~/Swarm/swarm && task check'
 ```
 
 ## Environment split (keep local and Spark separate)

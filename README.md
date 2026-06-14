@@ -12,8 +12,10 @@ Connectors, workers, channels, skills, and data corpora are plugins that live
 public; secrets never land here.
 
 > Status: architecture and key decisions are locked; the storage engine is
-> chosen (Postgres + pgvector, decided by spike). Kernel implementation is the
-> next phase. See the build order in the system architecture, §12.
+> chosen (Postgres + pgvector, decided by spike). The two-language skeleton is
+> scaffolded — the kernel boots, connects to Postgres, and talks Protobuf/gRPC
+> to the Python ML service. Domain code is the next phase. See the build order
+> in the system architecture, §12.
 
 ## Documentation
 
@@ -36,9 +38,52 @@ public; secrets never land here.
 Everything that grows over time — data sources, capabilities, channels — is an
 adapter behind a port, not a change to the kernel.
 
+## Repository layout
+
+```text
+proto/        Protobuf contracts (ports + the Elixir<->Python boundary)
+kernel/       Elixir/OTP app `:swarm` (mix, lib/, test/, config/, migrations)
+ml/           Python ML service (uv; embeddings + inference over gRPC)
+infra/        docker-compose for stateful infra (Postgres+pgvector)
+scripts/      Spark delivery loop (sync.sh, run_on_spark.sh, env.sh)
+docs/         Architecture, decisions (ADR-1..9), guides
+```
+
+Plugins/adapters and corpora live **outside** the repo, reached via
+`SWARM_PLUGINS_DIR` / `SWARM_DATA_DIR` (system architecture §13).
+
+## Toolchain
+
+| Tool | Version | Managed by |
+| --- | --- | --- |
+| Erlang/OTP | 28.5 | mise (`.tool-versions`) |
+| Elixir | 1.19.5 (otp-28) | mise (`.tool-versions`) |
+| Python | 3.13 | uv (`.python-version`) |
+| Postgres + pgvector | 16 + 0.8.x | Docker (`infra/`) |
+| Protobuf / gRPC | `grpc` + `protobuf` (Elixir), `grpcio` + `grpcio-tools` (Python) | per-stack |
+
+mise manages **Erlang + Elixir only**; **Python is uv-only** (`uv run`, never
+`pip`/bare `python`). Install mise once (`curl https://mise.run | sh`), then
+`mise install` from the repo root builds the pinned pair.
+
 ## Development
+
+Gates run through [Task](https://taskfile.dev) (`Taskfile.yml`), both stacks:
+
+```bash
+task db:up      # start Postgres+pgvector (infra/docker-compose.yml)
+task setup      # generate proto stubs, fetch deps, create + migrate the DB
+task lint       # markdown + Python (ruff/ty) + Elixir (format/credo/dialyzer)
+task test       # Python (pytest) + Elixir (mix test)
+task check      # lint + test
+task proto      # regenerate Protobuf stubs (Python + Elixir)
+```
+
+Prove the cross-language boundary end to end: run the ML service
+(`cd ml && uv run swarm-ml`), then `cd kernel && mix test --include integration`
+— the Elixir kernel calls the Python `Embed` RPC and gets a vector back.
 
 - Quality gates, review, and the Spark delivery loop are Claude skills:
   `swarm-check`, `swarm-review`, `swarm-sync`.
-- Python is **uv-only**. Stateful infra runs in Docker; the app runs on the host.
+- Stateful infra runs in Docker; the app (kernel, ML) runs on the host.
 - See [docs/guides/](docs/guides/) for engineering standards.

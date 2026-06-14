@@ -1,0 +1,136 @@
+version: "3"
+
+# Gate runners for BOTH stacks (no CI — these are the gates).
+#   task lint   — format/lint/type-check: markdown + Python + Elixir
+#   task test   — test suites: Python + Elixir
+#   task check  — lint + test (what swarm-check runs)
+#   task proto  — regenerate Protobuf stubs for both stacks
+#   task setup  — fetch deps + create/migrate the DB
+#
+# Elixir tools resolve through mise (.tool-versions); Python is uv-only.
+
+silent: true
+
+tasks:
+  default:
+    cmds:
+      - task: check
+
+  check:
+    desc: Run every gate (lint + test) for both stacks.
+    cmds:
+      - task: lint
+      - task: test
+
+  # ---- lint ---------------------------------------------------------------
+  lint:
+    desc: Format/lint/type-check markdown, Python, and Elixir.
+    cmds:
+      - task: lint:md
+      - task: lint:py
+      - task: lint:ex
+
+  lint:md:
+    desc: Lint the markdown we own from the repo root (where .markdownlint.yaml lives).
+    cmds:
+      - npx --no-install markdownlint-cli2 "*.md" "docs/**/*.md" ".claude/**/*.md"
+
+  lint:py:
+    desc: Ruff lint + format check + ty type check (uv-only).
+    dir: ml
+    cmds:
+      - uv run ruff check .
+      - uv run ruff format --check .
+      - uv run ty check
+
+  lint:ex:
+    desc: mix format check + credo --strict + dialyzer.
+    dir: kernel
+    cmds:
+      - mise exec -- mix format --check-formatted
+      - mise exec -- mix credo --strict
+      - mise exec -- mix dialyzer
+
+  # ---- test ---------------------------------------------------------------
+  test:
+    desc: Run Python and Elixir test suites.
+    cmds:
+      - task: test:py
+      - task: test:ex
+
+  test:py:
+    dir: ml
+    cmds:
+      - uv run pytest -q
+
+  test:ex:
+    dir: kernel
+    cmds:
+      - mise exec -- mix test
+
+  # ---- proto codegen ------------------------------------------------------
+  proto:
+    desc: Regenerate Protobuf stubs for both stacks.
+    cmds:
+      - task: proto:py
+      - task: proto:ex
+
+  proto:py:
+    desc: Generate Python gRPC stubs into ml/src/swarm_ml/_gen.
+    dir: ml
+    cmds:
+      - mkdir -p src/swarm_ml/_gen
+      - >-
+        uv run python -m grpc_tools.protoc -I ../proto
+        --python_out=src/swarm_ml/_gen
+        --grpc_python_out=src/swarm_ml/_gen
+        --pyi_out=src/swarm_ml/_gen
+        ../proto/embed.proto
+      - touch src/swarm_ml/_gen/__init__.py
+      # Generated grpc stub uses an absolute import; make it package-relative.
+      - sed -i -E 's/^import embed_pb2 as/from . import embed_pb2 as/' src/swarm_ml/_gen/embed_pb2_grpc.py
+
+  proto:ex:
+    # Generate via protoc + the protoc-gen-elixir escript directly, NOT
+    # `mix protobuf.generate`: the mix task compiles the app first, which fails
+    # because the app references the not-yet-generated modules. protoc has no
+    # such dependency. The escript is installed once by `task proto:ex:setup`
+    # and needs Erlang's `escript` on PATH, so it runs under `mise exec`.
+    desc: Generate Elixir protobuf + gRPC stubs into kernel/lib/swarm/proto.
+    deps: [proto:ex:setup]
+    cmds:
+      - mkdir -p kernel/lib/swarm/proto
+      - >-
+        mise exec -- bash -c
+        'export PATH="$(mise where elixir)/.mix/escripts:$PATH";
+        protoc -I proto --elixir_out=plugins=grpc:kernel/lib/swarm/proto proto/embed.proto'
+      # protoc-gen-elixir output isn't `mix format`-clean; format it so the gate passes.
+      - cd kernel && mise exec -- mix format "lib/swarm/proto/**/*.{ex,exs}"
+
+  proto:ex:setup:
+    # Install the protoc-gen-elixir escript once (idempotent; into mise's
+    # MIX_HOME). Skipped if already present.
+    internal: true
+    cmds:
+      - >-
+        test -x "$(mise where elixir)/.mix/escripts/protoc-gen-elixir" ||
+        mise exec -- mix escript.install hex protobuf --force
+
+  # ---- infra + setup ------------------------------------------------------
+  db:up:
+    desc: Start Postgres+pgvector (infra/docker-compose.yml).
+    cmds:
+      - docker compose -f infra/docker-compose.yml up -d
+
+  db:down:
+    desc: Stop Postgres+pgvector.
+    cmds:
+      - docker compose -f infra/docker-compose.yml down
+
+  setup:
+    desc: Fetch deps and create/migrate the DB (requires Postgres up).
+    cmds:
+      - task: proto
+      - cd ml && uv sync
+      - cd kernel && mise exec -- mix deps.get
+      - cd kernel && mise exec -- mix setup
