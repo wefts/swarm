@@ -17,15 +17,22 @@ GitLab is the only CI option and is not set up; rsync is the working path.
   user (`sebor`); forcing `$USER` (searge) fails publickey.
 - Spark is **aarch64** (Grace), Docker present, **uv** at `~/.local/bin/uv`
   (Python = uv only; `uv run` auto-installs deps).
-- Repo on Spark: `~/Swarm/swarm` (clean, this repo only). Spike currently lives
-  at `~/swarm-spike` via `tmp/scripts/`.
+- Repo on Spark: `~/Swarm/swarm`. The **whole repo** syncs both ways, **with
+  git**; the spike lives under `tmp/spike` (no separate dir). Only
+  dependency/build/cache folders are excluded.
 
 ## The loop
 
 ```bash
-tmp/scripts/sync.sh                  # rsync local -> Spark
-tmp/scripts/run_on_spark.sh <args>   # ssh: docker compose up + uv run ...
+tmp/scripts/sync.sh push             # local -> Spark, mirror (--delete)
+tmp/scripts/sync.sh pull             # Spark -> local, additive (brings results)
+tmp/scripts/run_on_spark.sh <args>   # ssh: docker compose up + uv run spike
+                                     # (runs in ~/Swarm/swarm/tmp/spike)
 ```
+
+Targets and the exclude list live in `tmp/scripts/env.sh`. `push` mirrors —
+don't edit git on both sides between syncs. `.venv`/`_build`/`deps`/caches are
+never transferred (regenerated on each side).
 
 When running ad hoc over ssh, always export the uv PATH first:
 
