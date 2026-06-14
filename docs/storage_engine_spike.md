@@ -159,5 +159,59 @@ CRUD+CAS+vector only).
 
 ## Outcome
 
-To be recorded after the spike runs: chosen engine, scorecard results, and the
-date. This document becomes the decision record for the storage layer.
+Spike ran on the Spark machine (aarch64, Docker), Postgres 16.14 + pgvector
+0.8.2 vs Memgraph 3.10.1, via the harness in `tmp/spike/`. Synthetic graph,
+edge-factor 4, dim 128. Three scales; results consistent.
+
+### Results (scale 100k nodes, ~400k edges, traversal depth 6)
+
+| Metric | Postgres+pgvector | Memgraph | Winner |
+| --- | --- | --- | --- |
+| Load (s) | 37.9 | 64.4 | PG |
+| CAS throughput (claims/s, 16 writers) | 4886 | 927 | **PG ~5x** |
+| CAS fencing violations | 0 | 0 | tie (both correct) |
+| Traversal p50 / p99 (ms) | 6.6 / 13.8 | 13.5 / 35.8 | **PG ~2x** |
+| Scope-filtered traversal p50 (ms) | 1.4 | 4.5 | **PG ~3x** |
+| Hybrid vector+expand p50 (ms) | 3.2 | 1.8 | **Memgraph ~1.8x** |
+
+At 3k and 50k the pattern was identical (PG wins CAS decisively; traversal at
+parity or PG ahead; Memgraph wins only hybrid-vector latency).
+
+### Decision: Postgres + pgvector
+
+Per the decision rule, a native graph had to **clearly win traversal** to justify
+giving up Postgres's CAS / ops / Elixir advantages. It did not — Postgres won or
+tied traversal at every scale and won CAS (the ADR-1 invariant, the
+hardest-to-retrofit axis) by ~5x. Both engines passed fencing correctness
+(0 violations). Weighted scorecard (traversal 30, CAS 25, hybrid 15, scope 10,
+Elixir/ops 20) favors Postgres decisively; Memgraph leads only the 15% hybrid
+axis, which is tunable (HNSW `ef_search`).
+
+### Honest caveats (do not over-read this)
+
+- **Memgraph traversal was not query-optimized.** The harness used naive
+  variable-length `MATCH (s)-[*1..N]->(n)`, which enumerates all paths.
+  Memgraph's `-[*BFS..N]-` expansion avoids that and would likely close or
+  reverse the traversal gap. The traversal numbers are therefore
+  query-implementation-dependent, not a pure engine verdict. **If traversal
+  becomes the dominant workload, re-test with Memgraph BFS syntax before
+  finalizing.**
+- **CAS contention was adversarial** (16 writers hammering 200 tasks). Memgraph's
+  MVCC aborts on write-write conflict and retries (observed); Postgres's row-lock
+  `UPDATE ... WHERE fence < token` serializes without abort storms. Real swarm
+  contention may be lighter, but Postgres's model is structurally better here.
+- **Single-node only.** Clustering/HA (R8) was not tested.
+- Memgraph load was slower via `MATCH`-based edge creation; a bulk importer would
+  help (load is one-time regardless).
+
+### Consequence for the architecture
+
+- The storage-port scope note (system architecture §7) stands: with Postgres,
+  traversal is recursive-CTE SQL; a future move to a native graph would still
+  require rewriting traversal queries.
+- pgvector covers R4 acceptably (only ~1.8x behind Memgraph, tunable), so a
+  separate vector store is not needed at this stage.
+
+Decided on the basis of this spike. Re-open only if traversal becomes the
+dominant access pattern (then re-test Memgraph BFS) or if multi-node scale
+introduces requirements this single-node spike did not cover.
