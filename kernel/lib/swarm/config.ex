@@ -16,6 +16,16 @@ defmodule Swarm.Config do
     }
   end
 
+  @typedoc "Consilium fleet: parallel panel models and the synthesizing judge."
+  @type consilium :: %{panel: [String.t()], judge: String.t()}
+
+  @doc "Consilium panel + judge model roster (Domain 4)."
+  @spec consilium() :: consilium()
+  def consilium do
+    cfg = Application.get_env(:swarm, :consilium, [])
+    %{panel: Keyword.fetch!(cfg, :panel), judge: Keyword.fetch!(cfg, :judge)}
+  end
+
   @doc "Dimensionality of the stored embedding vectors (ADR-6)."
   @spec embedding_dim() :: pos_integer()
   def embedding_dim, do: Keyword.fetch!(Application.get_env(:swarm, :embedding, dim: 768), :dim)

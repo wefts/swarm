@@ -5,26 +5,26 @@
 tmp
 
 # --- Elixir kernel ---
-/kernel/_build/
+_build
+.fetch
 /kernel/cover/
 /kernel/deps/
 /kernel/doc/
-/kernel/.fetch
 /kernel/.elixir_ls/
 erl_crash.dump
 *.ez
 *.beam
 
-# --- Python ML ---
-/ml/.venv/
-__pycache__/
+# --- Python (ML service + CLI channel) ---
+.venv
+__pycache__
 *.py[cod]
-.ruff_cache/
-.pytest_cache/
-.mypy_cache/
+.ruff_cache
+.pytest_cache
+.mypy_cache
 
 # --- Generated Protobuf stubs (regenerate with `task proto`) ---
-/ml/src/swarm_ml/_gen/
+_gen
 /kernel/lib/swarm/proto/
 
 # --- mise local overrides (machine-specific, not committed) ---

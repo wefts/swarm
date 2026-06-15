@@ -34,4 +34,6 @@ config :swarm, Swarm.Repo, [{:database, database} | repo_opts]
 
 if config_env() == :test do
   config :logger, level: :warning
+  # Unit tests call the Core logic directly; don't bind the gRPC server port.
+  config :swarm, :core_api, port: 50061, start_server: false
 end

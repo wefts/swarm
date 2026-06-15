@@ -9,9 +9,11 @@ defmodule Swarm.Graph.TraverseTest do
     b = add_node!(%{type: "b", scope: "public"})
     c = add_node!(%{type: "c", scope: "private"})
 
-    {:ok, _} = Graph.add_edge(a, b, "rel", "e1", reliability: 0.5)
-    {:ok, _} = Graph.add_edge(b, c, "rel", "e2", reliability: 0.5)
-    {:ok, _} = Graph.add_edge(a, c, "rel", "e3", reliability: 0.9)
+    # Edge scope = narrowest endpoint (as ingest sets it): a→b public, the rest
+    # touch private c. Visibility (Task 06) now prunes on edge scope too.
+    {:ok, _} = Graph.add_edge(a, b, "rel", "e1", reliability: 0.5, scope: "public")
+    {:ok, _} = Graph.add_edge(b, c, "rel", "e2", reliability: 0.5, scope: "private")
+    {:ok, _} = Graph.add_edge(a, c, "rel", "e3", reliability: 0.9, scope: "private")
 
     %{a: a, b: b, c: c}
   end

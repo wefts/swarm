@@ -34,3 +34,24 @@ message EmbedResponse {
 message Vector {
   repeated float values = 1 [packed = true];
 }
+
+// Text generation over the same boundary — the consilium panel + judge run on
+// the local fleet (Domain 4). The kernel orchestrates; the ML pillar owns the
+// Ollama call. `model` is chosen by the caller (code owns the fleet roster).
+service Generator {
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+}
+
+message GenerateRequest {
+  string model = 1;
+  // Untrusted context is fenced as data by the caller, not instructions (ADR-7).
+  string prompt = 2;
+  string system = 3;
+  // Force strict JSON output (for structured judge verdicts).
+  bool json = 4;
+}
+
+message GenerateResponse {
+  string text = 1;
+  string model = 2;
+}

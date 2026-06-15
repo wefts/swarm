@@ -41,11 +41,12 @@ adapter behind a port, not a change to the kernel.
 ## Repository layout
 
 ```text
-proto/        Protobuf contracts (ports + the Elixir<->Python boundary)
-kernel/       Elixir/OTP app `:swarm` (mix, lib/, test/, config/, migrations)
-ml/           Python ML service (uv; embeddings + inference over gRPC)
+proto/        Protobuf contracts (ports + the Elixir<->Python boundary + Core API)
+kernel/       Elixir/OTP app `:swarm` (graph, gate, consilium, Core API server)
+ml/           Python ML service (uv; embeddings + generation over gRPC)
+cli/          Python CLI channel (uv; Typer + Rich over the Core API)
 infra/        docker-compose for stateful infra (Postgres+pgvector)
-scripts/      Spark delivery loop (sync.sh, run_on_spark.sh, env.sh)
+scripts/      Spark delivery loop + local-fleet delegation (ollama_ask.sh)
 docs/         Architecture, decisions (ADR-1..9), guides
 ```
 

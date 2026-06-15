@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+// The kernel's outward Core API — the single contract a Channel adapter (CLI,
+// web, chat) speaks to. The kernel owns cognition and the single-voice rule
+// (Domain 11); a channel only renders and accepts input.
+package swarm.core.v1;
+
+service Core {
+  // Ask a question: routed through the gate, answered by tier-tools or the
+  // consilium, returned with citations and confidence (the single voice).
+  rpc Ask(AskRequest) returns (AskResponse);
+  // Knowledge-base health (graph size + embedding-namespace stamps).
+  rpc KbStatus(StatusRequest) returns (StatusResponse);
+  // Retrieval over the graph, scope-filtered.
+  rpc KbSearch(SearchRequest) returns (SearchResponse);
+}
+
+message AskRequest {
+  string query = 1;
+  // Allowed visibility scopes for this context (default-deny; empty ⇒ nothing).
+  repeated string scopes = 2;
+}
+
+message Citation {
+  string source = 1;
+  string ref = 2;
+  double confidence = 3;
+}
+
+message AskResponse {
+  string answer = 1;
+  double confidence = 2;
+  string tier = 3;
+  repeated Citation citations = 4;
+}
+
+message StatusRequest {}
+
+message NamespaceStamp {
+  string namespace = 1;
+  string model = 2;
+  uint32 dim = 3;
+  string status = 4;
+}
+
+message StatusResponse {
+  int64 nodes = 1;
+  int64 edges = 2;
+  repeated NamespaceStamp namespaces = 3;
+}
+
+message SearchRequest {
+  string query = 1;
+  repeated string scopes = 2;
+  uint32 limit = 3;
+}
+
+message SearchHit {
+  int64 id = 1;
+  string type = 2;
+  string key = 3;
+  double score = 4;
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;
+}

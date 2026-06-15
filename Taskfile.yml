@@ -24,10 +24,11 @@ tasks:
 
   # ---- lint ---------------------------------------------------------------
   lint:
-    desc: Format/lint/type-check markdown, Python, and Elixir.
+    desc: Format/lint/type-check markdown, Python (ml + cli), and Elixir.
     cmds:
       - task: lint:md
       - task: lint:py
+      - task: lint:cli
       - task: lint:ex
 
   lint:md:
@@ -43,6 +44,14 @@ tasks:
       - uv run ruff format --check .
       - uv run ty check
 
+  lint:cli:
+    desc: Ruff lint + format check + ty type check for the CLI channel (uv-only).
+    dir: cli
+    cmds:
+      - uv run ruff check .
+      - uv run ruff format --check .
+      - uv run ty check
+
   lint:ex:
     desc: mix format check + credo --strict + dialyzer.
     dir: kernel
@@ -53,13 +62,19 @@ tasks:
 
   # ---- test ---------------------------------------------------------------
   test:
-    desc: Run Python and Elixir test suites.
+    desc: Run Python (ml + cli) and Elixir test suites.
     cmds:
       - task: test:py
+      - task: test:cli
       - task: test:ex
 
   test:py:
     dir: ml
+    cmds:
+      - uv run pytest -q
+
+  test:cli:
+    dir: cli
     cmds:
       - uv run pytest -q
 
@@ -70,9 +85,10 @@ tasks:
 
   # ---- proto codegen ------------------------------------------------------
   proto:
-    desc: Regenerate Protobuf stubs for both stacks.
+    desc: Regenerate Protobuf stubs for all stacks.
     cmds:
       - task: proto:py
+      - task: proto:cli
       - task: proto:ex
 
   proto:py:
@@ -90,6 +106,20 @@ tasks:
       # Generated grpc stub uses an absolute import; make it package-relative.
       - sed -i -E 's/^import embed_pb2 as/from . import embed_pb2 as/' src/swarm_ml/_gen/embed_pb2_grpc.py
 
+  proto:cli:
+    desc: Generate Python gRPC stubs for the Core API into cli/src/swarm_cli/_gen.
+    dir: cli
+    cmds:
+      - mkdir -p src/swarm_cli/_gen
+      - >-
+        uv run python -m grpc_tools.protoc -I ../proto
+        --python_out=src/swarm_cli/_gen
+        --grpc_python_out=src/swarm_cli/_gen
+        --pyi_out=src/swarm_cli/_gen
+        ../proto/core.proto
+      - touch src/swarm_cli/_gen/__init__.py
+      - sed -i -E 's/^import core_pb2 as/from . import core_pb2 as/' src/swarm_cli/_gen/core_pb2_grpc.py
+
   proto:ex:
     # Generate via protoc + the protoc-gen-elixir escript directly, NOT
     # `mix protobuf.generate`: the mix task compiles the app first, which fails
@@ -103,7 +133,7 @@ tasks:
       - >-
         mise exec -- bash -c
         'export PATH="$(mise where elixir)/.mix/escripts:$PATH";
-        protoc -I proto --elixir_out=plugins=grpc:kernel/lib/swarm/proto proto/embed.proto'
+        protoc -I proto --elixir_out=plugins=grpc:kernel/lib/swarm/proto proto/embed.proto proto/core.proto'
       # protoc-gen-elixir output isn't `mix format`-clean; format it so the gate passes.
       - cd kernel && mise exec -- mix format "lib/swarm/proto/**/*.{ex,exs}"
 
@@ -132,5 +162,6 @@ tasks:
     cmds:
       - task: proto
       - cd ml && uv sync
+      - cd cli && uv sync
       - cd kernel && mise exec -- mix deps.get
       - cd kernel && mise exec -- mix setup

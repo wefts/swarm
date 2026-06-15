@@ -17,3 +17,14 @@ config :swarm, :embedding, dim: 1024
 # (ADR-8) — measured, not intuited; defaults here are placeholders until
 # calibrated. `lambda` is per-day decay; `saturation_s` is the Hill constant S.
 config :swarm, :decay, lambda: 0.01, saturation_s: 2.0
+
+# Consilium fleet (Domain 4): a mid-tier panel answers in parallel; a stronger,
+# different-family judge synthesizes. Models are reached over the ML boundary
+# (Ollama). The judge should differ from the panel majority to decorrelate
+# blind spots (ADR-7 confident-wrong mitigation).
+config :swarm, :consilium,
+  panel: ["qwen3.6:35b", "qwen3:14b", "gemma4:31b", "glm-4.7-flash"],
+  judge: "llama3.3:70b"
+
+# Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
+config :swarm, :core_api, port: 50061, start_server: true

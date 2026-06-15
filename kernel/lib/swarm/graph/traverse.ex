@@ -96,6 +96,7 @@ defmodule Swarm.Graph.Traverse do
     #{@recursive_step}
           JOIN node n ON n.id = e.dst AND n.scope = ANY($4::text[])
          WHERE w.depth < $3::int AND NOT w.is_cycle
+           AND e.visibility_scope = ANY($4::text[])
     )
     #{@aggregate}
     """

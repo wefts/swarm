@@ -1,0 +1,51 @@
+[project]
+name = "swarm-cli"
+version = "0.1.0"
+description = "Swarm CLI channel (Typer + Rich) over the Core API — renders and accepts input, holds no cognition."
+requires-python = ">=3.13"
+dependencies = [
+    "grpcio>=1.68",
+    "protobuf>=5.28",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.68",
+    "ruff>=0.8",
+    "ty>=0.0.1a1",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+swarm = "swarm_cli.main:app"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swarm_cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["src/swarm_cli/_gen"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.src]
+exclude = ["src/swarm_cli/_gen"]
+
+[tool.pytest.ini_options]
+markers = ["integration: hits a live kernel Core API on Spark; excluded by default"]
+addopts = "-m 'not integration'"

@@ -89,6 +89,31 @@ def test_wrong_dimension_aborts_internal(channel, monkeypatch) -> None:
     assert err.code() == grpc.StatusCode.INTERNAL
 
 
+def test_generate_returns_text_from_the_model(channel, monkeypatch) -> None:
+    monkeypatch.setattr(
+        server_mod, "_call_ollama_generate", lambda *_a, **_k: "hello from the fleet"
+    )
+    stub = embed_pb2_grpc.GeneratorStub(channel)
+    resp = stub.Generate(embed_pb2.GenerateRequest(model="qwen3:8b", prompt="hi"))
+
+    assert resp.text == "hello from the fleet"
+    assert resp.model == "qwen3:8b"
+
+
+def test_generate_failure_aborts_unavailable(channel, monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise server_mod.OllamaGenerateError("down")
+
+    monkeypatch.setattr(server_mod, "_call_ollama_generate", boom)
+    stub = embed_pb2_grpc.GeneratorStub(channel)
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.Generate(embed_pb2.GenerateRequest(model="qwen3:8b", prompt="hi"))
+    err = excinfo.value
+    assert isinstance(err, grpc.Call)
+    assert err.code() == grpc.StatusCode.UNAVAILABLE
+
+
 @pytest.mark.integration
 def test_embed_real_ollama_returns_bge_m3_vectors(channel) -> None:
     stub = embed_pb2_grpc.EmbedderStub(channel)
