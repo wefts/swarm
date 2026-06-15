@@ -24,6 +24,26 @@ defmodule Swarm.Graph.Store do
   end
 
   @doc """
+  Upsert a node by its stable identity `(type, key)` and return its id. Used by
+  ingestion so re-seeing the same entity resolves to the same node rather than
+  duplicating it. `:scope` defaults to `"private"` (default-deny).
+  """
+  @spec upsert_node(String.t(), String.t(), keyword()) :: integer()
+  def upsert_node(type, key, opts \\ []) when is_binary(type) and is_binary(key) do
+    scope = Keyword.get(opts, :scope, "private")
+
+    sql = """
+    INSERT INTO node (type, key, scope)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (type, key) DO UPDATE SET updated_at = now()
+    RETURNING id
+    """
+
+    %{rows: [[id]]} = Repo.query!(sql, [type, key, scope])
+    id
+  end
+
+  @doc """
   Upsert a typed edge on the natural key `(src, type, dst, visibility_scope)`.
 
   Reinforcement (ADR-9): `seen_count` increments only when `provenance` is a

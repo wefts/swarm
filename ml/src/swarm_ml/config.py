@@ -12,9 +12,11 @@ from dataclasses import dataclass
 
 # Defaults only — the live config is whatever the environment says at call time.
 _DEFAULT_BIND = "127.0.0.1:50051"
-_DEFAULT_EMBED_DIM = 768
+_DEFAULT_EMBED_DIM = 1024  # bge-m3
 _DEFAULT_MAX_WORKERS = 8
-_DEFAULT_NAMESPACE = "zero-v0"
+_DEFAULT_NAMESPACE = "bge-m3"
+_DEFAULT_EMBED_MODEL = "bge-m3"
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +27,8 @@ class ServerConfig:
     embed_dim: int
     max_workers: int
     namespace: str
+    embed_model: str
+    ollama_base_url: str
 
 
 def load_config() -> ServerConfig:
@@ -34,6 +38,8 @@ def load_config() -> ServerConfig:
         embed_dim=_env_int("SWARM_ML_EMBED_DIM", _DEFAULT_EMBED_DIM),
         max_workers=_env_int("SWARM_ML_MAX_WORKERS", _DEFAULT_MAX_WORKERS),
         namespace=os.environ.get("SWARM_ML_NAMESPACE", _DEFAULT_NAMESPACE),
+        embed_model=os.environ.get("SWARM_EMBED_MODEL", _DEFAULT_EMBED_MODEL),
+        ollama_base_url=os.environ.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
     )
 
 

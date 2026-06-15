@@ -8,6 +8,7 @@ defmodule Swarm.ML.Embeddings do
   `Swarm.Ports.Model` as adapters outside the kernel and may wrap this boundary.
   """
 
+  alias Swarm.Graph.SchemaMeta
   alias Swarm.Ml.V1.{Embedder, EmbedRequest}
 
   @doc """
@@ -43,6 +44,9 @@ defmodule Swarm.ML.Embeddings do
 
     case Embedder.Stub.embed(channel, request) do
       {:ok, resp} ->
+        # Stamp the embedding namespace on first use (ADR-6); idempotent.
+        :ok = SchemaMeta.stamp(resp.namespace, resp.dim)
+
         {:ok,
          %{
            vectors: Enum.map(resp.vectors, & &1.values),

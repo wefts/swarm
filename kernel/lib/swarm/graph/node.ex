@@ -13,6 +13,7 @@ defmodule Swarm.Graph.Node do
 
   schema "node" do
     field(:type, :string)
+    field(:key, :string)
     field(:vec, Pgvector.Ecto.Vector)
     field(:embed_model, :string)
     field(:scope, :string, default: "private")
@@ -25,7 +26,7 @@ defmodule Swarm.Graph.Node do
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end
 
-  @castable [:type, :vec, :embed_model, :scope, :reliability, :provenance]
+  @castable [:type, :key, :vec, :embed_model, :scope, :reliability, :provenance]
 
   @doc "Changeset for inserting a node. `type` required; `reliability` in [0,1]."
   @spec changeset(t(), map()) :: Ecto.Changeset.t()

@@ -27,6 +27,11 @@ defmodule Swarm.GraphCase do
   @spec truncate_graph() :: :ok
   def truncate_graph do
     Swarm.Repo.query!("TRUNCATE node, edge, edge_provenance RESTART IDENTITY CASCADE")
+    # Reset the in-memory dedup pre-filter so reused provenance keys are fresh.
+    if :ets.whereis(Swarm.Ingest.Dedup) != :undefined do
+      :ets.delete_all_objects(Swarm.Ingest.Dedup)
+    end
+
     :ok
   end
 

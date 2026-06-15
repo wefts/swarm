@@ -12,7 +12,7 @@ defmodule Swarm.Config do
   def ml_boundary do
     %{
       address: env("SWARM_ML_ADDRESS", "127.0.0.1:50051"),
-      namespace: env("SWARM_ML_NAMESPACE", "zero-v0")
+      namespace: env("SWARM_ML_NAMESPACE", "bge-m3")
     }
   end
 
