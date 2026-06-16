@@ -19,7 +19,7 @@ decisions are ADR-1..9 in
 
 ## Machine context
 
-- **Spark** (`spark.mpl.intranet`) is the runtime: aarch64 (Grace), Docker,
+- **Spark** (`dgx_spark`) is the runtime: aarch64 (Grace), Docker,
   Ollama on the host (`localhost:11434`) with a local model fleet.
 - ssh **without** `user@` (ssh config resolves the user); repo on Spark lives at
   `~/Swarm/swarm`.

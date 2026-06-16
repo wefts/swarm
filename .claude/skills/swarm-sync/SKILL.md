@@ -13,7 +13,7 @@ GitLab is the only CI option and is not set up; rsync is the working path.
 
 ## Connection facts
 
-- Host: `spark.mpl.intranet`. **ssh without `user@`** — ssh config resolves the
+- Host: `dgx_spark`. **ssh without `user@`** — ssh config resolves the
   user (`sebor`); forcing `$USER` (searge) fails publickey.
 - Spark is **aarch64** (Grace), Docker present, **uv** at `~/.local/bin/uv`
   (Python = uv only; `uv run` auto-installs deps).
@@ -38,8 +38,8 @@ When running ad hoc over ssh, always export the tool PATH first (`mise` and `uv`
 both live in `~/.local/bin`); Elixir runs through `mise exec`:
 
 ```bash
-ssh spark.mpl.intranet 'export PATH="$HOME/.local/bin:$PATH"; cd <dir> && uv run ...'
-ssh spark.mpl.intranet 'export PATH="$HOME/.local/bin:$PATH"; cd ~/Swarm/swarm && task check'
+ssh dgx_spark 'export PATH="$HOME/.local/bin:$PATH"; cd <dir> && uv run ...'
+ssh dgx_spark 'export PATH="$HOME/.local/bin:$PATH"; cd ~/Swarm/swarm && task check'
 ```
 
 ## Environment split (keep local and Spark separate)

@@ -2,8 +2,8 @@
 # Source me: `. scripts/env.sh`
 
 # SSH target. Leave SSH_USER empty to let ssh config resolve the user/identity
-# (the `spark.mpl.intranet` host alias authenticates without user@).
-export SPARK_HOST="${SPARK_HOST:-spark.mpl.intranet}"
+# (the `dgx_spark` host alias authenticates without user@).
+export SPARK_HOST="${SPARK_HOST:-dgx_spark}"
 export SSH_USER="${SSH_USER:-}"
 export SPARK="${SSH_USER:+${SSH_USER}@}${SPARK_HOST}"
 
