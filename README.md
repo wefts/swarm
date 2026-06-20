@@ -26,7 +26,7 @@ public; secrets never land here.
 | [docs/system_architecture.md](docs/system_architecture.md) | How the software is *built* — microkernel, ports, deployment, repo layout | EN |
 | [docs/storage_engine_spike.md](docs/storage_engine_spike.md) | Storage-engine decision record (the spike + outcome) | EN |
 | [docs/guides/](docs/guides/) | Coding & performance guidelines | EN |
-| [CLAUDE.md](CLAUDE.md) | Operating instructions for Claude in this repo | EN |
+| [AGENTS.md](AGENTS.md) | Operating instructions for agents in this repo | EN |
 
 ## Architecture in one picture
 
