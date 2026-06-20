@@ -21,8 +21,8 @@ decisions are ADR-1..9 in
 
 - **Spark** (`dgx_spark`) is the runtime: aarch64 (Grace), Docker,
   Ollama on the host (`localhost:11434`) with a local model fleet.
-- ssh **without** `user@` (ssh config resolves the user); repo on Spark lives at
-  `~/Swarm/swarm`.
+- ssh **without** `user@` (ssh config resolves the user); public repo on Spark
+  lives at `~/Swarm/swarm`, private hive at `~/Swarm/hive`.
 - **Python is uv-only** (`uv run`, never `pip`/bare `python`). uv at
   `~/.local/bin/uv`.
 - Delivery is rsync over ssh, then run remotely — there is no CI.
@@ -31,9 +31,9 @@ decisions are ADR-1..9 in
 
 - **Clean repo.** No plugin/adapter code, no corpora (wiki/Confluence/tickets),
   no secrets. Scratch goes in `tmp/` (gitignored).
-- **Plugins and data live outside the repo**, reached via `SWARM_PLUGINS_DIR` /
-  `SWARM_DATA_DIR` (system architecture §13). Local and Spark differ only by
-  these env values.
+- **Plugins and data live outside the repo**, normally in the sibling private
+  `../hive` repo and reached via `SWARM_PLUGINS_DIR` / `SWARM_DATA_DIR` (system
+  architecture §13). Local and Spark differ only by these env values.
 - **Microkernel.** Never add a concrete connector/worker/channel/model/skill to
   the kernel — implement the port; the adapter lives outside.
 - **Fail loud.** No success-shaped error values; no silent `except`.

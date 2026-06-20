@@ -528,32 +528,45 @@ local-vs-Spark split is fixed so each side tests its own things.
 
 ### What lives outside the repo
 
+- **Hive / instance repo** — private deployment wiring: compose, env examples,
+  enabled plugins/tools, data roots, and secrets pointers.
 - **Plugins / adapters** — connectors, workers, channels, model providers,
-  skills — each its own package/repo, discovered at runtime via a config path.
-- **Test data / corpora** — internal wiki, Confluence, ticket exports — their own
-  project folder, never committed.
+  skills. Early plugins can live inside the hive; mature public plugins can move
+  to their own repos.
+- **Test data / corpora** — internal wiki, Confluence, ticket exports. These
+  live in the hive or another private data folder, never in the public repo.
 
 ### Sibling-directory convention
 
 ```text
 ~/Swarm/
   swarm/      <- this repo (kernel + ports + docs). Clean, public.
-  plugins/    <- adapters. Outside the repo. Own git.
-  data/       <- corpora / test fixtures. Outside the repo. Never committed.
+  hive/       <- private instance repo (compose, env, plugins, data).
+    plugins/
+      confluence_connector/
+      k8s_tool/
+    data/
 ```
 
 The kernel reads `SWARM_PLUGINS_DIR` and `SWARM_DATA_DIR` from env (default to
-the siblings `../plugins`, `../data`). Local and Spark differ only by these env
-values: locally they point at your own test fixtures; on Spark they point at the
-real corpora in a sibling project folder. The repo content is identical on both.
+the sibling hive paths `../hive/plugins`, `../hive/data`). Local and Spark
+differ only by these env values: locally they point at your own test fixtures;
+on Spark they point at real corpora in a private hive/data folder. The public
+repo content is identical on both.
+
+Plugin directories use the `<domain>_<kind>` naming rule. Examples:
+`confluence_connector`, `k8s_tool`, `slack_channel`, `ollama_model`.
 
 ```mermaid
 flowchart LR
     subgraph Repo["~/Swarm/swarm (clean, public)"]
         K["kernel + ports + docs"]
     end
-    P["~/Swarm/plugins (adapters)"]
-    D["~/Swarm/data (corpora)"]
+    subgraph Hive["~/Swarm/hive (private instance)"]
+        P["plugins/ (adapters)"]
+        D["data/ (corpora)"]
+        C["compose + env"]
+    end
     K -. "SWARM_PLUGINS_DIR" .-> P
     K -. "SWARM_DATA_DIR" .-> D
 ```

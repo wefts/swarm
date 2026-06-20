@@ -21,8 +21,8 @@ public; secrets never land here.
 
 | Document | What it covers | Lang |
 | --- | --- | --- |
-| [docs/swarm_architecture_spec.md](docs/swarm_architecture_spec.md) | How the swarm *thinks* — 17 domains, principles, Design Decisions (ADR-1..9) | UA |
-| [docs/failure_modes_and_open_problems.md](docs/failure_modes_and_open_problems.md) | Failure catalog (anti-patterns) + open problems | UA |
+| [docs/swarm_architecture_spec.md](docs/swarm_architecture_spec.md) | How the swarm *thinks* — 17 domains, principles, Design Decisions (ADR-1..9) | EN |
+| [docs/failure_modes_and_open_problems.md](docs/failure_modes_and_open_problems.md) | Failure catalog (anti-patterns) + open problems | EN |
 | [docs/system_architecture.md](docs/system_architecture.md) | How the software is *built* — microkernel, ports, deployment, repo layout | EN |
 | [docs/storage_engine_spike.md](docs/storage_engine_spike.md) | Storage-engine decision record (the spike + outcome) | EN |
 | [docs/guides/](docs/guides/) | Coding & performance guidelines | EN |
@@ -50,8 +50,17 @@ scripts/      Spark delivery loop + local-fleet delegation (ollama_ask.sh)
 docs/         Architecture, decisions (ADR-1..9), guides
 ```
 
-Plugins/adapters and corpora live **outside** the repo, reached via
-`SWARM_PLUGINS_DIR` / `SWARM_DATA_DIR` (system architecture §13).
+Plugins/adapters and corpora live **outside** the repo, normally in a sibling
+private instance repo called `hive/`, reached via `SWARM_PLUGINS_DIR` /
+`SWARM_DATA_DIR` (system architecture §13).
+
+Typical local checkout:
+
+```text
+swarm/
+  swarm/  public kernel/control-plane repo
+  hive/   private instance/deployment repo
+```
 
 ## Toolchain
 

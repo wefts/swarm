@@ -1,9 +1,10 @@
 defmodule Swarm.Plugins do
   @moduledoc """
   Runtime plugin loading (system architecture §13). Adapters live OUTSIDE the
-  repo in `SWARM_PLUGINS_DIR` (default sibling `../plugins`). The kernel compiles
-  their source at startup and registers modules implementing a port behaviour —
-  here, `Swarm.Ports.Connector`. No adapter code in the kernel.
+  repo in `SWARM_PLUGINS_DIR` (default sibling hive: `../hive/plugins`). The
+  current dev loader compiles trusted Elixir source at startup and registers
+  modules implementing a port behaviour — here, `Swarm.Ports.Connector`. This is
+  a local-dev shortcut, not the future third-party plugin ABI.
 
   Loading is fail-soft per file: a broken plugin is logged and skipped, it does
   not crash the kernel (graceful degradation).
@@ -18,11 +19,12 @@ defmodule Swarm.Plugins do
 
   @doc """
   Resolved plugins directory. `SWARM_PLUGINS_DIR` if set (the normal path —
-  local and Spark differ only by this env); otherwise the repo's sibling
-  `../plugins` (the kernel app runs from `<repo>/kernel`, so two levels up).
+  local and Spark differ only by this env); otherwise the sibling hive's
+  `../hive/plugins` (the kernel app runs from `<repo>/kernel`, so two levels up
+  to the checkout workspace).
   """
   @spec dir() :: String.t()
-  def dir, do: System.get_env("SWARM_PLUGINS_DIR") || Path.expand("../../plugins", File.cwd!())
+  def dir, do: System.get_env("SWARM_PLUGINS_DIR") || Path.expand("../../hive/plugins", File.cwd!())
 
   @doc """
   Compile every `*/*.ex` under `plugins_dir` and return those implementing the
