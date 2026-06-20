@@ -46,7 +46,6 @@ kernel/       Elixir/OTP app `:swarm` (graph, gate, consilium, Core API server)
 ml/           Python ML service (uv; embeddings + generation over gRPC)
 cli/          Python CLI channel (uv; Typer + Rich over the Core API)
 infra/        docker-compose for stateful infra (Postgres+pgvector)
-scripts/      Spark delivery loop + local-fleet delegation (ollama_ask.sh)
 docs/         Architecture, decisions (ADR-1..9), guides
 ```
 
@@ -70,7 +69,7 @@ swarm/
 | Elixir | 1.19.5 (otp-28) | mise (`.tool-versions`) |
 | Python | 3.13 | uv (`.python-version`) |
 | Postgres + pgvector | 16 + 0.8.x | Docker (`infra/`) |
-| Protobuf / gRPC | `grpc` + `protobuf` (Elixir), `grpcio` + `grpcio-tools` (Python) | per-stack |
+| Protobuf / gRPC | Elixir + Python gRPC/protobuf libs | per-stack |
 
 mise manages **Erlang + Elixir only**; **Python is uv-only** (`uv run`, never
 `pip`/bare `python`). Install mise once (`curl https://mise.run | sh`), then
