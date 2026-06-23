@@ -18,9 +18,22 @@ defmodule Swarm.Graph.Store do
   @doc "Insert a node. See `Swarm.Graph.Node` for fields; `type` is required."
   @spec add_node(map()) :: {:ok, Node.t()} | {:error, Ecto.Changeset.t()}
   def add_node(attrs) do
-    %Node{}
-    |> Node.changeset(attrs)
-    |> Repo.insert()
+    Repo.transaction(fn ->
+      case %Node{} |> Node.changeset(attrs) |> Repo.insert() do
+        {:ok, node} ->
+          emit_outbox(
+            "node_added",
+            "node:#{node.id}",
+            %{id: node.id, type: node.type},
+            "node:#{node.id}"
+          )
+
+          node
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
   end
 
   @doc """
@@ -64,7 +77,16 @@ defmodule Swarm.Graph.Store do
       edge_id = upsert_identity(src, dst, type, scope, weight, reliability)
 
       if record_provenance(edge_id, provenance) do
-        %{id: edge_id, seen_count: bump_seen(edge_id), reinforced: true}
+        seen = bump_seen(edge_id)
+
+        emit_outbox(
+          "edge_reinforced",
+          "edge:#{edge_id}",
+          %{id: edge_id, src: src, dst: dst, type: type, seen_count: seen},
+          "edge:#{edge_id}:#{provenance}"
+        )
+
+        %{id: edge_id, seen_count: seen, reinforced: true}
       else
         %{id: edge_id, seen_count: current_seen(edge_id), reinforced: false}
       end
@@ -120,5 +142,22 @@ defmodule Swarm.Graph.Store do
   defp current_seen(edge_id) do
     %{rows: [[seen]]} = Repo.query!("SELECT seen_count FROM edge WHERE id = $1", [edge_id])
     seen
+  end
+
+  # --- Stigmergy signal (swarm ADR-2) ---------------------------------------
+  # Append the transactional outbox row. Called INSIDE the caller's transaction,
+  # so the graph change and its signal commit or roll back together. The single
+  # tailer consumes these in `seq` order to wake the workers that care.
+  @spec emit_outbox(String.t(), String.t(), map(), String.t()) :: :ok
+  defp emit_outbox(change, target_key, payload, idem_key) do
+    Repo.query!(
+      "INSERT INTO outbox (change, target_key, payload, idem_key) VALUES ($1, $2, $3::jsonb, $4)",
+      [change, target_key, Jason.encode!(payload), idem_key]
+    )
+
+    # Wake hint for the tailer (delivered at COMMIT; correctness still rests on
+    # the cursor + poll, so this is best-effort).
+    Repo.query!("SELECT pg_notify('stigmergy', '')")
+    :ok
   end
 end

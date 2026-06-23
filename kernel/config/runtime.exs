@@ -36,4 +36,6 @@ if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.
   config :swarm, :core_api, port: 50061, start_server: false
+  # Tests drive a tailer instance directly; no global tailer racing on the outbox.
+  config :swarm, :stigmergy, enabled: false
 end

@@ -28,3 +28,7 @@ config :swarm, :consilium,
 
 # Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
 config :swarm, :core_api, port: 50061, start_server: true
+
+# Stigmergy tailer (swarm ADR-2): the single reader of the graph-change outbox.
+# `poll_ms` is the fallback cadence; LISTEN/NOTIFY drives the low-latency path.
+config :swarm, :stigmergy, enabled: true, poll_ms: 1_000, gap_ms: 2_000

@@ -3,6 +3,8 @@ defmodule Swarm.Application do
 
   use Application
 
+  alias Swarm.Stigmergy.{Dispatch, Tailer}
+
   @impl Application
   def start(_type, _args) do
     children = [
@@ -20,7 +22,22 @@ defmodule Swarm.Application do
     # one_for_one: a child crash restarts only that child — graceful degradation,
     # not a swarm-wide outage.
     opts = [strategy: :one_for_one, name: Swarm.Supervisor]
-    Supervisor.start_link(children ++ core_api(), opts)
+    Supervisor.start_link(children ++ core_api() ++ stigmergy(), opts)
+  end
+
+  # The stigmergy tailer (swarm ADR-2) — the single reader that turns graph writes
+  # into worker reactions. Disabled in tests, which drive a tailer instance directly.
+  defp stigmergy do
+    cfg = Application.get_env(:swarm, :stigmergy, [])
+
+    if Keyword.get(cfg, :enabled, false) do
+      [
+        Dispatch,
+        {Tailer, [handler: &Dispatch.dispatch/1] ++ Keyword.take(cfg, [:poll_ms, :gap_ms])}
+      ]
+    else
+      []
+    end
   end
 
   # The outward Core API gRPC server (Domain 11) — disabled in tests, which call
