@@ -19,3 +19,9 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
   Accepted · Complete
 - [ADR-5: Connector Ingestion Contract](0005-connector-ingestion-contract.md) —
   Accepted · Complete
+- [ADR-6: Answer-Result Algebra](0006-answer-result-algebra.md) —
+  Accepted · Complete
+- [ADR-7: Self-Model + Asker Identity](0007-self-model-and-identity.md) —
+  Accepted · Complete
+- [ADR-8: Chat Persona + Off-Topic Deflection](0008-chat-persona-and-deflection.md) —
+  Accepted · Complete

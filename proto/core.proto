@@ -19,6 +19,10 @@ message AskRequest {
   string query = 1;
   // Allowed visibility scopes for this context (default-deny; empty ⇒ nothing).
   repeated string scopes = 2;
+  // The asker's resolved identity (T8 / P11). The CHANNEL maps a platform user to
+  // this canonical id (a deployment fact); the kernel uses it to resolve "my X"
+  // and to scope. Empty ⇒ anonymous (a first-person query is then limited).
+  string viewer = 3;
 }
 
 message Citation {
@@ -27,11 +31,23 @@ message Citation {
   double confidence = 3;
 }
 
+// Answer-result algebra (T6): the typed outcome of a lookup. NOT_FOUND (no such
+// item) is distinct from ERROR (transport/adapter failure) and from PARTIAL
+// (some sources failed) — a not-found must never masquerade as an outage.
+enum AnswerStatus {
+  ANSWER_STATUS_UNSPECIFIED = 0;
+  FOUND = 1;
+  NOT_FOUND = 2;
+  PARTIAL = 3;
+  ERROR = 4;
+}
+
 message AskResponse {
   string answer = 1;
   double confidence = 2;
   string tier = 3;
   repeated Citation citations = 4;
+  AnswerStatus status = 5;
 }
 
 message StatusRequest {}
@@ -43,10 +59,21 @@ message NamespaceStamp {
   string status = 4;
 }
 
+// Per-node-type inventory: how many of each kind the system knows (T8 self-model).
+message TypeCount {
+  string type = 1;
+  int64 count = 2;
+}
+
 message StatusResponse {
   int64 nodes = 1;
   int64 edges = 2;
   repeated NamespaceStamp namespaces = 3;
+  // Self-model (T8): per-type inventory, last write activity (ISO-8601), and live
+  // capabilities (attached connectors + the consilium panel) — all from real state.
+  repeated TypeCount inventory = 4;
+  string last_activity = 5;
+  repeated string capabilities = 6;
 }
 
 message SearchRequest {

@@ -17,13 +17,25 @@ defmodule Swarm.Config do
   end
 
   @typedoc "Consilium fleet: parallel panel models and the synthesizing judge."
-  @type consilium :: %{panel: [String.t()], judge: String.t()}
+  @type consilium :: %{panel: [String.t()], judge: String.t(), token_ceiling: pos_integer()}
 
-  @doc "Consilium panel + judge model roster (Domain 4)."
+  @doc "Consilium panel + judge model roster + per-escalation token ceiling (Domain 4)."
   @spec consilium() :: consilium()
   def consilium do
     cfg = Application.get_env(:swarm, :consilium, [])
-    %{panel: Keyword.fetch!(cfg, :panel), judge: Keyword.fetch!(cfg, :judge)}
+
+    %{
+      panel: Keyword.fetch!(cfg, :panel),
+      judge: Keyword.fetch!(cfg, :judge),
+      token_ceiling: Keyword.get(cfg, :token_ceiling, 32_000)
+    }
+  end
+
+  @doc "Hard per-call prompt ceiling at the model boundary (T5, ADR-7); the global backstop."
+  @spec max_prompt_tokens() :: pos_integer()
+  def max_prompt_tokens do
+    Application.get_env(:swarm, :llm, [])
+    |> Keyword.get(:max_prompt_tokens, 64_000)
   end
 
   @doc "Dimensionality of the stored embedding vectors (ADR-6)."

@@ -24,7 +24,17 @@ config :swarm, :decay, lambda: 0.01, saturation_s: 2.0
 # blind spots (ADR-7 confident-wrong mitigation).
 config :swarm, :consilium,
   panel: ["qwen3.6:35b", "qwen3:14b", "gemma4:31b", "glm-4.7-flash"],
-  judge: "llama3.3:70b"
+  judge: "llama3.3:70b",
+  # Per-escalation token ceiling (T5, ADR-7). An escalation whose prompt exceeds
+  # this is refused fail-loud — never silently truncated — so a raw tool/source
+  # payload cannot reach a model (the glpi 385k-token scar).
+  token_ceiling: 32_000
+
+# Hard per-call ceiling at the model boundary (T5, ADR-7): the GLOBAL backstop.
+# Every `Swarm.ML.Generation.generate/3` call — from ANY caller, not just the
+# consilium — is refused fail-loud above this. Set higher than the consilium
+# per-escalation ceiling so the consilium is the tighter, earlier refusal.
+config :swarm, :llm, max_prompt_tokens: 64_000
 
 # Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
 config :swarm, :core_api, port: 50061, start_server: true

@@ -47,15 +47,39 @@ def _fail(err: grpc.RpcError) -> None:
     raise typer.Exit(code=1) from None
 
 
+# Deterministic, channel-owned rendering of the result-algebra status (T6/T7).
+# The channel maps the STRUCTURED status field to a fixed label+style — it never
+# infers the outcome from the answer prose. FOUND/UNSPECIFIED show no banner.
+_STATUS_LABELS: dict[int, tuple[str, str]] = {
+    core_pb2.NOT_FOUND: ("not found", "yellow"),
+    core_pb2.PARTIAL: ("partial — some sources unavailable", "yellow"),
+    core_pb2.ERROR: ("error — knowledge base unavailable", "red"),
+}
+
+
+def _render_status(status: int) -> None:
+    label = _STATUS_LABELS.get(status)
+    if label is not None:
+        text, style = label
+        # No square brackets: rich would parse them as markup tags.
+        _console.print(f"status: {text}", style=style)
+
+
+ViewerOpt = Annotated[str, typer.Option("--viewer", "-v", help="Asker identity (resolves 'my X')")]
+
+
 @app.command()
-def ask(question: str, scope: ScopeOpt = None) -> None:
+def ask(question: str, scope: ScopeOpt = None, viewer: ViewerOpt = "") -> None:
     """Ask a question; the kernel routes it and answers with citations."""
     try:
-        resp = _stub().Ask(core_pb2.AskRequest(query=question, scopes=scope or ["public"]))
+        resp = _stub().Ask(
+            core_pb2.AskRequest(query=question, scopes=scope or ["public"], viewer=viewer)
+        )
     except grpc.RpcError as err:
         _fail(err)
         return
 
+    _render_status(resp.status)
     _console.print(resp.answer)
     if resp.citations:
         table = Table(box=SIMPLE_HEAD)
@@ -81,13 +105,27 @@ def status() -> None:
         _fail(err)
         return
 
-    _console.print(f"nodes={resp.nodes} edges={resp.edges}")
+    _console.print(
+        f"nodes={resp.nodes} edges={resp.edges} last_activity={resp.last_activity or 'never'}"
+    )
+
+    if resp.inventory:
+        inv = Table(box=SIMPLE_HEAD)
+        inv.add_column("Type")
+        inv.add_column("Count")
+        for tc in resp.inventory:
+            inv.add_row(tc.type, str(tc.count))
+        _console.print(inv)
+
     table = Table(box=SIMPLE_HEAD)
     for col in ("Namespace", "Model", "Dim", "Status"):
         table.add_column(col)
     for s in resp.namespaces:
         table.add_row(s.namespace, s.model, str(s.dim), s.status)
     _console.print(table)
+
+    if resp.capabilities:
+        _console.print("capabilities: " + ", ".join(resp.capabilities))
 
 
 @kb_app.command()

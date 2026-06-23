@@ -11,6 +11,13 @@ defmodule Swarm.Gate.Prototypes do
   @prototypes [
     %{intent: :greeting, tier: :tier0, text: "hello hi hey good morning thanks thank you"},
     %{intent: :farewell, tier: :tier0, text: "bye goodbye see you later"},
+    # Off-mission requests (T9): recognized at tier0 so they are DEFLECTED cheaply
+    # (zero-LLM, never an escalation) — a poem/recipe must not burn a model call.
+    %{
+      intent: :off_topic,
+      tier: :tier0,
+      text: "write a poem tell a joke a recipe the weather sing a song write a story"
+    },
     %{
       intent: :recall,
       tier: :tier_tools,

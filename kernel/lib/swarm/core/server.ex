@@ -15,17 +15,19 @@ defmodule Swarm.Core.Server do
     NamespaceStamp,
     SearchHit,
     SearchResponse,
-    StatusResponse
+    StatusResponse,
+    TypeCount
   }
 
   @spec ask(Swarm.Core.V1.AskRequest.t(), GRPC.Server.Stream.t()) :: AskResponse.t()
   def ask(req, _stream) do
-    a = Core.ask(req.query, scopes: scopes(req.scopes))
+    a = Core.ask(req.query, scopes: scopes(req.scopes), viewer: req.viewer)
 
     %AskResponse{
       answer: a.answer,
       confidence: a.confidence,
       tier: a.tier,
+      status: wire_status(a.status),
       citations:
         Enum.map(
           a.citations,
@@ -33,6 +35,15 @@ defmodule Swarm.Core.Server do
         )
     }
   end
+
+  # Core's result-algebra atom → the proto AnswerStatus enum (T6). Total over
+  # `Swarm.Core.status()` — dialyzer enforces it, so a future 5th status fails the
+  # build here (forcing a new clause) rather than silently mis-mapping on the wire.
+  @spec wire_status(Swarm.Core.status()) :: atom()
+  defp wire_status(:found), do: :FOUND
+  defp wire_status(:not_found), do: :NOT_FOUND
+  defp wire_status(:partial), do: :PARTIAL
+  defp wire_status(:error), do: :ERROR
 
   @spec kb_status(Swarm.Core.V1.StatusRequest.t(), GRPC.Server.Stream.t()) :: StatusResponse.t()
   def kb_status(_req, _stream) do
@@ -50,7 +61,10 @@ defmodule Swarm.Core.Server do
             dim: &1.dim,
             status: &1.status
           }
-        )
+        ),
+      inventory: Enum.map(s.inventory, &%TypeCount{type: &1.type, count: &1.count}),
+      last_activity: s.last_activity,
+      capabilities: s.capabilities
     }
   end
 
