@@ -13,3 +13,5 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
 - [ADR-1: Model Residency Scheduler](0001-model-residency-scheduler.md) —
   Proposed · Complete
 - [ADR-2: Stigmergy Signal](0002-stigmergy-signal.md) — Accepted · Complete
+- [ADR-3: Confidence Traversal Bounding](0003-confidence-traversal-bounding.md) —
+  Proposed · Complete
