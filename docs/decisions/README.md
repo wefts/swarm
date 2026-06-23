@@ -17,3 +17,5 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
   Proposed · Complete
 - [ADR-4: Graph Integrity Contract](0004-graph-integrity-contract.md) —
   Accepted · Complete
+- [ADR-5: Connector Ingestion Contract](0005-connector-ingestion-contract.md) —
+  Accepted · Complete
