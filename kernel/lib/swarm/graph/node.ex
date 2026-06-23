@@ -9,6 +9,8 @@ defmodule Swarm.Graph.Node do
 
   import Ecto.Changeset
 
+  alias Swarm.Graph.Contract
+
   @type t :: %__MODULE__{}
 
   schema "node" do
@@ -38,5 +40,9 @@ defmodule Swarm.Graph.Node do
       greater_than_or_equal_to: 0.0,
       less_than_or_equal_to: 1.0
     )
+    # swarm ADR-4: the graph schema is a write-validated contract. Scope is a
+    # closed vocabulary; type is a non-empty lowercase identifier.
+    |> validate_inclusion(:scope, Contract.scopes())
+    |> validate_format(:type, Contract.type_format())
   end
 end

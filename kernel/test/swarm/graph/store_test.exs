@@ -47,9 +47,13 @@ defmodule Swarm.Graph.StoreTest do
                Graph.add_edge(a, b, "mentions", "event-2")
     end
 
-    test "a different visibility scope is a different edge (natural key)", %{a: a, b: b} do
-      {:ok, private} = Graph.add_edge(a, b, "mentions", "event-1", scope: "private")
-      {:ok, public} = Graph.add_edge(a, b, "mentions", "event-1", scope: "public")
+    test "a different visibility scope is a different edge (natural key)" do
+      # Public endpoints so both scopes satisfy the ADR-4 visibility invariant
+      # (a private and a public edge are each ≤ the endpoints).
+      p = add_node!(%{type: "file", scope: "public"})
+      q = add_node!(%{type: "concept", scope: "public"})
+      {:ok, private} = Graph.add_edge(p, q, "mentions", "event-1", scope: "private")
+      {:ok, public} = Graph.add_edge(p, q, "mentions", "event-1", scope: "public")
 
       assert private.id != public.id
       assert public.seen_count == 1

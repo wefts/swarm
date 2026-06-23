@@ -9,6 +9,7 @@ defmodule Swarm.Graph.Store do
   or an app-code read-modify-write. Survives 10× nodes/edges.
   """
 
+  alias Swarm.Graph.Contract
   alias Swarm.Graph.Node
   alias Swarm.Repo
 
@@ -45,6 +46,17 @@ defmodule Swarm.Graph.Store do
   def upsert_node(type, key, opts \\ []) when is_binary(type) and is_binary(key) do
     scope = Keyword.get(opts, :scope, "private")
 
+    # swarm ADR-4: validate at the boundary, fail-loud (raw-SQL path has no
+    # changeset). A malformed type/scope must never reach the shared substrate.
+    case Contract.validate_node(%{type: type, scope: scope}) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "graph contract: #{reason} (type=#{inspect(type)}, scope=#{inspect(scope)})"
+    end
+
     sql = """
     INSERT INTO node (type, key, scope)
     VALUES ($1, $2, $3)
@@ -74,6 +86,17 @@ defmodule Swarm.Graph.Store do
     reliability = Keyword.get(opts, :reliability, 1.0)
 
     Repo.transaction(fn ->
+      # swarm ADR-4: enforce the contract at the write boundary — type/scope
+      # vocabulary, reliability range, and the ADR-5 visibility invariant (edge
+      # scope no wider than the narrowest endpoint). Reject fail-loud; do NOT
+      # silently store a leaking or malformed edge.
+      {src_scope, dst_scope} = endpoint_scopes(src, dst)
+
+      case Contract.validate_edge(src_scope, dst_scope, type, scope, reliability, provenance) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback({:contract, reason})
+      end
+
       edge_id = upsert_identity(src, dst, type, scope, weight, reliability)
 
       if record_provenance(edge_id, provenance) do
@@ -91,6 +114,20 @@ defmodule Swarm.Graph.Store do
         %{id: edge_id, seen_count: current_seen(edge_id), reinforced: false}
       end
     end)
+  end
+
+  # Endpoint scopes for the visibility-invariant check (swarm ADR-4). One indexed
+  # read of both endpoints; a missing node yields a nil scope → rejected. `FOR
+  # SHARE` locks the endpoint rows for this transaction so a concurrent re-scope
+  # cannot widen an endpoint between this check and the edge insert (closes the
+  # read-then-write TOCTOU window; later narrowing is a separate, documented gap).
+  @spec endpoint_scopes(integer(), integer()) :: {String.t() | nil, String.t() | nil}
+  defp endpoint_scopes(src, dst) do
+    %{rows: rows} =
+      Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1) FOR SHARE", [[src, dst]])
+
+    by_id = Map.new(rows, fn [id, scope] -> {id, scope} end)
+    {Map.get(by_id, src), Map.get(by_id, dst)}
   end
 
   # Insert the edge identity, or no-op onto the existing row; return its id. The

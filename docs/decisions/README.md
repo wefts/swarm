@@ -15,3 +15,5 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
 - [ADR-2: Stigmergy Signal](0002-stigmergy-signal.md) — Accepted · Complete
 - [ADR-3: Confidence Traversal Bounding](0003-confidence-traversal-bounding.md) —
   Proposed · Complete
+- [ADR-4: Graph Integrity Contract](0004-graph-integrity-contract.md) —
+  Accepted · Complete
