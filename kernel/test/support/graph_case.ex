@@ -26,7 +26,10 @@ defmodule Swarm.GraphCase do
   @doc "Wipe the graph tables (and reset ids) so each test starts clean."
   @spec truncate_graph() :: :ok
   def truncate_graph do
-    Swarm.Repo.query!("TRUNCATE node, edge, edge_provenance, outbox RESTART IDENTITY CASCADE")
+    Swarm.Repo.query!(
+      "TRUNCATE node, edge, edge_provenance, outbox, dead_letter, stagnant RESTART IDENTITY CASCADE"
+    )
+
     # Reset the stigmergy cursor (the singleton row survives TRUNCATE of outbox).
     Swarm.Repo.query!("UPDATE outbox_cursor SET position = 0 WHERE id = 1")
     # Reset the in-memory dedup pre-filter so reused provenance keys are fresh.

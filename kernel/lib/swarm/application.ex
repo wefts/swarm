@@ -22,7 +22,31 @@ defmodule Swarm.Application do
     # one_for_one: a child crash restarts only that child — graceful degradation,
     # not a swarm-wide outage.
     opts = [strategy: :one_for_one, name: Swarm.Supervisor]
-    Supervisor.start_link(children ++ core_api() ++ stigmergy(), opts)
+    Supervisor.start_link(children ++ core_api() ++ stigmergy() ++ gc() ++ stagnation(), opts)
+  end
+
+  # Stagnation watchdog (swarm ADR-12 / T13) — periodically surfaces unclaimed
+  # coordination traces. Disabled in tests, which call `scan_stalls/1` directly.
+  defp stagnation do
+    cfg = Application.get_env(:swarm, :stagnation, [])
+
+    if Keyword.get(cfg, :enabled, false) do
+      [{Swarm.Coordination.Stagnation, Keyword.take(cfg, [:interval_ms, :ttl_s])}]
+    else
+      []
+    end
+  end
+
+  # Trace GC (swarm ADR-9 / T11) — reaps evaporated traces on an interval.
+  # Disabled in tests, which call `Swarm.Graph.GC.reap/1` directly.
+  defp gc do
+    cfg = Application.get_env(:swarm, :gc, [])
+
+    if Keyword.get(cfg, :enabled, false) do
+      [{Swarm.Graph.GC, Keyword.take(cfg, [:interval_ms, :floor])}]
+    else
+      []
+    end
   end
 
   # The stigmergy tailer (swarm ADR-2) — the single reader that turns graph writes

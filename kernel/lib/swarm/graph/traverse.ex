@@ -54,7 +54,9 @@ defmodule Swarm.Graph.Traverse do
 
   # Decay is applied per hop on `last_seen` (re-confirmation refreshes the clock,
   # aligning confidence with reinforcement). `is_cycle`/`path` prevent revisiting
-  # a node along the same path.
+  # a node along the same path. `e.reward >= 0` (T12): a REFUTED trace is not
+  # traversable AT READ TIME — it cannot be used as ground for the next worker
+  # the instant it is refuted, not only after the next GC cycle.
   @recursive_step """
         SELECT e.dst,
                w.conf * e.reliability *
@@ -63,7 +65,7 @@ defmodule Swarm.Graph.Traverse do
                w.path || e.dst,
                e.dst = ANY(w.path)
           FROM walk w
-          JOIN edge e ON e.src = w.id
+          JOIN edge e ON e.src = w.id AND e.reward >= 0
   """
 
   @aggregate """

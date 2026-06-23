@@ -19,6 +19,9 @@ defmodule Swarm.Graph.Node do
     field(:vec, Pgvector.Ecto.Vector)
     field(:embed_model, :string)
     field(:scope, :string, default: "private")
+    # Zone / tuple-class (T12): `observation` (external evidence) vs `claim`
+    # (LLM-generated — never independent corroboration), and lifecycle classes.
+    field(:kind, :string, default: "observation")
     field(:reliability, :float, default: 1.0)
     field(:provenance, :map, default: %{})
     field(:claimed_by, :string)
@@ -28,7 +31,7 @@ defmodule Swarm.Graph.Node do
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end
 
-  @castable [:type, :key, :vec, :embed_model, :scope, :reliability, :provenance]
+  @castable [:type, :key, :vec, :embed_model, :scope, :kind, :reliability, :provenance]
 
   @doc "Changeset for inserting a node. `type` required; `reliability` in [0,1]."
   @spec changeset(t(), map()) :: Ecto.Changeset.t()
@@ -43,6 +46,7 @@ defmodule Swarm.Graph.Node do
     # swarm ADR-4: the graph schema is a write-validated contract. Scope is a
     # closed vocabulary; type is a non-empty lowercase identifier.
     |> validate_inclusion(:scope, Contract.scopes())
+    |> validate_inclusion(:kind, Contract.kinds())
     |> validate_format(:type, Contract.type_format())
   end
 end

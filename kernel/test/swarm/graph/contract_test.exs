@@ -117,13 +117,13 @@ defmodule Swarm.Graph.ContractTest do
     end
 
     test "upsert_node fails loud on a malformed type" do
-      assert_raise ArgumentError, ~r/graph contract/, fn ->
+      assert_raise Swarm.Graph.ContractError, ~r/graph contract/, fn ->
         Store.upsert_node("Bad-Type", "k1")
       end
     end
 
     test "upsert_node fails loud on an unknown scope" do
-      assert_raise ArgumentError, ~r/graph contract/, fn ->
+      assert_raise Swarm.Graph.ContractError, ~r/graph contract/, fn ->
         Store.upsert_node("file", "k1", scope: "secret")
       end
     end
@@ -132,7 +132,7 @@ defmodule Swarm.Graph.ContractTest do
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()
-      assert Contract.schema_version() == 1
+      assert Contract.schema_version() == 2
     end
   end
 

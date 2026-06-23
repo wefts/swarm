@@ -53,8 +53,7 @@ defmodule Swarm.Graph.Store do
         :ok
 
       {:error, reason} ->
-        raise ArgumentError,
-              "graph contract: #{reason} (type=#{inspect(type)}, scope=#{inspect(scope)})"
+        raise Swarm.Graph.ContractError, {reason, type: type, scope: scope}
     end
 
     sql = """
@@ -114,6 +113,18 @@ defmodule Swarm.Graph.Store do
         %{id: edge_id, seen_count: current_seen(edge_id), reinforced: false}
       end
     end)
+  end
+
+  @doc """
+  Apply external ground-truth reward to a trace (T12, reward-gated persistence).
+  `reward < 0` **refutes** the trace — `Swarm.Graph.GC` then reaps it regardless of
+  strength, so a refuted/hallucinated trace cannot linger as ground for the next
+  worker. `reward >= 0` lets it persist on the normal decay schedule.
+  """
+  @spec set_reward(integer(), number()) :: :ok
+  def set_reward(edge_id, reward) when is_integer(edge_id) and is_number(reward) do
+    Repo.query!("UPDATE edge SET reward = $2 WHERE id = $1", [edge_id, reward])
+    :ok
   end
 
   # Endpoint scopes for the visibility-invariant check (swarm ADR-4). One indexed

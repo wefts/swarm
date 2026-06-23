@@ -41,8 +41,8 @@ defmodule Swarm.IngestTest do
     assert count("edge") == 1
   end
 
-  test "naive timestamp is rejected (never stamped as UTC)" do
-    assert {:error, {:bad_timestamp, _}} =
+  test "naive timestamp is rejected (never stamped as UTC) — quarantined (T10)" do
+    assert {:error, {:quarantined, {:bad_timestamp, _}}} =
              Ingest.ingest(event("p1", occurred_at: ~N[2026-01-01 00:00:00]))
   end
 

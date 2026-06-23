@@ -22,10 +22,14 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
-  @schema_version 1
+  @schema_version 2
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/
+  # Graph zones / tuple-classes (T12). `observation` = external evidence;
+  # `claim` = LLM-generated (NEVER independent corroboration, ADR-3); the rest are
+  # lifecycle classes. Each kind may carry its own TTL/compaction policy.
+  @kinds ~w(observation claim hypothesis coordination lease derived presentation durable_fact)
 
   @doc "The closed scope vocabulary."
   @spec scopes() :: [String.t()]
@@ -38,6 +42,10 @@ defmodule Swarm.Graph.Contract do
   @doc "Allowed `type` format (non-empty lowercase identifier)."
   @spec type_format() :: Regex.t()
   def type_format, do: @type_format
+
+  @doc "The closed node-kind vocabulary (graph zones / tuple-classes, T12)."
+  @spec kinds() :: [String.t()]
+  def kinds, do: @kinds
 
   @doc "The compiled-in graph schema version (mirrors the `graph_schema_meta` stamp)."
   @spec schema_version() :: pos_integer()

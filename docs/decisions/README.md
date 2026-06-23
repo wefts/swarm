@@ -25,3 +25,11 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
   Accepted · Complete
 - [ADR-8: Chat Persona + Off-Topic Deflection](0008-chat-persona-and-deflection.md) —
   Accepted · Complete
+- [ADR-9: Backpressure + Poison/DLQ](0009-backpressure-and-dlq.md) —
+  Accepted · Complete
+- [ADR-10: Trace Lifecycle (decay-driven GC)](0010-trace-lifecycle-gc.md) —
+  Accepted · Complete
+- [ADR-11: Graph Zones + Claim Typing (N3)](0011-graph-zones-and-claim-typing.md) —
+  Accepted · Complete
+- [ADR-12: Coordination Control](0012-coordination-control.md) —
+  Accepted · Complete

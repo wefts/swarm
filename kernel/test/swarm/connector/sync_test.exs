@@ -56,6 +56,16 @@ defmodule Swarm.Connector.SyncTest do
     assert file_count() == 250
   end
 
+  test "backpressure: a large source is pulled in bounded pages, not buffered whole" do
+    # 600 items at page 50 → 12 bounded pulls; memory is page-bounded, not
+    # source-bounded (T10 — the demand-driven backpressure that stops a flood).
+    {:ok, r} = Sync.run(HostileConnector, count: 600, page_size: 50)
+
+    assert r.complete?
+    assert r.ingested == 600
+    assert r.pages == 12
+  end
+
   test "a flaky partial fetch is retried; the run still completes" do
     # Without the retry, page 3 fails and the run is incomplete. Completing at
     # 250 proves the kernel recovered the flaky page.

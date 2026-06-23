@@ -38,4 +38,8 @@ if config_env() == :test do
   config :swarm, :core_api, port: 50061, start_server: false
   # Tests drive a tailer instance directly; no global tailer racing on the outbox.
   config :swarm, :stigmergy, enabled: false
+  # Tests call Swarm.Graph.GC.reap/1 directly; no global GC reaping under them.
+  config :swarm, :gc, enabled: false
+  # Tests call Swarm.Coordination.Stagnation.scan_stalls/1 directly.
+  config :swarm, :stagnation, enabled: false
 end

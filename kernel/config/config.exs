@@ -42,3 +42,11 @@ config :swarm, :core_api, port: 50061, start_server: true
 # Stigmergy tailer (swarm ADR-2): the single reader of the graph-change outbox.
 # `poll_ms` is the fallback cadence; LISTEN/NOTIFY drives the low-latency path.
 config :swarm, :stigmergy, enabled: true, poll_ms: 1_000, gap_ms: 2_000
+
+# Trace GC (swarm ADR-9 / T11): reap evaporated traces hourly. `floor` is the
+# decayed-strength below which a trace is noise — re-derive per corpus scale.
+config :swarm, :gc, enabled: true, interval_ms: 3_600_000, floor: 0.05
+
+# Stagnation watchdog (swarm ADR-12 / T13): surface unclaimed coordination traces
+# every 10 min; `ttl_s` is the age past which an unclaimed trace is a stalled claim.
+config :swarm, :stagnation, enabled: true, interval_ms: 600_000, ttl_s: 3_600

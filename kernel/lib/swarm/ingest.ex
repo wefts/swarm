@@ -23,6 +23,7 @@ defmodule Swarm.Ingest do
   """
 
   alias Swarm.Graph.Store
+  alias Swarm.Ingest.DeadLetter
   alias Swarm.Ingest.Dedup
 
   require Logger
@@ -33,17 +34,37 @@ defmodule Swarm.Ingest do
   Ingest one normalized event map. Returns `{:ok, :written}`, `{:ok, :duplicate}`
   (provenance already seen), or a typed `{:error, reason}` (fail-loud).
   """
-  @spec ingest(map()) :: {:ok, :written | :duplicate} | {:error, term()}
+  @spec ingest(map()) :: {:ok, :written | :duplicate} | {:error, {:quarantined, term()}}
   def ingest(event) do
-    with {:ok, norm} <- normalize(event) do
-      if Dedup.seen?(norm.provenance) do
-        {:ok, :duplicate}
-      else
-        :ok = write(norm)
-        Dedup.mark(norm.provenance)
-        {:ok, :written}
+    case normalize(event) do
+      {:error, reason} -> quarantine(event, reason)
+      {:ok, norm} -> ingest_normalized(event, norm)
+    end
+  end
+
+  @spec ingest_normalized(map(), map()) ::
+          {:ok, :written | :duplicate} | {:error, {:quarantined, term()}}
+  defp ingest_normalized(event, norm) do
+    if Dedup.seen?(norm.provenance) do
+      {:ok, :duplicate}
+    else
+      case write(norm) do
+        :ok ->
+          Dedup.mark(norm.provenance)
+          {:ok, :written}
+
+        {:error, reason} ->
+          quarantine(event, reason)
       end
     end
+  end
+
+  # A poison trace → the dead-letter zone (T10), with its reason. The pipeline
+  # keeps running; the event is recorded, never silently dropped, never re-entered.
+  @spec quarantine(map(), term()) :: {:error, {:quarantined, term()}}
+  defp quarantine(event, reason) do
+    DeadLetter.quarantine(event, reason)
+    {:error, {:quarantined, reason}}
   end
 
   # --- normalization -------------------------------------------------------
@@ -109,17 +130,28 @@ defmodule Swarm.Ingest do
 
   # --- write ---------------------------------------------------------------
 
-  @spec write(map()) :: :ok
+  # `:ok`, or `{:error, reason}` if the write hits a graph-contract violation
+  # (ADR-4) — a malformed type/scope is a poison trace, NOT a kernel crash. The
+  # whole event's tx rolls back so a bad relation never half-writes.
+  @spec write(map()) :: :ok | {:error, term()}
   defp write(norm) do
-    {:ok, :ok} =
+    result =
       Swarm.Repo.transaction(fn ->
         ids = upsert_entities(norm.entities)
         scopes = Map.new(norm.entities, &{&1.key, &1.scope})
-        Enum.each(norm.relations, &write_relation(&1, ids, scopes, norm.provenance))
-        :ok
+        write_relations(norm.relations, ids, scopes, norm.provenance)
       end)
 
-    :ok
+    case result do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    # A graph-contract violation (ADR-4) is POISON → quarantine. The rescue is
+    # specific (`ContractError`, not bare `ArgumentError`) so a real bug still
+    # crashes loud. A transport failure (Postgrex/DBConnection) is NOT poison —
+    # it is transient and deliberately propagates (the not-found-vs-outage rule).
+    e in [Swarm.Graph.ContractError] -> {:error, {:contract, e.reason}}
   end
 
   @spec upsert_entities([map()]) :: %{optional(String.t()) => integer()}
@@ -127,13 +159,30 @@ defmodule Swarm.Ingest do
     Map.new(entities, fn e -> {e.key, Store.upsert_node(e.type, e.key, scope: e.scope)} end)
   end
 
-  @spec write_relation(map(), map(), map(), String.t()) :: :ok
+  # Write every relation in the event's transaction; a contract rejection on any
+  # one rolls the whole event back (so it quarantines, not half-writes).
+  @spec write_relations([map()], map(), map(), String.t()) :: :ok
+  defp write_relations(relations, ids, scopes, provenance) do
+    Enum.each(relations, fn rel ->
+      case write_relation(rel, ids, scopes, provenance) do
+        :ok -> :ok
+        {:error, reason} -> Swarm.Repo.rollback(reason)
+      end
+    end)
+
+    :ok
+  end
+
+  @spec write_relation(map(), map(), map(), String.t()) :: :ok | {:error, term()}
   defp write_relation(rel, ids, scopes, provenance) do
     case {Map.get(ids, rel.from), Map.get(ids, rel.to)} do
       {src, dst} when is_integer(src) and is_integer(dst) ->
         scope = narrowest(Map.get(scopes, rel.from), Map.get(scopes, rel.to))
-        {:ok, _} = Store.add_edge(src, dst, rel.type, provenance, scope: scope)
-        :ok
+
+        case Store.add_edge(src, dst, rel.type, provenance, scope: scope) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
 
       _ ->
         # A relation referencing an entity not in this event is dropped with a

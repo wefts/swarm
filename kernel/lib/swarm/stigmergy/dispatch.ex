@@ -15,6 +15,7 @@ defmodule Swarm.Stigmergy.Dispatch do
   """
   use GenServer
 
+  alias Swarm.Coordination.Stagnation
   alias Swarm.Stigmergy.Lane
 
   def start_link(opts \\ []) do
@@ -44,6 +45,11 @@ defmodule Swarm.Stigmergy.Dispatch do
 
   def handle_call({:dispatch, row}, _from, state) do
     handlers = Map.get(state.subs, row.change, [])
+
+    # Bystander-effect guard (T13): a row no subscription matches is SURFACED to the
+    # stagnation monitor, not silently dropped into a no-op lane.
+    if handlers == [], do: Stagnation.record_unmatched(row)
+
     {lane, lanes} = ensure_lane(state.lanes, row.target_key)
     GenServer.cast(lane, {:invoke, handlers, row})
     {:reply, :ok, %{state | lanes: lanes}}
