@@ -1,0 +1,12 @@
+# Build context hygiene for the kernel prod image.
+# Keep mix.lock and priv/ — they are REQUIRED for a reproducible release.
+
+_build/
+deps/
+.elixir_ls/
+cover/
+doc/
+tmp/
+*.log
+.DS_Store
+# The release is rebuilt inside the image; never ship host build output.

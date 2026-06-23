@@ -9,6 +9,7 @@ defmodule Swarm.ML.Embeddings do
   """
 
   alias Swarm.Graph.SchemaMeta
+  alias Swarm.ML.Boundary
   alias Swarm.Ml.V1.{Embedder, EmbedRequest}
 
   @doc """
@@ -24,17 +25,7 @@ defmodule Swarm.ML.Embeddings do
     cfg = Swarm.Config.ml_boundary()
     namespace = Keyword.get(opts, :namespace, cfg.namespace)
 
-    case GRPC.Stub.connect(cfg.address) do
-      {:ok, channel} ->
-        try do
-          call(channel, texts, namespace)
-        after
-          GRPC.Stub.disconnect(channel)
-        end
-
-      {:error, reason} ->
-        {:error, {:connect_failed, reason}}
-    end
+    Boundary.with_channel(cfg.address, &call(&1, texts, namespace))
   end
 
   @spec call(GRPC.Channel.t(), [String.t()], String.t()) ::

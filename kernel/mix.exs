@@ -10,7 +10,21 @@ defmodule Swarm.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      releases: releases(),
       dialyzer: [plt_add_apps: [:ex_unit, :mix]]
+    ]
+  end
+
+  # Production release (Task: dockerization). `runtime.exs` is fully env-driven,
+  # so one assembled release runs in every environment — only the env differs.
+  # `:tar` also emits a tarball, a self-contained artifact for an offline machine
+  # (the "move somewhere with no internet and it still runs" requirement).
+  defp releases do
+    [
+      swarm: [
+        include_executables_for: [:unix],
+        steps: [:assemble, :tar]
+      ]
     ]
   end
 

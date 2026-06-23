@@ -13,8 +13,11 @@ here.
 - Elixir/OTP kernel in `kernel/`.
 - Python ML service in `ml/`.
 - Python CLI channel in `cli/`.
-- Generic stateful infra in `infra/`.
-- Kernel-specific architecture and engineering docs in `docs/`.
+- Local dev/test database substrate in `dev/` (not deployment — that is Hive's).
+- Production image recipes: `kernel/Dockerfile`, `ml/Dockerfile` (packaging only;
+  dev still runs on the host). Orchestration lives in Hive.
+- Kernel-specific architecture and engineering docs in `docs/` (design specs in
+  `docs/design/`, decisions in `docs/decisions/`).
 
 This repo does **not** own concrete plugins, private corpora, private env files,
 or secrets. Those belong outside the public kernel, normally in sibling `../hive`.
@@ -42,7 +45,7 @@ or secrets. Those belong outside the public kernel, normally in sibling `../hive
 - Erlang/OTP and Elixir are managed by `mise` using `.tool-versions`.
 - Python is `uv` only. Do not use `pip` or bare `python`.
 - Python version is pinned by `.python-version`.
-- Postgres + pgvector run through Docker using `infra/`.
+- Postgres + pgvector run through Docker using `dev/`.
 
 ## Common Commands
 

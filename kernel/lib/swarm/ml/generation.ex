@@ -6,6 +6,7 @@ defmodule Swarm.ML.Generation do
   which fleet model the pillar calls over Ollama.
   """
 
+  alias Swarm.ML.Boundary
   alias Swarm.Ml.V1.{GenerateRequest, Generator}
 
   @doc """
@@ -23,17 +24,7 @@ defmodule Swarm.ML.Generation do
       json: Keyword.get(opts, :json, false)
     }
 
-    case GRPC.Stub.connect(cfg.address) do
-      {:ok, channel} ->
-        try do
-          call(channel, request)
-        after
-          GRPC.Stub.disconnect(channel)
-        end
-
-      {:error, reason} ->
-        {:error, {:connect_failed, reason}}
-    end
+    Boundary.with_channel(cfg.address, &call(&1, request))
   end
 
   @spec call(GRPC.Channel.t(), GenerateRequest.t()) :: {:ok, String.t()} | {:error, term()}

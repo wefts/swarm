@@ -1,7 +1,7 @@
 import Config
 
 # DB connection is env-driven: local and Spark differ only by environment, never
-# by committed values. Defaults match infra/docker-compose.yml for local dev;
+# by committed values. Defaults match dev/docker-compose.yml for local dev;
 # real secrets come from the environment, never from this file.
 repo_opts = [
   username: System.get_env("SWARM_DB_USER", "swarm"),

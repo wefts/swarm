@@ -1,0 +1,14 @@
+# Scoped to `docker build -f ml/Dockerfile .` (context = swarm/ root).
+# BuildKit prefers this <dockerfile>.dockerignore over the root .dockerignore.
+# Whitelist only what the ML image needs: ml/ source + proto/ contracts.
+*
+!ml
+!proto
+
+# Within the kept dirs, drop host build/cache cruft (stubs are regenerated).
+ml/.venv
+ml/_build
+ml/**/__pycache__
+ml/.pytest_cache
+ml/.ruff_cache
+ml/src/swarm_ml/_gen

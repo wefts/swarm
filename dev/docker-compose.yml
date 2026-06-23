@@ -1,5 +1,8 @@
-# Stateful infra for the swarm kernel. The app runs on the host (mix / uv);
-# only Postgres+pgvector is containerized. Storage was decided by the spike:
+# Dev/test substrate for the Swarm kernel — NOT deployment. Deployment is
+# orchestrated in Hive, which includes this file; this fragment only provides
+# the one stateful dependency the kernel needs to develop and test locally.
+# The app runs on the host (mix / uv); only Postgres+pgvector is containerized.
+# Storage was decided by the spike:
 # Postgres + pgvector (docs/storage_engine_spike.md). No Memgraph.
 #
 # Ollama runs on the host and is reached via OLLAMA_BASE_URL
@@ -9,7 +12,7 @@
 # and set OLLAMA_BASE_URL=http://host.docker.internal:11434. Never hardcode it.
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${HUB_REGISTRY:-dockerhub.smile.fr}/pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
     environment:
       POSTGRES_USER: ${SWARM_DB_USER:-swarm}
       POSTGRES_PASSWORD: ${SWARM_DB_PASSWORD:-swarm}

@@ -148,14 +148,14 @@ tasks:
 
   # ---- infra + setup ------------------------------------------------------
   db:up:
-    desc: Start Postgres+pgvector (infra/docker-compose.yml).
+    desc: Start Postgres+pgvector (dev/docker-compose.yml).
     cmds:
-      - docker compose -f infra/docker-compose.yml up -d
+      - docker compose -f dev/docker-compose.yml up -d
 
   db:down:
     desc: Stop Postgres+pgvector.
     cmds:
-      - docker compose -f infra/docker-compose.yml down
+      - docker compose -f dev/docker-compose.yml down
 
   setup:
     desc: Fetch deps and create/migrate the DB (requires Postgres up).

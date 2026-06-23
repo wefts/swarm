@@ -45,7 +45,7 @@ proto/        Protobuf contracts (ports + the Elixir<->Python boundary + Core AP
 kernel/       Elixir/OTP app `:swarm` (graph, gate, consilium, Core API server)
 ml/           Python ML service (uv; embeddings + generation over gRPC)
 cli/          Python CLI channel (uv; Typer + Rich over the Core API)
-infra/        docker-compose for stateful infra (Postgres+pgvector)
+dev/          docker-compose for the local dev/test DB (Postgres+pgvector)
 docs/         Architecture, decisions (ADR-1..9), guides
 ```
 
@@ -68,7 +68,7 @@ swarm/
 | Erlang/OTP | 28.5 | mise (`.tool-versions`) |
 | Elixir | 1.19.5 (otp-28) | mise (`.tool-versions`) |
 | Python | 3.13 | uv (`.python-version`) |
-| Postgres + pgvector | 16 + 0.8.x | Docker (`infra/`) |
+| Postgres + pgvector | 16 + 0.8.x | Docker (`dev/`) |
 | Protobuf / gRPC | Elixir + Python gRPC/protobuf libs | per-stack |
 
 mise manages **Erlang + Elixir only**; **Python is uv-only** (`uv run`, never
@@ -80,7 +80,7 @@ mise manages **Erlang + Elixir only**; **Python is uv-only** (`uv run`, never
 Gates run through [Task](https://taskfile.dev) (`Taskfile.yml`), both stacks:
 
 ```bash
-task db:up      # start Postgres+pgvector (infra/docker-compose.yml)
+task db:up      # start Postgres+pgvector (dev/docker-compose.yml)
 task setup      # generate proto stubs, fetch deps, create + migrate the DB
 task lint       # markdown + Python (ruff/ty) + Elixir (format/credo/dialyzer)
 task test       # Python (pytest) + Elixir (mix test)
@@ -94,5 +94,8 @@ Prove the cross-language boundary end to end: run the ML service
 
 - Quality gates, review, and the Spark delivery loop are Claude skills:
   `swarm-check`, `swarm-review`, `swarm-sync`.
-- Stateful infra runs in Docker; the app (kernel, ML) runs on the host.
-- See [docs/guides/](docs/guides/) for engineering standards.
+- **Dev:** stateful infra in Docker, app (kernel, ML) on the host — fast loop.
+- **Prod:** kernel and ML are packaged as images (`kernel/Dockerfile`,
+  `ml/Dockerfile`); the full stack is orchestrated from the Hive repo. See
+  [docs/design/](docs/design/) for the design and [docs/guides/](docs/guides/)
+  for engineering standards.
