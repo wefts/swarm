@@ -575,16 +575,17 @@ flowchart LR
 
 - **Stateful infra in Docker** (`docker compose`): Postgres+pgvector now,
   Memgraph only if a later traversal re-test reopens the choice.
-- **App on the host** via `mix` (Elixir kernel) and `uv` (Python ML). Keeping the
-  app on the host — not containerized — is the simplest path and matches how the
-  storage spike ran. Python is uv-only.
+- **Dev — app on the host** via `mix` (Elixir kernel) and `uv` (Python ML): the
+  fast inner loop, no image build. Python is uv-only.
+- **Prod — fully containerized**: the kernel and ML are packaged as images
+  (`<repo>/{kernel,ml}/Dockerfile`, DHI bases) and the whole stack runs in the
+  Hive compose. Dev and prod stay in harmony. See
+  `docs/design/dockerization-design.md` and `../../hive/docs/operations.md`.
 
-### Ollama from Docker
+### Ollama
 
-Ollama runs on the Spark host with the local model fleet. Because the app runs on
-the host, it reaches Ollama as plain `http://localhost:11434` — no Docker
-networking problem. **If** a component is later containerized, give its compose
-service `extra_hosts: ["host.docker.internal:host-gateway"]` (Linux/Docker
-20.10+) and set `OLLAMA_BASE_URL=http://host.docker.internal:11434`. The URL is
-always read from env (`OLLAMA_BASE_URL`), never hardcoded, so host vs container
-vs local differ by config alone.
+The local model fleet runs under Ollama. **Prod** runs Ollama as a **GPU compose
+service**, reached over the compose network as `http://ollama:11434` (host models
+bind-mounted read-only). **Dev** (app on the host) reaches a host Ollama at
+`http://localhost:11434`. The URL is always read from env (`OLLAMA_BASE_URL`),
+never hardcoded — host vs container vs local differ by config alone.

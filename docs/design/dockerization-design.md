@@ -1,11 +1,21 @@
 ---
 date: 2026-06-22
-status: Approved
-scope: Change 1 done; Changes 2–4 documented follow-ons
+status: built
+scope: All changes shipped; the full stack runs end-to-end (see Built note)
 owner: swarm
 ---
 
 # Dockerization Design — Swarm packaging, Hive orchestration
+
+> **Built (synced to reality).** All changes below shipped. The stack runs end to
+> end: DHI images (kernel 0 CVE; ml debian13 0 CRITICAL), the full `hive/` compose
+> (postgres + GPU **Ollama containerized** + ml replicas + kernel + one-shot
+> migrate), a **proven offline boot** from a local registry, digest-pinned bases
+> behind a 3-tier registry (local → Smile public `dockerhub.smile.fr`/`dhi.smile.fr`
+> → upstream), `init:true` zombie-reaping, a 2h soak, and ml HA replicas. Two
+> deviations from the original plan, both deliberate: **Ollama is containerized on
+> the GPU** (Change 3 first assumed host Ollama), and base images come from the
+> **Smile public mirror**, not the intranet. See `hive/docs/operations.md`.
 
 ## Problem
 
