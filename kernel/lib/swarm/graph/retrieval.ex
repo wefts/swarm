@@ -82,7 +82,16 @@ defmodule Swarm.Graph.Retrieval do
     k = Keyword.get(opts, :rrf_k, 60)
     spans = Keyword.get(opts, :spans, 3)
     floor = Keyword.get(opts, :floor, configured_floor())
-    qvec = if Keyword.get(opts, :dense, true), do: query_vec(query, opts), else: nil
+
+    # An explicitly supplied query vector ALWAYS wins (tests, callers that pre-embed);
+    # otherwise embed only if the dense arm is enabled (config-gated, so unit tests
+    # without an ML sidecar skip the round-trip and run lexical-only).
+    qvec =
+      cond do
+        vec = Keyword.get(opts, :query_vec) -> Pgvector.new(vec)
+        Keyword.get(opts, :dense, dense_default?()) -> embed_query(query, opts)
+        true -> nil
+      end
 
     memories =
       query
@@ -226,6 +235,13 @@ defmodule Swarm.Graph.Retrieval do
     Application.get_env(:swarm, :retrieval, [])[:floor] || @default_floor
   end
 
+  # Whether the dense arm is on by default. True in production; a deployment (or
+  # test env) with no embedding sidecar sets `config :swarm, :retrieval, dense: false`
+  # so retrieval runs lexical-only instead of paying an unreachable-ML round-trip.
+  defp dense_default? do
+    Application.get_env(:swarm, :retrieval, [])[:dense] != false
+  end
+
   # Attach node identity + trust (reliability) — every memory names its node.
   defp attach_identity([]), do: []
 
@@ -268,17 +284,10 @@ defmodule Swarm.Graph.Retrieval do
 
   # --- query embedding -------------------------------------------------------
 
-  # The query vector: a precomputed `:query_vec`, else embed the query (injected or
-  # the real boundary). On any embed failure the dense arm is skipped (nil) — the
-  # lexical arm still answers, so retrieval degrades narrowly, never errors.
-  @spec query_vec(String.t(), keyword()) :: Pgvector.t() | nil
-  defp query_vec(query, opts) do
-    case Keyword.get(opts, :query_vec) do
-      nil -> embed_query(query, opts)
-      vec -> Pgvector.new(vec)
-    end
-  end
-
+  # Embed the query (injected `:embed_fun` or the real boundary). On any embed
+  # failure the dense arm is skipped (nil) — the lexical arm still answers, so
+  # retrieval degrades narrowly, never errors.
+  @spec embed_query(String.t(), keyword()) :: Pgvector.t() | nil
   defp embed_query(query, opts) do
     embed_fun = Keyword.get(opts, :embed_fun)
 

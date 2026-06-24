@@ -12,6 +12,7 @@ defmodule Swarm.Core do
   """
 
   alias Swarm.{Consilium, Gate, Repo}
+  alias Swarm.Graph.Retrieval
 
   @default_scopes ["public"]
   @search_limit 10
@@ -113,10 +114,79 @@ defmodule Swarm.Core do
   # programmer bug still crashes loudly instead of being mislabeled an "outage".
   @spec retrieve(String.t(), [String.t()], keyword()) :: retrieval()
   defp retrieve(query, scopes, opts) do
-    {:ok, search(query, scopes, opts)}
+    {:ok, hybrid_hits(query, scopes, opts)}
   rescue
     e in [Postgrex.Error, DBConnection.ConnectionError] ->
       {:error, {:retrieval_failed, Exception.message(e)}}
+  end
+
+  # The default retriever (swarm ADR-14 §5): content recall through the hybrid,
+  # floor-gated `Retrieval.search` (so the answer path inherits both content-level
+  # matching and the ability to return nothing for out-of-scope queries), unioned
+  # with the title/identity key search. An owner-scoped ("my X") ask is an
+  # ownership lookup the content retriever cannot narrow, so it stays purely
+  # key-based (the T8 contract). `Retrieval.search` degrades to lexical-only if the
+  # embedding boundary is unreachable, so this never hard-fails on a missing ML
+  # sidecar — a genuine DB transport failure still propagates to the rescue above.
+  @spec hybrid_hits(String.t(), [String.t()], keyword()) :: [hit()]
+  defp hybrid_hits(query, scopes, opts) do
+    owner = Keyword.get(opts, :owner)
+    limit = Keyword.get(opts, :limit, @search_limit)
+    key_hits = query |> search(scopes, opts) |> gate_key_hits(query)
+
+    if owner do
+      key_hits
+    else
+      content_hits =
+        query
+        |> Retrieval.search(scopes, limit: limit, expand: false)
+        |> Map.fetch!(:memories)
+        |> Enum.map(&%{id: &1.node_id, type: &1.type, key: &1.key, score: &1.relevance})
+
+      merge_hits(content_hits, key_hits, limit)
+    end
+  end
+
+  # Relevance gate on the title/identity (key-ILIKE) arm: a key hit must match at
+  # least HALF (ceil) of the query's significant terms — so an entity that
+  # incidentally shares ONE word with a multi-word off-topic question ("cook" in
+  # "how do I cook a mushroom risotto" matching a node "Villa Cook") is NOT
+  # admitted, and the answer path can still refuse. A single- or two-term query
+  # (e.g. "ticket", "about postgres") needs just one term, so identity/inventory
+  # lookups keep working. The fraction (not a flat `min(2,…)`) tolerates filler
+  # words that survive stop-word stripping (e.g. "tell").
+  @spec gate_key_hits([hit()], String.t()) :: [hit()]
+  defp gate_key_hits(hits, query) do
+    terms = query_terms(query)
+    needed = div(length(terms) + 1, 2)
+
+    if needed == 0 do
+      hits
+    else
+      Enum.filter(hits, fn h ->
+        kd = String.downcase(h.key)
+        Enum.count(terms, &key_term_match?(kd, &1)) >= needed
+      end)
+    end
+  end
+
+  # A query term matches a key only as a DELIMITED token (start/end or a
+  # non-alphanumeric boundary, so `_`/`/`/`-`/space all separate) — never a bare
+  # substring. Kills incidental false matches ("war" inside "Award", "change"
+  # inside "exchange") while still matching `storage` in `/docs/storage_engine.md`.
+  @spec key_term_match?(String.t(), String.t()) :: boolean()
+  defp key_term_match?(key_down, term) do
+    Regex.match?(~r/(^|[^[:alnum:]])#{Regex.escape(term)}([^[:alnum:]]|$)/u, key_down)
+  end
+
+  # Union content hits (primary, ranked by relevance) with key hits, de-duped by
+  # node id, capped at the limit.
+  @spec merge_hits([hit()], [hit()], pos_integer()) :: [hit()]
+  defp merge_hits(primary, secondary, limit) do
+    seen = MapSet.new(primary, & &1.id)
+
+    (primary ++ Enum.reject(secondary, &MapSet.member?(seen, &1.id)))
+    |> Enum.take(limit)
   end
 
   @doc """

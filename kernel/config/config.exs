@@ -13,6 +13,16 @@ config :swarm, Swarm.Repo, types: Swarm.PostgrexTypes
 # bge-m3 (multilingual UA/FR/EN), the chosen embedding model (Task 03).
 config :swarm, :embedding, dim: 1024
 
+# Hybrid retrieval (swarm ADR-14 §5). `floor` is the absolute-cosine relevance gate
+# (dense-only hits below it are out-of-scope → `:not_found`). `dense` toggles the
+# vector arm; the test env has no embedding sidecar (and no embedded chunks), so it
+# runs lexical-only — disabled below — to avoid an unreachable-ML round-trip per query.
+config :swarm, :retrieval, floor: 0.45, dense: true
+
+if config_env() == :test do
+  config :swarm, :retrieval, floor: 0.45, dense: false
+end
+
 # Decay + saturation parameters (ADR-9). These belong to the tuning inventory
 # (ADR-8) — measured, not intuited; defaults here are placeholders until
 # calibrated. `lambda` is per-day decay; `saturation_s` is the Hill constant S.
