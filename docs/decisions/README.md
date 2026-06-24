@@ -35,3 +35,5 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
   Accepted · Complete
 - [ADR-13: Entity Resolution](0013-entity-resolution.md) —
   Proposed · Complete
+- [ADR-14: Data/Memory Model](0014-data-memory-model.md) —
+  Proposed · Complete
