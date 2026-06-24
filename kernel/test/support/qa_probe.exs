@@ -75,7 +75,7 @@ IO.puts("graph: #{Repo.query!("SELECT count(*) FROM node WHERE type='article'").
         s -> trunc_span.(s.text)
       end
 
-      IO.puts("   #{i}. [score #{Float.round(m.score, 4)} | conf #{m.confidence}] #{m.key}")
+      IO.puts("   #{i}. [rel #{m.relevance} | score #{Float.round(m.score, 4)} | conf #{m.confidence}] #{m.key}")
       IO.puts("        :: #{span}")
     end)
 

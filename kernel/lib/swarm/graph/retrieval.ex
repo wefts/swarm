@@ -30,15 +30,27 @@ defmodule Swarm.Graph.Retrieval do
   alias Swarm.ML.Embeddings
   alias Swarm.Repo
 
-  @typedoc "A retrieved memory: node identity + cited spans + relevance/trust."
+  @typedoc """
+  A retrieved memory: node identity + cited spans + three orthogonal numbers —
+  `score` (ranking), `relevance` (absolute dense cosine, 0..1; the calibrated
+  retrieval-confidence signal), and `confidence` (graph trust = node reliability).
+  """
   @type memory :: %{
           node_id: integer(),
           type: String.t(),
           key: String.t(),
           score: float(),
+          relevance: float(),
           confidence: float(),
           spans: [%{ordinal: integer(), text: String.t()}]
         }
+
+  # Default relevance floor on absolute dense cosine. Below it, a dense-only hit is
+  # treated as out-of-scope (the system can say "I don't know"). Calibrated on the
+  # live slice (in-scope cosine ≳ 0.5, out-of-scope ≲ 0.49); overridable per call
+  # (`:floor`) and via config. A lexical (keyword) hit bypasses the floor — an exact
+  # term match is relevant regardless of vector similarity.
+  @default_floor 0.45
 
   @typedoc "The two-stage result."
   @type result :: %{status: :found | :not_found, memories: [memory()], expanded: [map()]}
@@ -69,12 +81,13 @@ defmodule Swarm.Graph.Retrieval do
     candidates = Keyword.get(opts, :candidates, 50)
     k = Keyword.get(opts, :rrf_k, 60)
     spans = Keyword.get(opts, :spans, 3)
+    floor = Keyword.get(opts, :floor, configured_floor())
     qvec = if Keyword.get(opts, :dense, true), do: query_vec(query, opts), else: nil
 
     memories =
       query
       |> fused_chunks(scopes, candidates, k, qvec)
-      |> group_by_node(spans)
+      |> group_by_node(spans, floor)
       |> Enum.sort_by(& &1.score, :desc)
       |> Enum.take(limit)
       |> attach_identity()
@@ -93,9 +106,20 @@ defmodule Swarm.Graph.Retrieval do
 
   # --- stage 1: fused candidate spans ---------------------------------------
 
+  @typep fused :: %{
+           node_id: integer(),
+           ordinal: integer(),
+           text: String.t(),
+           rrf: float(),
+           cos: float() | nil,
+           lex: boolean()
+         }
+
   @spec fused_chunks(String.t(), [String.t()], pos_integer(), pos_integer(), Pgvector.t() | nil) ::
-          [%{node_id: integer(), ordinal: integer(), text: String.t(), rrf: float()}]
+          [fused()]
   defp fused_chunks(query, scopes, candidates, k, nil) do
+    # Lexical-only (no query vector): a keyword match is the only relevance signal,
+    # so `cos` is unknown (nil) and every hit is a lexical hit.
     sql = """
     WITH q AS (SELECT plainto_tsquery('simple', $1) AS tsq),
     lexical AS (
@@ -107,7 +131,8 @@ defmodule Swarm.Graph.Retrieval do
       WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
       LIMIT $3
     )
-    SELECT node_id, ordinal, text, (1.0 / ($4 + rnk))::float8 AS rrf
+    SELECT node_id, ordinal, text, (1.0 / ($4 + rnk))::float8 AS rrf,
+           NULL::float8 AS cos, true AS lex
     FROM lexical
     ORDER BY rrf DESC
     """
@@ -116,26 +141,36 @@ defmodule Swarm.Graph.Retrieval do
   end
 
   defp fused_chunks(query, scopes, candidates, k, qvec) do
+    # Each arm carries its rank (for RRF) plus the dense arm's ABSOLUTE cosine
+    # similarity (`1 - distance`) and a lexical-hit flag. Absolute cosine is the
+    # calibratable relevance signal RRF-rank alone discards (the diagnosis): it
+    # drives the relevance floor and the ranking, so out-of-scope queries (no
+    # lexical hit, low cosine) can be refused and magnets cannot win on rank credit.
     sql = """
     WITH q AS (SELECT plainto_tsquery('simple', $1) AS tsq),
     lexical AS (
       SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
              row_number() OVER (
                ORDER BY ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) DESC
-             ) AS rnk
+             ) AS rnk,
+             NULL::float8 AS cos, true AS lex
       FROM chunk k JOIN node n ON n.id = k.node_id
       WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
       LIMIT $3
     ),
     dense AS (
       SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
-             row_number() OVER (ORDER BY k.vec <=> $5) AS rnk
+             row_number() OVER (ORDER BY k.vec <=> $5) AS rnk,
+             (1.0 - (k.vec <=> $5))::float8 AS cos, false AS lex
       FROM chunk k JOIN node n ON n.id = k.node_id
       WHERE n.scope = ANY($2) AND k.vec IS NOT NULL
       ORDER BY k.vec <=> $5
       LIMIT $3
     )
-    SELECT node_id, ordinal, text, sum(1.0 / ($4 + rnk))::float8 AS rrf
+    SELECT node_id, ordinal, text,
+           sum(1.0 / ($4 + rnk))::float8 AS rrf,
+           max(cos) AS cos,
+           bool_or(lex) AS lex
     FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
     GROUP BY chunk_id, node_id, ordinal, text
     ORDER BY rrf DESC
@@ -147,25 +182,48 @@ defmodule Swarm.Graph.Retrieval do
   defp run_fused(sql, params) do
     %{rows: rows} = Repo.query!(sql, params)
 
-    Enum.map(rows, fn [node_id, ordinal, text, rrf] ->
-      %{node_id: node_id, ordinal: ordinal, text: text, rrf: rrf}
+    Enum.map(rows, fn [node_id, ordinal, text, rrf, cos, lex] ->
+      %{node_id: node_id, ordinal: ordinal, text: text, rrf: rrf, cos: cos, lex: lex}
     end)
   end
 
-  # Collapse fused chunk hits into per-node memories: score = Σ chunk RRF; spans =
-  # the top `spans_per` chunks of that node (the cited evidence).
-  defp group_by_node(chunks, spans_per) do
+  # Collapse fused chunk hits into per-node memories. A chunk is kept only if it
+  # clears the relevance gate (lexical hit OR cosine ≥ floor); RRF then ranks the
+  # SURVIVORS, so a "magnet" chunk that is merely a global near-neighbour (mid
+  # cosine, no keyword match on this query) is dropped before it can outrank the
+  # true answer. A node with no surviving chunk is dropped entirely — that is how
+  # an out-of-scope query collapses to `:not_found`.
+  defp group_by_node(chunks, spans_per, floor) do
     chunks
     |> Enum.group_by(& &1.node_id)
-    |> Enum.map(fn {node_id, hits} ->
-      sorted = Enum.sort_by(hits, & &1.rrf, :desc)
+    |> Enum.flat_map(fn {node_id, hits} ->
+      case Enum.filter(hits, &chunk_relevant?(&1, floor)) do
+        [] ->
+          []
 
-      %{
-        node_id: node_id,
-        score: hits |> Enum.map(& &1.rrf) |> Enum.sum(),
-        spans: sorted |> Enum.take(spans_per) |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
-      }
+        kept ->
+          sorted = Enum.sort_by(kept, & &1.rrf, :desc)
+
+          [
+            %{
+              node_id: node_id,
+              score: kept |> Enum.map(& &1.rrf) |> Enum.sum(),
+              relevance: kept |> Enum.map(&(&1.cos || 0.0)) |> Enum.max(),
+              spans: sorted |> Enum.take(spans_per) |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
+            }
+          ]
+      end
     end)
+  end
+
+  # The relevance gate: a keyword (lexical) hit is relevant regardless of vector
+  # similarity; a dense-only hit must clear the cosine floor.
+  defp chunk_relevant?(%{lex: true}, _floor), do: true
+  defp chunk_relevant?(%{cos: cos}, floor) when is_float(cos), do: cos >= floor
+  defp chunk_relevant?(_chunk, _floor), do: false
+
+  defp configured_floor do
+    Application.get_env(:swarm, :retrieval, [])[:floor] || @default_floor
   end
 
   # Attach node identity + trust (reliability) — every memory names its node.
@@ -181,7 +239,9 @@ defmodule Swarm.Graph.Retrieval do
 
     Enum.map(memories, fn m ->
       {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
-      Map.merge(m, %{type: type, key: key, confidence: rel})
+      # `relevance` (cosine) is already on the memory from grouping; add identity +
+      # `confidence` (graph trust). Round relevance for a clean external number.
+      Map.merge(m, %{type: type, key: key, confidence: rel, relevance: Float.round(m.relevance, 4)})
     end)
   end
 

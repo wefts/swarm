@@ -103,4 +103,46 @@ defmodule Swarm.Graph.RetrievalTest do
     chunk!(nid, 0, "anything", 0)
     assert %{status: :not_found, memories: []} = Retrieval.search("anything", [], expand: false)
   end
+
+  # --- relevance floor / answerability (the "I don't know" fix) ---
+
+  test "a dense-only hit BELOW the relevance floor is refused → not_found" do
+    nid = node!("Solo", "public")
+    chunk!(nid, 0, "alpha beta gamma delta", 0)
+
+    # query has NO lexical overlap and an ORTHOGONAL vector (cos 0 < floor) → refused
+    assert %{status: :not_found, memories: []} =
+             Retrieval.search("zzz nomatch qqq", ["public"], query_vec: vecn(9), expand: false)
+  end
+
+  test "a dense hit ABOVE the floor is found and reports its cosine relevance" do
+    nid = node!("Topic", "public")
+    chunk!(nid, 0, "alpha beta gamma delta", 0)
+
+    %{status: :found, memories: [m]} =
+      Retrieval.search("zzz nomatch qqq", ["public"], query_vec: vecn(0), expand: false)
+
+    assert m.key == "Topic"
+    assert m.relevance >= 0.9
+  end
+
+  test "a lexical (keyword) hit bypasses the floor even at zero cosine" do
+    nid = node!("Keyworded", "public")
+    chunk!(nid, 0, "alpha beta gamma delta", 0)
+
+    # the word 'alpha' matches lexically; the query vector is orthogonal (cos 0)
+    %{status: :found, memories: [m]} =
+      Retrieval.search("alpha", ["public"], query_vec: vecn(9), expand: false)
+
+    assert m.key == "Keyworded"
+  end
+
+  test "the floor is configurable per call" do
+    nid = node!("Tunable", "public")
+    chunk!(nid, 0, "alpha beta gamma delta", 0)
+
+    # cos is 1.0 for an identical vector; a floor above 1.0 refuses everything dense
+    assert %{status: :not_found} =
+             Retrieval.search("zzz qqq", ["public"], query_vec: vecn(0), floor: 1.01, expand: false)
+  end
 end
