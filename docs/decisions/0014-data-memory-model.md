@@ -9,9 +9,12 @@ Grounded in the first live slice (Phase E2, Wikipedia) and a 3-family consilium
 
 ## Status
 
-Proposed (research-first decision; no ingest/storage/embedding code is written under
-this ADR — implementation is a follow-up campaign that unblocks
-`board/todo/ingest-persist-content`)
+Accepted (Phase 1 shipped & live-verified 2026-06-24: the bifurcated content/chunk store,
+typed ingest, hybrid retrieval, and a relevance floor are built and validated on a live
+96-page Wikipedia slice — answerability 0→100%, recall@1 ~30→98%, recall@5 100%,
+fragmentation 0. Phase 2 — source-adapted segmentation + per-type aggregate-vs-identity
+vector — remains follow-up, gated on a second source shape. The relevance-floor /
+answerability gate added during the build is documented in the spec, §5.1.)
 
 ## Record Completeness
 

@@ -1,6 +1,6 @@
 ---
-status: proposed
-implements: "swarm ADR-14 (Proposed) — ../decisions/0014-data-memory-model.md"
+status: built (Phase 1; §5.1 + Phase-2 items as noted)
+implements: "swarm ADR-14 (Accepted) — ../decisions/0014-data-memory-model.md"
 owner: swarm
 ---
 
@@ -183,6 +183,47 @@ This stage-1+stage-2 pipeline — hybrid retrieval over a citation/link graph, *
 enrichment fires** — is a **legitimate functional floor**, not a degraded mode: it already
 delivers "grep/find on steroids" (keyword precision + meaning + multi-hop). Enrichment (§4)
 raises the ceiling; it is not a precondition for the model being useful.
+
+### 5.1 Relevance floor & answerability gating (built in Phase 1)
+
+The ADR's stage-1 fuse, taken naively, cannot say "I don't know": the dense arm always
+returns nearest neighbours, so an out-of-scope query still gets ranked results. Phase 1
+added a **relevance floor** that makes retrieval answerability-aware. This is the one
+mechanism not contemplated in the ADR's seven parts; it is load-bearing in production.
+
+- **Carry the absolute cosine, not just the rank.** The fused SQL surfaces the dense arm's
+  **absolute cosine** (`1 - distance`) and a per-chunk **lexical-hit flag**, alongside the
+  RRF rank. (Diagnosis 2026-06-24: the early "embedding hubness" symptom was largely an RRF
+  artefact — RRF's `1/(k+rank)` discards the absolute cosine that *does* separate in- from
+  out-of-scope; chunk vectors are already unit-norm.)
+- **Gate, then rank.** A chunk passes the **relevance gate** iff it had a lexical hit **OR**
+  `cosine ≥ floor` (default `0.45`; `config :swarm, :retrieval, floor:` or per-call `:floor`).
+  RRF ranks only the survivors, so a "magnet" near-neighbour below the floor is dropped
+  **before** it can outrank the true answer (this is what lifted recall@1 ~30→98%).
+- **Answerability.** A node with no surviving chunk is dropped; **no survivors ⇒ `:not_found`**
+  (the ADR-6 answer-result algebra), not a list of low-confidence guesses. A memory now reports
+  `relevance` (cosine) distinct from `confidence` (node trust).
+- **Calibration caveat (Phase 2).** The floor is **absolute**; paraphrase / cross-lingual
+  (UA/FR→EN) hits have lower cosine. On the verbatim-ish slice it held recall@5 100% to 0.55,
+  and the conservative 0.45 default cleared cross-lingual hits via cosine. A **relative gate**
+  (`cos ≥ top − δ`) + a minimum lexical score is the Phase-2 generalization
+  (`board/todo/data-impl-vector-recall`), to validate across ≥2 source shapes.
+
+### 5.2 Answer-path integration — `Core.ask` (built in Phase 1)
+
+`Core.ask`'s default retriever is the §5 hybrid content path (relevance-floored, §5.1)
+**merged with** a title/identity **key arm**. To stop the key arm re-introducing false
+positives the floor removed:
+
+- **Key-arm gate (`gate_key_hits`).** A title/key hit must match **≥ ceil(n/2)** of the
+  query's significant terms as **delimited tokens** (not substrings) — so "war" ↛ "Award",
+  "change" ↛ "exchange". (Reuses the T8 owner-boundary tokeniser.)
+- **Owner queries stay key-only.** "my X" resolves through the identity/key arm, never the
+  dense arm, preserving the T8 contract (viewer-scoped or `identity_required`).
+- **Known residual gaps** (carded, not yet closed): a key-arm exact match against a
+  **content-less stub** title can still false-`found` an out-of-scope query
+  (`board/todo/key-arm-answerability`); `"my"` *inside* a title trips the ownership path
+  (`board/todo/first-person-false-ownership`).
 
 ## 6. Reconciliation with existing canon
 
