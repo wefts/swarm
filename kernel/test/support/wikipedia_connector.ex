@@ -74,7 +74,17 @@ defmodule Swarm.Test.WikipediaConnector do
 
     with {:ok, body} <- http.(url(continue, opts)),
          {:ok, json} <- decode(body) do
-      events = json |> pages(json) |> Enum.map(&to_event(&1, scope))
+      raw = json |> pages(json) |> Enum.map(&extract_page/1)
+
+      # swarm ADR-13 layer 2: resolve link targets through the source's redirects
+      # BEFORE emitting, so a redirect alias and its canonical page land on ONE key
+      # (ingest-time, not an optional later pass). Skippable for hermetic tests.
+      redirects =
+        if Keyword.get(opts, :resolve_redirects, true),
+          do: resolve_titles(raw |> Enum.flat_map(& &1.targets) |> Enum.uniq(), opts, http),
+          else: %{}
+
+      events = Enum.map(raw, &build_event(&1, redirects, scope))
       {:ok, paginate(events, json, page_num, opts)}
     end
   end
@@ -176,14 +186,33 @@ defmodule Swarm.Test.WikipediaConnector do
   defp pages(_json, %{"query" => %{"pages" => pages}}) when is_map(pages), do: Map.values(pages)
   defp pages(_json, _), do: []
 
-  defp to_event(page, scope) do
+  # Extract the raw shape of a page (canonical title + raw link targets); redirect
+  # resolution and event-building happen after, once the whole page batch's targets
+  # are known (so resolution batches efficiently).
+  defp extract_page(page) do
     title = canonical_title(Map.get(page, "title", ""))
-    pageid = Map.get(page, "pageid", Map.get(page, "title"))
-    wikitext = wikitext(page)
 
     targets =
-      wikitext
+      page
+      |> wikitext()
       |> link_targets()
+      |> Enum.reject(&(&1 == "" or &1 == title))
+      |> Enum.uniq()
+
+    %{
+      title: title,
+      targets: targets,
+      provenance: "wikipedia:en:#{Map.get(page, "pageid", Map.get(page, "title"))}",
+      occurred_at: occurred_at(page)
+    }
+  end
+
+  defp build_event(%{title: title} = p, redirects, scope) do
+    # Apply the redirect map, then re-canonicalise, drop self/empty, dedup.
+    targets =
+      p.targets
+      |> Enum.map(&Map.get(redirects, &1, &1))
+      |> Enum.map(&canonical_title/1)
       |> Enum.reject(&(&1 == "" or &1 == title))
       |> Enum.uniq()
 
@@ -192,11 +221,74 @@ defmodule Swarm.Test.WikipediaConnector do
     relations = Enum.map(targets, &%{from: title, to: &1, type: "links_to"})
 
     %{
-      provenance: "wikipedia:en:#{pageid}",
-      occurred_at: occurred_at(page),
+      provenance: p.provenance,
+      occurred_at: p.occurred_at,
       entities: [page_entity | stubs],
       relations: relations
     }
+  end
+
+  # Resolve titles through MediaWiki redirects + normalisation (swarm ADR-13 layer
+  # 2): query `titles=…&redirects=1` in batches of 50 and build a `from → to` map of
+  # canonical titles. A title that is its own canonical simply isn't in the map.
+  @spec resolve_titles([String.t()], keyword(), (String.t() -> {:ok, binary()} | {:error, term()})) ::
+          %{optional(String.t()) => String.t()}
+  defp resolve_titles([], _opts, _http), do: %{}
+
+  defp resolve_titles(titles, opts, http) do
+    titles
+    |> Enum.chunk_every(50)
+    |> Enum.reduce(%{}, fn batch, acc -> Map.merge(acc, resolve_batch(batch, opts, http)) end)
+  end
+
+  defp resolve_batch(batch, opts, http) do
+    with {:ok, body} <- http.(resolve_url(batch, opts)),
+         {:ok, json} <- decode(body) do
+      redirect_map(json)
+    else
+      _ -> %{}
+    end
+  end
+
+  defp resolve_url(titles, opts) do
+    base = Keyword.get(opts, :base_url, @default_base)
+
+    params = %{
+      "action" => "query",
+      "titles" => Enum.join(titles, "|"),
+      "redirects" => "1",
+      "format" => "json",
+      "formatversion" => "2"
+    }
+
+    base <> "?" <> URI.encode_query(params)
+  end
+
+  # Both `normalized` (case/underscore folding) and `redirects` (alias → page) are
+  # from→to hops; chain them so a normalised redirect resolves in one map. Keys and
+  # values are canonicalised so they match the page-identity form used elsewhere.
+  defp redirect_map(json) do
+    hops =
+      (get_in(json, ["query", "normalized"]) || []) ++
+        (get_in(json, ["query", "redirects"]) || [])
+
+    direct =
+      Map.new(hops, fn h ->
+        {canonical_title(Map.get(h, "from", "")), canonical_title(Map.get(h, "to", ""))}
+      end)
+
+    # chase chains (normalised → redirect) to a fixed point
+    Map.new(direct, fn {from, _to} -> {from, chase(from, direct)} end)
+  end
+
+  defp chase(key, map, seen \\ MapSet.new()) do
+    case Map.get(map, key) do
+      nil ->
+        key
+
+      next ->
+        if MapSet.member?(seen, next), do: key, else: chase(next, map, MapSet.put(seen, key))
+    end
   end
 
   defp wikitext(page) do

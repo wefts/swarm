@@ -82,7 +82,7 @@ defmodule Swarm.Connector.WikipediaTest do
   # --- contract / pagination -------------------------------------------------
 
   test "full sync paginates the continue token to exhaustion and ingests every page" do
-    {:ok, r} = Sync.run(Wiki, http: fixture_http())
+    {:ok, r} = Sync.run(Wiki, http: fixture_http(), resolve_redirects: false)
 
     assert r.mode == :full
     assert r.complete?
@@ -92,7 +92,7 @@ defmodule Swarm.Connector.WikipediaTest do
   end
 
   test "link target stub and its own page resolve to ONE node (idempotent merge)" do
-    {:ok, _} = Sync.run(Wiki, http: fixture_http())
+    {:ok, _} = Sync.run(Wiki, http: fixture_http(), resolve_redirects: false)
 
     keys = node_keys()
     # "Apollo 11" is a link target on page 1 AND its own page on page 2 → one node.
@@ -107,7 +107,7 @@ defmodule Swarm.Connector.WikipediaTest do
   end
 
   test "non-article namespace links and self-links are rejected" do
-    {:ok, _} = Sync.run(Wiki, http: fixture_http())
+    {:ok, _} = Sync.run(Wiki, http: fixture_http(), resolve_redirects: false)
     keys = node_keys()
 
     # Category: namespace link is not an article node.
@@ -121,7 +121,7 @@ defmodule Swarm.Connector.WikipediaTest do
   end
 
   test "links_to edges are written between articles and are public-scoped" do
-    {:ok, _} = Sync.run(Wiki, http: fixture_http())
+    {:ok, _} = Sync.run(Wiki, http: fixture_http(), resolve_redirects: false)
 
     # Apollo program → {Apollo 11, NASA, Saturn V}; NASA → {Apollo program, United States};
     # Apollo 11 → {Apollo program, Moon}. (Self/category dropped.) = 7 edges.
@@ -134,12 +134,49 @@ defmodule Swarm.Connector.WikipediaTest do
   end
 
   test "our own page ceiling surfaces as truncation (no silent cap)" do
-    {:ok, r} = Sync.run(Wiki, http: fixture_http(), max_pages: 1)
+    {:ok, r} = Sync.run(Wiki, http: fixture_http(), resolve_redirects: false, max_pages: 1)
 
     # Stopped after one API page while a continue token still existed.
     assert r.pages == 1
     refute r.complete?
     assert r.ceilings == 1
+  end
+
+  # --- swarm ADR-13 layer 2: redirect resolution at the connector --------------
+
+  test "redirect resolution collapses an alias link target onto the canonical page" do
+    # Page links to the redirect alias "Allmusic"; the resolve query maps it to the
+    # canonical "AllMusic". With resolution ON, only the canonical node is created.
+    redirect_body =
+      JSON.encode!(%{
+        "query" => %{"redirects" => [%{"from" => "Allmusic", "to" => "AllMusic"}], "pages" => []}
+      })
+
+    allpages_body =
+      JSON.encode!(%{
+        "query" => %{"pages" => [page(40, "Some Band", "Reviewed on [[Allmusic]] and [[NASA]].")]}
+      })
+
+    http = fn url ->
+      if String.contains?(url, "redirects=1"),
+        do: {:ok, redirect_body},
+        else: {:ok, allpages_body}
+    end
+
+    {:ok, _} = Sync.run(Wiki, http: http, resolve_redirects: true)
+    keys = node_keys()
+
+    assert "AllMusic" in keys
+    refute "Allmusic" in keys
+
+    %{rows: [[n]]} =
+      Repo.query!("""
+      SELECT count(*) FROM edge e
+      JOIN node s ON s.id = e.src JOIN node d ON d.id = e.dst
+      WHERE s.key = 'Some Band' AND d.key = 'AllMusic' AND e.type = 'links_to'
+      """)
+
+    assert n == 1
   end
 
   # --- pure unit: canonicalisation + extraction (the entity-resolution seam) --
@@ -166,16 +203,17 @@ defmodule Swarm.Connector.WikipediaTest do
     refute Enum.any?(targets, &String.contains?(&1, "File"))
   end
 
-  # --- entity-resolution gaps FOUND on the first live slice (risk #1) ---------
-  # These pin the two fragmentation classes the live Wikipedia run surfaced, so
-  # `todo/entity-resolution` (E3) can fix them and these tests will flip — the
-  # regression fixtures the architect-consilium asked for. Each asserts the
-  # CURRENT (buggy) behaviour; when entity resolution lands, update them to the
-  # merged form. See board/journal.md (Phase E2 findings).
+  # --- entity-resolution: the two fragmentation classes the live slice found ---
+  # Both classes (risk #1) are now addressed (swarm ADR-13): percent-encoding in
+  # canonical_title (layer 1, below), internal-case/redirect via redirect resolution
+  # (layer 2, the "redirect resolution collapses…" test above). These pin the
+  # behaviour so a regression re-fragments loudly. See board/journal.md.
 
-  test "KNOWN GAP: internal-case variants fragment (Allmusic vs AllMusic)" do
-    # canonical_title only uppercases the FIRST letter, so internal-case aliases
-    # that MediaWiki treats as the same page still produce two distinct keys.
+  test "BOUNDARY: canonical_title alone cannot fold internal-case (that needs redirect resolution)" do
+    # canonical_title only uppercases the FIRST letter (MediaWiki's real rule), so
+    # in isolation it does NOT fold "Allmusic"/"AllMusic" — by design. The fold
+    # happens a layer up, via resolve_titles/redirect resolution (tested above),
+    # because only the source knows these are one page. This documents the split.
     assert Wiki.canonical_title("Allmusic") == "Allmusic"
     assert Wiki.canonical_title("AllMusic") == "AllMusic"
     assert Wiki.canonical_title("Allmusic") != Wiki.canonical_title("AllMusic")

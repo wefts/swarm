@@ -7,8 +7,9 @@ ADR-9 (workspace, correlated-evidence) and is grounded in the first live slice
 
 ## Status
 
-Proposed (first increment built — connector source-normalisation; the kernel alias
-resolver is the carded follow-up `board/todo/entity-resolution`)
+Accepted (layers 1 + 2 built and proven on real data — see Consequences; a
+*standing* alias table consulted automatically by `upsert_node` remains future,
+carded in `board/todo/entity-resolution`)
 
 ## Record Completeness
 
@@ -70,29 +71,48 @@ is the kernel's to resolve (it spans connectors and needs the graph + reward).
 
 ## Consequences
 
-- **Now:** the percent-encoding fragmentation class is closed; its regression
-  fixture flips to "merged". The connector stays a reference adapter; the fix is a
-  pure function (`canonical_title/1` URL-decodes), still hermetic and tested.
-  Layer 1 removes one well-defined encoding class — it is **not** a complete
-  source-canonicalisation (MediaWiki has further normalisation rules); it is the
-  cheap, false-merge-free slice of the problem, not the whole of it.
-- **Deferred (carded):** the kernel alias resolver + MediaWiki redirect resolution
-  for class 2. Until it lands, the case/redirect fixtures remain KNOWN-GAP and the
-  slice's fragmentation probe still reports the case groups — honestly surfaced,
-  not hidden.
-- **Interim risk (consilium, codex):** deferral is *not* free. Until layer 2 lands
-  the graph is **knowingly fragmented** for class 2 — corroboration splits across
-  the duplicate nodes (ADR-3 never sees the second witness) and any answer built on
-  that evidence is degraded. This is a stated, bounded debt, not a silent one; it
-  must not be read as "entity resolution is done". Accordingly, layer 2's
-  implementation card specifies the alias/merge as a **blocking ingest invariant
-  for sources that declare redirects**, with **provenance-preserving de-duplication**
-  (re-point edges, union distinct provenance, sum `seen_count`), not an optional
-  pass.
-- **Safety:** URL-decoding a title that legitimately contains a `%` is safe —
-  `URI.decode/1` leaves a lone `%` untouched (`"100% (song)"` is unchanged), so no
-  false rewrite. Over-eager kernel merging is the real hazard and is exactly why
-  layer 2 is gated behind a specified merge rule, not shipped reflexively.
+- **Layer 1 (built).** `canonical_title/1` URL-decodes, closing the percent-encoding
+  class; its regression fixture asserts "merged". It removes one well-defined
+  encoding class — **not** a complete source-canonicalisation (MediaWiki has further
+  rules); it is the cheap, false-merge-free slice.
+- **Layer 2 (built).** Two pieces: (a) the connector resolves link targets through
+  MediaWiki `normalized` + `redirects` **at ingest, before emit** (`resolve_titles/3`,
+  batched ≤50, chained to a fixed point), so a redirect alias and its canonical page
+  land on ONE key — this is the blocking-at-ingest form codex asked for, not an
+  optional later pass; (b) the kernel `Swarm.Graph.Store.merge_nodes/3` is the
+  source-agnostic, **provenance-preserving** reconciler for nodes already fragmented
+  (re-point edges, union distinct provenance, recompute `seen_count`, drop
+  merge-induced self-loops, rename when the canonical is absent).
+- **Proven on real data.** Re-running the live Wikipedia slice (≈1300 article nodes)
+  **with resolution on** dropped the fragmentation probe from **4 case-folded
+  collision groups to 0** (`Allmusic`/`AllMusic` now one node; the `de/De` name
+  pattern collapsed); node count fell 1313→1274 as redirect aliases merged. The
+  connector unit tests prove the redirect-collapse and the merge primitive
+  (provenance union, no orphan, no self-loop) hermetically.
+- **Still future (carded):** a *standing* alias table consulted automatically by
+  `upsert_node` for every source (today resolution is MediaWiki-specific in the
+  connector, and `merge_nodes` is invoked explicitly, not auto-at-ingest). The
+  `de/De`-style folds that are NOT backed by a real redirect remain unresolved —
+  surfaced by the probe, not hidden.
+- **Merge-induced self-loops are dropped — deliberately (consilium divergence).**
+  A second critic (gemini) read this as "losing provenance" and verdict FLAWED;
+  codex (and this record) disagree, and the divergence is surfaced here. When the
+  alias→canonical edge becomes canonical→canonical, it is a self-referential
+  `links_to` artifact, not evidence. Crucially the **source provenance is not
+  lost**: the alias page's *real* outbound edges (alias→X) are re-pointed to
+  canonical→X carrying that same provenance, so the evidential origin survives on
+  the meaningful edges; only the meaningless self-link is dropped. (Were a merge
+  ever applied to an edge type where a self-loop is semantically real, this rule
+  would need revisiting — for `links_to` it is correct.) The other gemini points
+  reduce to the concurrency caveat (already fixed via the `FOR UPDATE` lock, which
+  it reviewed pre-fix) and the historical-orphan gap (covered by `merge_nodes` as
+  the reconciler + the carded standing-table) — neither blocking.
+- **Safety.** URL-decoding a title that legitimately contains a `%` is safe —
+  `URI.decode/1` leaves a lone `%` untouched (`"100% (song)"` unchanged), no false
+  rewrite. Merges are gated on **source-declared** equivalence (redirects), not
+  guessed, so the over-merge hazard is bounded; embedding-candidate (soft) matching
+  is deliberately left to the future standing-table work, where a merge rule governs
+  it.
 
 ## References
 

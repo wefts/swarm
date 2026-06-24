@@ -127,6 +127,143 @@ defmodule Swarm.Graph.Store do
     :ok
   end
 
+  @doc """
+  Entity resolution (swarm ADR-13 layer 2): merge the `alias_key` node into the
+  `into_key` node of the same `type`, **provenance-preserving**. Re-points every
+  edge touching the alias (as src or dst) onto the canonical node; where that
+  collides with an existing canonical edge on the natural key
+  `(src, type, dst, visibility_scope)`, the alias edge's distinct provenance is
+  **unioned** into the survivor and `seen_count` recomputed (so corroboration
+  aggregates, never double-counts); a merge-induced self-loop is dropped; the alias
+  node is then deleted. If the canonical node does not exist yet the alias is simply
+  renamed to the canonical key (a redirect target seen before its page).
+
+  Distinct provenance still counts distinct evidential origins (ADR-9), so a merge
+  cannot let duplicate keys of one origin over-corroborate. Returns the surviving
+  node id and how many alias edges were re-pointed/merged.
+  """
+  @spec merge_nodes(String.t(), String.t(), String.t()) ::
+          {:ok, %{into_id: integer() | nil, edges: non_neg_integer(), result: atom()}}
+  def merge_nodes(type, alias_key, into_key)
+      when is_binary(type) and is_binary(alias_key) and is_binary(into_key) do
+    Repo.transaction(fn ->
+      alias_id = node_id(type, alias_key)
+      into_id = node_id(type, into_key)
+
+      cond do
+        is_nil(alias_id) ->
+          %{into_id: into_id, edges: 0, result: :noop_no_alias}
+
+        alias_key == into_key or alias_id == into_id ->
+          %{into_id: into_id, edges: 0, result: :noop_same}
+
+        is_nil(into_id) ->
+          # Canonical not yet present: rename the alias to the canonical key. Safe —
+          # (type, into_key) is free, and the unique index would reject any race.
+          Repo.query!("UPDATE node SET key = $2, updated_at = now() WHERE id = $1", [
+            alias_id,
+            into_key
+          ])
+
+          %{into_id: alias_id, edges: 0, result: :renamed}
+
+        true ->
+          # Serialise against concurrent merges/ingest touching these nodes: lock
+          # both rows FOR UPDATE (conflicts with add_edge's FOR SHARE endpoint read),
+          # closing the existing_edge→UPDATE race that could violate the edge unique
+          # key (consilium/codex). Same TOCTOU class ADR-4 documents.
+          Repo.query!("SELECT id FROM node WHERE id = ANY($1) FOR UPDATE", [[alias_id, into_id]])
+          n = repoint_edges(alias_id, into_id)
+          Repo.query!("DELETE FROM node WHERE id = $1", [alias_id])
+
+          emit_outbox(
+            "node_merged",
+            "node:#{into_id}",
+            %{into: into_id, from: alias_id},
+            "merge:#{alias_id}->#{into_id}"
+          )
+
+          %{into_id: into_id, edges: n, result: :merged}
+      end
+    end)
+  end
+
+  @spec node_id(String.t(), String.t()) :: integer() | nil
+  defp node_id(type, key) do
+    case Repo.query!("SELECT id FROM node WHERE type = $1 AND key = $2", [type, key]) do
+      %{rows: [[id]]} -> id
+      _ -> nil
+    end
+  end
+
+  # Re-point every edge touching `alias_id` onto `into_id`, merging on natural-key
+  # collisions and dropping self-loops. Returns the number of alias edges handled.
+  @spec repoint_edges(integer(), integer()) :: non_neg_integer()
+  defp repoint_edges(alias_id, into_id) do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT id, src, dst, type, visibility_scope FROM edge WHERE src = $1 OR dst = $1",
+        [alias_id]
+      )
+
+    Enum.each(rows, fn [eid, src, dst, etype, scope] ->
+      new_src = if src == alias_id, do: into_id, else: src
+      new_dst = if dst == alias_id, do: into_id, else: dst
+      repoint_one(eid, new_src, new_dst, etype, scope)
+    end)
+
+    length(rows)
+  end
+
+  @spec repoint_one(integer(), integer(), integer(), String.t(), String.t()) :: :ok
+  defp repoint_one(eid, new_src, new_dst, _etype, _scope) when new_src == new_dst do
+    # Merge collapsed this edge into a self-loop — drop it (CASCADE clears provenance).
+    Repo.query!("DELETE FROM edge WHERE id = $1", [eid])
+    :ok
+  end
+
+  defp repoint_one(eid, new_src, new_dst, etype, scope) do
+    case existing_edge(new_src, etype, new_dst, scope) do
+      target when is_integer(target) and target != eid ->
+        # Natural-key collision: union the alias edge's provenance into the survivor,
+        # recompute its distinct-provenance seen_count, then drop the alias edge.
+        Repo.query!(
+          "INSERT INTO edge_provenance (edge_id, provenance) " <>
+            "SELECT $1, provenance FROM edge_provenance WHERE edge_id = $2 " <>
+            "ON CONFLICT (edge_id, provenance) DO NOTHING",
+          [target, eid]
+        )
+
+        Repo.query!(
+          "UPDATE edge SET seen_count = (SELECT count(*) FROM edge_provenance WHERE edge_id = $1), last_seen = now(), updated_at = now() WHERE id = $1",
+          [target]
+        )
+
+        Repo.query!("DELETE FROM edge WHERE id = $1", [eid])
+        :ok
+
+      _ ->
+        # No collision — re-point in place.
+        Repo.query!(
+          "UPDATE edge SET src = $2, dst = $3, updated_at = now() WHERE id = $1",
+          [eid, new_src, new_dst]
+        )
+
+        :ok
+    end
+  end
+
+  @spec existing_edge(integer(), String.t(), integer(), String.t()) :: integer() | nil
+  defp existing_edge(src, type, dst, scope) do
+    case Repo.query!(
+           "SELECT id FROM edge WHERE src = $1 AND type = $2 AND dst = $3 AND visibility_scope = $4",
+           [src, type, dst, scope]
+         ) do
+      %{rows: [[id]]} -> id
+      _ -> nil
+    end
+  end
+
   # Endpoint scopes for the visibility-invariant check (swarm ADR-4). One indexed
   # read of both endpoints; a missing node yields a nil scope → rejected. `FOR
   # SHARE` locks the endpoint rows for this transaction so a concurrent re-scope
