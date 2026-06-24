@@ -19,7 +19,7 @@ defmodule Swarm.Stigmergy.Dispatch do
   alias Swarm.Stigmergy.Lane
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, :ok, name: Keyword.get(opts, :name, __MODULE__))
+    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
   @doc "Subscribe a handler (fun/1 or `Ports.Worker` module) to one or more change kinds."
@@ -33,7 +33,23 @@ defmodule Swarm.Stigmergy.Dispatch do
   def dispatch(row, server \\ __MODULE__), do: GenServer.call(server, {:dispatch, row})
 
   @impl true
-  def init(:ok), do: {:ok, %{subs: %{}, lanes: %{}}}
+  def init(opts) do
+    # Optional startup subscriptions (`[{kinds, handler}, …]`) so the deployed
+    # runtime can wire workers declaratively in the supervision tree; tests still
+    # subscribe at runtime.
+    subs =
+      opts
+      |> Keyword.get(:subscriptions, [])
+      |> Enum.reduce(%{}, fn {kinds, handler}, acc ->
+        Enum.reduce(
+          List.wrap(kinds),
+          acc,
+          &Map.update(&2, &1, [handler], fn hs -> [handler | hs] end)
+        )
+      end)
+
+    {:ok, %{subs: subs, lanes: %{}}}
+  end
 
   @impl true
   def handle_call({:subscribe, kinds, handler}, _from, state) do

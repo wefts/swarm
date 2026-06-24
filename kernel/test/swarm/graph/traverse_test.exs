@@ -5,9 +5,9 @@ defmodule Swarm.Graph.TraverseTest do
   # last_seen defaults to now(), so decay ≈ 1 and confidence ≈ product of
   # reliabilities; the per-node max keeps the strongest path (ADR-3).
   setup do
-    a = add_node!(%{type: "a", scope: "public"})
-    b = add_node!(%{type: "b", scope: "public"})
-    c = add_node!(%{type: "c", scope: "private"})
+    a = add_node!(%{type: "concept", scope: "public"})
+    b = add_node!(%{type: "article", scope: "public"})
+    c = add_node!(%{type: "file", scope: "private"})
 
     # Edge scope = narrowest endpoint (as ingest sets it): a→b public, the rest
     # touch private c. Visibility (Task 06) now prunes on edge scope too.

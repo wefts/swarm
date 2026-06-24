@@ -27,7 +27,7 @@ defmodule Swarm.GraphCase do
   @spec truncate_graph() :: :ok
   def truncate_graph do
     Swarm.Repo.query!(
-      "TRUNCATE node, edge, edge_provenance, outbox, dead_letter, stagnant RESTART IDENTITY CASCADE"
+      "TRUNCATE node, edge, edge_provenance, content, chunk, node_alias, outbox, dead_letter, stagnant RESTART IDENTITY CASCADE"
     )
 
     # Reset the stigmergy cursor (the singleton row survives TRUNCATE of outbox).

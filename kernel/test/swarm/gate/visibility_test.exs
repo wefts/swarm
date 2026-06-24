@@ -6,8 +6,8 @@ defmodule Swarm.Gate.VisibilityTest do
   # anchor --public--> pub(public) ; anchor --private--> priv(private)
   setup do
     anchor = add_node!(%{type: "anchor", scope: "public"})
-    pub = add_node!(%{type: "x", scope: "public"})
-    priv = add_node!(%{type: "y", scope: "private"})
+    pub = add_node!(%{type: "concept", scope: "public"})
+    priv = add_node!(%{type: "article", scope: "private"})
     {:ok, _} = Graph.add_edge(anchor, pub, "rel", "e1", scope: "public")
     {:ok, _} = Graph.add_edge(anchor, priv, "rel", "e2", scope: "private")
     %{anchor: anchor, pub: pub, priv: priv}

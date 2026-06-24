@@ -41,6 +41,10 @@ defmodule Swarm.Graph.Store do
   Upsert a node by its stable identity `(type, key)` and return its id. Used by
   ingestion so re-seeing the same entity resolves to the same node rather than
   duplicating it. `:scope` defaults to `"private"` (default-deny).
+
+  Before minting, the **reversible alias table** (swarm ADR-14 §3.2) is consulted:
+  a `(type, key)` known to be an alias resolves to its canonical key, so a folded
+  entity never re-fragments on the next ingest.
   """
   @spec upsert_node(String.t(), String.t(), keyword()) :: integer()
   def upsert_node(type, key, opts \\ []) when is_binary(type) and is_binary(key) do
@@ -56,6 +60,8 @@ defmodule Swarm.Graph.Store do
         raise Swarm.Graph.ContractError, {reason, type: type, scope: scope}
     end
 
+    canonical = resolve_alias(type, key)
+
     sql = """
     INSERT INTO node (type, key, scope)
     VALUES ($1, $2, $3)
@@ -63,8 +69,21 @@ defmodule Swarm.Graph.Store do
     RETURNING id
     """
 
-    %{rows: [[id]]} = Repo.query!(sql, [type, key, scope])
+    %{rows: [[id]]} = Repo.query!(sql, [type, canonical, scope])
     id
+  end
+
+  # Consult the standing alias table (swarm ADR-14 §3.2): an aliased key resolves
+  # to its canonical form before minting; an unknown key passes through unchanged.
+  @spec resolve_alias(String.t(), String.t()) :: String.t()
+  defp resolve_alias(type, key) do
+    case Repo.query!(
+           "SELECT canonical_key FROM node_alias WHERE type = $1 AND alias_key = $2",
+           [type, key]
+         ) do
+      %{rows: [[canonical]]} -> canonical
+      _ -> key
+    end
   end
 
   @doc """
@@ -128,19 +147,29 @@ defmodule Swarm.Graph.Store do
   end
 
   @doc """
-  Entity resolution (swarm ADR-13 layer 2): merge the `alias_key` node into the
-  `into_key` node of the same `type`, **provenance-preserving**. Re-points every
-  edge touching the alias (as src or dst) onto the canonical node; where that
-  collides with an existing canonical edge on the natural key
-  `(src, type, dst, visibility_scope)`, the alias edge's distinct provenance is
-  **unioned** into the survivor and `seen_count` recomputed (so corroboration
-  aggregates, never double-counts); a merge-induced self-loop is dropped; the alias
-  node is then deleted. If the canonical node does not exist yet the alias is simply
-  renamed to the canonical key (a redirect target seen before its page).
+  Entity resolution (swarm ADR-13 layer 2 + ADR-14 §3.2): merge the `alias_key`
+  node into the `into_key` node of the same `type`, **provenance- and
+  span-preserving, scope-aware**.
 
-  Distinct provenance still counts distinct evidential origins (ADR-9), so a merge
-  cannot let duplicate keys of one origin over-corroborate. Returns the surviving
-  node id and how many alias edges were re-pointed/merged.
+  - **Edges** touching the alias are re-pointed onto the canonical node; a
+    natural-key collision unions the alias edge's distinct provenance into the
+    survivor and recomputes `seen_count` (corroboration aggregates, never
+    double-counts); merge-induced self-loops drop.
+  - **Chunks** are **unioned** under the surviving `node_id` (never dropped) with
+    ordinals offset past the survivor's, and `node.vec` is re-aggregated from the
+    unioned span set.
+  - **Content** survivorship keeps the higher-fidelity body (longer body wins;
+    the loser's spans already survived via the chunk union).
+  - A successful merge **records the alias** in the standing table, so the next
+    ingest of `alias_key` resolves straight to the canonical node.
+
+  Guards: a **cross-scope merge is refused** (`:refused_cross_scope`) — the
+  surviving node's scope is never silently widened; it is surfaced for operator
+  escalation, never applied automatically. If the canonical node does not exist
+  yet the alias is renamed to the canonical key (a redirect target seen before its
+  page) and the alias recorded. Distinct provenance still counts distinct
+  evidential origins (ADR-9), so a merge cannot let duplicate keys over-corroborate.
+  Returns the surviving node id and how many alias edges were re-pointed/merged.
   """
   @spec merge_nodes(String.t(), String.t(), String.t()) ::
           {:ok, %{into_id: integer() | nil, edges: non_neg_integer(), result: atom()}}
@@ -165,7 +194,20 @@ defmodule Swarm.Graph.Store do
             into_key
           ])
 
+          record_alias(type, alias_key, into_key)
           %{into_id: alias_id, edges: 0, result: :renamed}
+
+        cross_scope?(alias_id, into_id) ->
+          # ADR-14 §3.2: a private↔public merge is refused, never automatic. The
+          # surviving scope is never silently widened; surface for escalation.
+          emit_outbox(
+            "merge_refused",
+            "node:#{into_id}",
+            %{into: into_id, from: alias_id, reason: "cross_scope"},
+            "merge_refused:#{alias_id}->#{into_id}"
+          )
+
+          %{into_id: into_id, edges: 0, result: :refused_cross_scope}
 
         true ->
           # Serialise against concurrent merges/ingest touching these nodes: lock
@@ -174,7 +216,11 @@ defmodule Swarm.Graph.Store do
           # key (consilium/codex). Same TOCTOU class ADR-4 documents.
           Repo.query!("SELECT id FROM node WHERE id = ANY($1) FOR UPDATE", [[alias_id, into_id]])
           n = repoint_edges(alias_id, into_id)
+          union_chunks(alias_id, into_id)
+          survive_content(alias_id, into_id)
           Repo.query!("DELETE FROM node WHERE id = $1", [alias_id])
+          reaggregate_vec(into_id)
+          record_alias(type, alias_key, into_key)
 
           emit_outbox(
             "node_merged",
@@ -186,6 +232,112 @@ defmodule Swarm.Graph.Store do
           %{into_id: into_id, edges: n, result: :merged}
       end
     end)
+  end
+
+  # True iff the two nodes carry different visibility scopes (cross-scope merge).
+  @spec cross_scope?(integer(), integer()) :: boolean()
+  defp cross_scope?(alias_id, into_id) do
+    %{rows: rows} =
+      Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1)", [[alias_id, into_id]])
+
+    by_id = Map.new(rows, fn [id, scope] -> {id, scope} end)
+    Map.get(by_id, alias_id) != Map.get(by_id, into_id)
+  end
+
+  # Union the alias's chunk spans under the survivor (never dropped): offset their
+  # ordinals past the survivor's max so the (node_id, ordinal) key never collides.
+  #
+  # A chunk is self-contained — it carries its own `text` + `vec`, NOT an offset into
+  # `content.body` — so unioning spans across bodies corrupts nothing at retrieval
+  # time (each span is scored independently). The one documented limitation: after a
+  # near-dup merge the survivor's single (higher-fidelity) body no longer regenerates
+  # the full unioned span set, so a later re-segmentation (the write-amplification
+  # path) would drop the alias-origin spans. Acceptable because merges target
+  # near-duplicates (bodies near-identical); a future re-embed reconciles. (Raised by
+  # the gemini critic on a span-offset assumption that does not hold here; codex did
+  # not flag it — see board/journal.md.)
+  @spec union_chunks(integer(), integer()) :: :ok
+  defp union_chunks(alias_id, into_id) do
+    Repo.query!(
+      """
+      UPDATE chunk
+         SET node_id = $2,
+             ordinal = ordinal + 1 +
+               COALESCE((SELECT max(ordinal) FROM chunk WHERE node_id = $2), -1)
+       WHERE node_id = $1
+      """,
+      [alias_id, into_id]
+    )
+
+    :ok
+  end
+
+  # Content survivorship: keep the higher-fidelity body (longer wins). If the
+  # survivor has none, adopt the alias's; otherwise drop the alias's body (its
+  # spans already survived the chunk union). Content CASCADE-drops with the node,
+  # so an un-adopted alias row is reaped when the alias node is deleted.
+  @spec survive_content(integer(), integer()) :: :ok
+  defp survive_content(alias_id, into_id) do
+    alias_len = body_len(alias_id)
+    into_len = body_len(into_id)
+
+    cond do
+      alias_len == 0 ->
+        :ok
+
+      into_len == 0 ->
+        Repo.query!("UPDATE content SET node_id = $2 WHERE node_id = $1", [alias_id, into_id])
+
+      alias_len > into_len ->
+        Repo.query!("DELETE FROM content WHERE node_id = $1", [into_id])
+        Repo.query!("UPDATE content SET node_id = $2 WHERE node_id = $1", [alias_id, into_id])
+
+      true ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @spec body_len(integer()) :: non_neg_integer()
+  defp body_len(node_id) do
+    case Repo.query!("SELECT length(body) FROM content WHERE node_id = $1", [node_id]) do
+      %{rows: [[len]]} when is_integer(len) -> len
+      _ -> 0
+    end
+  end
+
+  # Re-aggregate node.vec from the (now unioned) chunk set — the mean over chunk
+  # vectors (pgvector `avg`). No-op when the node has no embedded chunks.
+  @spec reaggregate_vec(integer()) :: :ok
+  defp reaggregate_vec(into_id) do
+    Repo.query!(
+      """
+      UPDATE node
+         SET vec = sub.v, updated_at = now()
+        FROM (SELECT avg(vec) AS v FROM chunk WHERE node_id = $1 AND vec IS NOT NULL) sub
+       WHERE node.id = $1 AND sub.v IS NOT NULL
+      """,
+      [into_id]
+    )
+
+    :ok
+  end
+
+  # Record a standing alias so the next ingest of `alias_key` resolves to the
+  # canonical node. Idempotent on the (type, alias_key) PK.
+  @spec record_alias(String.t(), String.t(), String.t()) :: :ok
+  defp record_alias(type, alias_key, canonical_key) do
+    Repo.query!(
+      """
+      INSERT INTO node_alias (type, alias_key, canonical_key)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (type, alias_key) DO UPDATE SET canonical_key = $3
+      """,
+      [type, alias_key, canonical_key]
+    )
+
+    :ok
   end
 
   @spec node_id(String.t(), String.t()) :: integer() | nil

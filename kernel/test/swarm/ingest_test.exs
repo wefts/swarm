@@ -34,6 +34,18 @@ defmodule Swarm.IngestTest do
     assert count("edge") == 1
   end
 
+  test "persists each content-bearing entity's body and signals it for embedding (ADR-14 §2)" do
+    assert {:ok, :written} = Ingest.ingest(event("pc"))
+
+    # both entities carry a body ("f", "a") → a content row each, no chunks yet
+    # (embedding is the separate worker step), and a content_added signal each.
+    assert count("content") == 2
+    assert count("chunk") == 0
+    assert Repo.query!("SELECT body FROM content ORDER BY body").rows == [["a"], ["f"]]
+
+    assert Repo.query!("SELECT count(*) FROM outbox WHERE change = 'content_added'").rows == [[2]]
+  end
+
   test "a duplicate event (same provenance) does not double-write" do
     assert {:ok, :written} = Ingest.ingest(event("p1"))
     assert {:ok, :duplicate} = Ingest.ingest(event("p1"))

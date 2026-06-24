@@ -56,7 +56,9 @@ defmodule Swarm.Application do
 
     if Keyword.get(cfg, :enabled, false) do
       [
-        Dispatch,
+        # The embed worker (swarm ADR-14) reacts to `content_added`: segment →
+        # chunk → aggregate `node.vec`, off the ingest transaction.
+        {Dispatch, subscriptions: [{"content_added", Swarm.Ingest.Embedder}]},
         {Tailer, [handler: &Dispatch.dispatch/1] ++ Keyword.take(cfg, [:poll_ms, :gap_ms])}
       ]
     else

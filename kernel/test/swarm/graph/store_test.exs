@@ -16,14 +16,14 @@ defmodule Swarm.Graph.StoreTest do
     end
 
     test "fails loud on out-of-range reliability and missing type" do
-      assert {:error, %Ecto.Changeset{}} = Graph.add_node(%{type: "x", reliability: 1.5})
+      assert {:error, %Ecto.Changeset{}} = Graph.add_node(%{type: "concept", reliability: 1.5})
       assert {:error, %Ecto.Changeset{}} = Graph.add_node(%{reliability: 0.5})
     end
   end
 
   describe "add_edge/5 — insert-or-increment + provenance guard (ADR-9)" do
     setup do
-      %{a: add_node!(%{type: "a"}), b: add_node!(%{type: "b"})}
+      %{a: add_node!(%{type: "concept"}), b: add_node!(%{type: "article"})}
     end
 
     test "first detection inserts and counts once", %{a: a, b: b} do

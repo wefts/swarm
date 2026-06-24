@@ -191,10 +191,10 @@ defmodule Swarm.Test.WikipediaConnector do
   # are known (so resolution batches efficiently).
   defp extract_page(page) do
     title = canonical_title(Map.get(page, "title", ""))
+    raw = wikitext(page)
 
     targets =
-      page
-      |> wikitext()
+      raw
       |> link_targets()
       |> Enum.reject(&(&1 == "" or &1 == title))
       |> Enum.uniq()
@@ -202,6 +202,7 @@ defmodule Swarm.Test.WikipediaConnector do
     %{
       title: title,
       targets: targets,
+      text: plain_text(raw),
       provenance: "wikipedia:en:#{Map.get(page, "pageid", Map.get(page, "title"))}",
       occurred_at: occurred_at(page)
     }
@@ -216,7 +217,9 @@ defmodule Swarm.Test.WikipediaConnector do
       |> Enum.reject(&(&1 == "" or &1 == title))
       |> Enum.uniq()
 
-    page_entity = %{type: "article", key: title, scope: scope, content: ""}
+    # The page node carries its prose body; link-target stubs are identity-only
+    # (their own body arrives when that page is itself fetched).
+    page_entity = %{type: "article", key: title, scope: scope, content: Map.get(p, :text, "")}
     stubs = Enum.map(targets, &%{type: "article", key: &1, scope: scope, content: ""})
     relations = Enum.map(targets, &%{from: title, to: &1, type: "links_to"})
 
@@ -332,6 +335,54 @@ defmodule Swarm.Test.WikipediaConnector do
       [prefix, _rest] -> String.downcase(String.trim(prefix)) in @nonarticle_prefixes
       _ -> false
     end
+  end
+
+  @doc """
+  Strip wikitext to readable prose (swarm ADR-13 layer 1 / ADR-14 §2 stage 2 — the
+  connector's deterministic cleanup, decidable from the source alone). Removes HTML
+  comments, `<ref>`/tag noise, tables and templates (`{{…}}` peeled innermost-first
+  so nested infoboxes go), media/category links, and bold/italic/heading markup;
+  `[[target|label]]` collapses to its label, `[[target]]` to the target. Whitespace
+  is collapsed. Lossless of meaning, not of markup — it is the body a model reads,
+  never the raw payload.
+  """
+  @spec plain_text(String.t()) :: String.t()
+  def plain_text(wikitext) when is_binary(wikitext) do
+    wikitext
+    |> String.replace(~r/<!--.*?-->/su, "")
+    |> String.replace(~r/<ref[^>]*\/>/su, "")
+    |> String.replace(~r/<ref[^>]*>.*?<\/ref>/su, "")
+    |> strip_tables()
+    |> strip_templates()
+    |> drop_media_links()
+    |> String.replace(@wikilink, fn match ->
+      case Regex.run(~r/\[\[([^\]\|]+)(?:\|([^\]]*))?\]\]/u, match, capture: :all_but_first) do
+        [_target, label] when label != "" -> label
+        [target] -> target
+        [target, ""] -> target
+        _ -> ""
+      end
+    end)
+    |> String.replace(~r/'''?/u, "")
+    |> String.replace(~r/^=+\s*(.*?)\s*=+\s*$/mu, "\\1")
+    |> String.replace(~r/<[^>]+>/u, "")
+    |> String.replace(~r/[ \t]+/u, " ")
+    |> String.replace(~r/\n{3,}/u, "\n\n")
+    |> String.trim()
+  end
+
+  # Remove `{| … |}` table blocks (non-nested; good enough for the reference slice).
+  defp strip_tables(text), do: String.replace(text, ~r/\{\|.*?\|\}/su, "")
+
+  # Peel `{{…}}` templates innermost-first so nested templates fully clear.
+  defp strip_templates(text) do
+    new = String.replace(text, ~r/\{\{[^{}]*\}\}/su, "")
+    if new == text, do: new, else: strip_templates(new)
+  end
+
+  # Drop file/image/category links wholesale (they carry no readable prose).
+  defp drop_media_links(text) do
+    String.replace(text, ~r/\[\[(?:File|Image|Category):[^\]]*\]\]/iu, "")
   end
 
   @doc """

@@ -227,4 +227,27 @@ defmodule Swarm.Connector.WikipediaTest do
     # a lone % in a legitimate title is left untouched (no false rewrite)
     assert Wiki.canonical_title("100% (song)") == "100% (song)"
   end
+
+  test "plain_text strips wikitext to readable prose (ADR-14 §2 stage 2)" do
+    wt = """
+    {{Infobox planet|name=Mars|mass=6.4e23}}
+    '''Mars''' is the [[Solar System|fourth planet]] from the [[Sun]].<ref>cite</ref>
+
+    == Atmosphere ==
+    It has a [[File:Mars.png|thumb|Mars]] thin atmosphere.<!-- hidden -->
+    """
+
+    text = Wiki.plain_text(wt)
+
+    # link labels/targets kept as prose; markup, refs, templates, media, comments gone
+    assert text =~ "Mars is the fourth planet from the Sun."
+    assert text =~ "Atmosphere"
+    assert text =~ "thin atmosphere."
+    refute text =~ "Infobox"
+    refute text =~ "6.4e23"
+    refute text =~ "File:"
+    refute text =~ "<ref>"
+    refute text =~ "'''"
+    refute text =~ "hidden"
+  end
 end

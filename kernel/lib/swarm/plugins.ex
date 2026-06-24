@@ -24,7 +24,8 @@ defmodule Swarm.Plugins do
   to the checkout workspace).
   """
   @spec dir() :: String.t()
-  def dir, do: System.get_env("SWARM_PLUGINS_DIR") || Path.expand("../../hive/plugins", File.cwd!())
+  def dir,
+    do: System.get_env("SWARM_PLUGINS_DIR") || Path.expand("../../hive/plugins", File.cwd!())
 
   @doc """
   Compile every `*/*.ex` under `plugins_dir` and return those implementing the

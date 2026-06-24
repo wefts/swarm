@@ -129,10 +129,47 @@ defmodule Swarm.Graph.ContractTest do
     end
   end
 
+  describe "node-type vocabulary (swarm ADR-14 §3.1)" do
+    test "upsert_node fails loud on a well-formed but out-of-vocabulary type" do
+      assert "widget" not in Contract.types()
+
+      assert_raise Swarm.Graph.ContractError, ~r/graph contract/, fn ->
+        Store.upsert_node("widget", "k1")
+      end
+    end
+
+    test "upsert_node accepts an in-vocabulary type" do
+      assert is_integer(Store.upsert_node("article", "Some Page", scope: "public"))
+    end
+
+    test "add_node rejects an out-of-vocabulary type (changeset)" do
+      assert {:error, cs} = Graph.add_node(%{type: "widget", scope: "private"})
+      refute cs.valid?
+      assert {"is invalid", _} = cs.errors[:type]
+    end
+
+    test "validate_node distinguishes unknown type from malformed type" do
+      assert Contract.validate_node(%{type: "widget", scope: "private"}) ==
+               {:error, :unknown_type}
+
+      assert Contract.validate_node(%{type: "Bad-Type", scope: "private"}) ==
+               {:error, :invalid_type_format}
+    end
+
+    test "edge/relation types stay an open set — a non-node type is still a valid edge" do
+      a = add_node!(%{type: "article", key: "A", scope: "public"})
+      b = add_node!(%{type: "article", key: "B", scope: "public"})
+
+      # `links_to` is NOT in the node vocabulary, yet is a perfectly valid edge type.
+      assert "links_to" not in Contract.types()
+      assert {:ok, _} = Graph.add_edge(a, b, "links_to", "ev-1", scope: "public")
+    end
+  end
+
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()
-      assert Contract.schema_version() == 2
+      assert Contract.schema_version() == 3
     end
   end
 

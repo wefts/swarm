@@ -23,6 +23,7 @@ defmodule Swarm.Ingest do
   """
 
   alias Swarm.Graph.Store
+  alias Swarm.Ingest.Content
   alias Swarm.Ingest.DeadLetter
   alias Swarm.Ingest.Dedup
 
@@ -138,6 +139,7 @@ defmodule Swarm.Ingest do
     result =
       Swarm.Repo.transaction(fn ->
         ids = upsert_entities(norm.entities)
+        persist_content(norm.entities, ids, norm.provenance)
         scopes = Map.new(norm.entities, &{&1.key, &1.scope})
         write_relations(norm.relations, ids, scopes, norm.provenance)
       end)
@@ -157,6 +159,23 @@ defmodule Swarm.Ingest do
   @spec upsert_entities([map()]) :: %{optional(String.t()) => integer()}
   defp upsert_entities(entities) do
     Map.new(entities, fn e -> {e.key, Store.upsert_node(e.type, e.key, scope: e.scope)} end)
+  end
+
+  # Persist each content-bearing entity's raw body (swarm ADR-14 §2, Phase A):
+  # deterministic, in-tx, no network. Embedding (segment → chunk → node.vec) is
+  # the separate worker step (`Content.embed/2`) reacting to the `content_added`
+  # signal — kept OUT of this transaction so the gRPC embed call never holds a
+  # graph lock open. A blank body is skipped.
+  @spec persist_content([map()], map(), String.t()) :: :ok
+  defp persist_content(entities, ids, provenance) do
+    Enum.each(entities, fn e ->
+      with id when is_integer(id) <- Map.get(ids, e.key),
+           body when is_binary(body) <- Map.get(e, :content, "") do
+        Content.put_body(id, body, source_ref: provenance)
+      end
+    end)
+
+    :ok
   end
 
   # Write every relation in the event's transaction; a contract rejection on any

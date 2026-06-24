@@ -84,4 +84,86 @@ defmodule Swarm.Graph.MergeTest do
     assert {:ok, %{result: :noop_no_alias}} = Store.merge_nodes("article", "Ghost", "Solo")
     assert {:ok, %{result: :noop_same}} = Store.merge_nodes("article", "Solo", "Solo")
   end
+
+  # --- swarm ADR-14 §3.2: standing alias table, scope-awareness, chunk union ---
+
+  defp content!(node_id, body) do
+    Repo.query!(
+      "INSERT INTO content (node_id, body, body_hash, segmenter) VALUES ($1, $2, $3, 'prose-v1')",
+      [node_id, body, "h#{node_id}"]
+    )
+  end
+
+  defp chunk!(node_id, ordinal) do
+    Repo.query!("INSERT INTO chunk (node_id, ordinal, text) VALUES ($1, $2, $3)", [
+      node_id,
+      ordinal,
+      "span-#{node_id}-#{ordinal}"
+    ])
+  end
+
+  defp chunk_count(node_id) do
+    %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM chunk WHERE node_id = $1", [node_id])
+    n
+  end
+
+  test "a successful merge records a standing alias; the next upsert resolves to canonical" do
+    _a = nid("Allmusic")
+    _b = nid("AllMusic")
+    {:ok, %{result: :merged}} = Store.merge_nodes("article", "Allmusic", "AllMusic")
+
+    # the alias is now standing — upserting the alias key returns the canonical node,
+    # mints nothing new
+    canonical = Store.upsert_node("article", "AllMusic", scope: "public")
+    resolved = Store.upsert_node("article", "Allmusic", scope: "public")
+    assert resolved == canonical
+    assert Repo.query!("SELECT count(*) FROM node WHERE key = 'Allmusic'").rows == [[0]]
+  end
+
+  test "a cross-scope merge is refused (never widens the survivor's scope)" do
+    pub = Store.upsert_node("article", "PublicPage", scope: "public")
+    priv = Store.upsert_node("article", "PrivatePage", scope: "private")
+
+    assert {:ok, %{result: :refused_cross_scope}} =
+             Store.merge_nodes("article", "PublicPage", "PrivatePage")
+
+    # both nodes still exist; the survivor's scope is unchanged
+    assert Repo.query!("SELECT id FROM node WHERE id = $1", [pub]).rows == [[pub]]
+    assert Repo.query!("SELECT scope FROM node WHERE id = $1", [priv]).rows == [["private"]]
+    # and no alias was recorded for a refused merge
+    assert Repo.query!("SELECT count(*) FROM node_alias").rows == [[0]]
+  end
+
+  test "merge unions chunk spans under the survivor (no span dropped, ordinals distinct)" do
+    a = nid("Dup Alias")
+    b = nid("Dup Canon")
+    chunk!(b, 0)
+    chunk!(a, 0)
+    chunk!(a, 1)
+
+    {:ok, %{result: :merged}} = Store.merge_nodes("article", "Dup Alias", "Dup Canon")
+
+    # all three spans survive under the canonical node, with distinct ordinals
+    assert chunk_count(b) == 3
+
+    %{rows: [[distinct]]} =
+      Repo.query!("SELECT count(DISTINCT ordinal) FROM chunk WHERE node_id = $1", [b])
+
+    assert distinct == 3
+    assert chunk_count(a) == 0
+  end
+
+  test "content survivorship keeps the higher-fidelity (longer) body" do
+    a = nid("Long Alias")
+    b = nid("Short Canon")
+    content!(b, "short")
+    content!(a, "a much much longer and higher fidelity body")
+
+    {:ok, %{result: :merged}} = Store.merge_nodes("article", "Long Alias", "Short Canon")
+
+    assert Repo.query!("SELECT body FROM content WHERE node_id = $1", [b]).rows ==
+             [["a much much longer and higher fidelity body"]]
+
+    assert Repo.query!("SELECT count(*) FROM content").rows == [[1]]
+  end
 end

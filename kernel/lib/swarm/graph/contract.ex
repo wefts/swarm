@@ -14,18 +14,32 @@ defmodule Swarm.Graph.Contract do
   - **Visibility invariant (ADR-5 workspace):** an edge's scope may be no wider
     than the narrowest of its two endpoints. Enforced here, at the boundary —
     not by individual callers.
-  - **Type** must be a non-empty lowercase identifier. The type vocabulary is an
-    open-but-versioned registry today (it admits any well-formed type); tightening
-    it is a future schema-version bump, never silent drift.
+  - **Node type** is drawn from a **closed, kernel-owned vocabulary** (`types/0`),
+    the identity/entity-kind axis (swarm ADR-14 §3.1). Connectors *map into* it;
+    an out-of-vocabulary node type fails the write fail-loud, exactly as an
+    unknown scope/kind does. This is the seam ADR-13 left open — within-type
+    entity resolution is only meaningful once types are canonical. (Edge/relation
+    types are a *different* axis: validated for well-formedness only, not
+    membership — the relation vocabulary is connector-defined.) Tightening the
+    node vocabulary is a schema-version bump, never silent drift.
   - **Reliability** stays in `[0, 1]`.
   """
 
   alias Swarm.Repo
 
-  @schema_version 2
+  # v3 — the data-memory-model epoch (swarm ADR-14): the content/chunk side-store
+  # plus this closed node-type vocabulary. Bumped together; mirrored in
+  # `graph_schema_meta` by the v3 migration.
+  @schema_version 3
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/
+  # The closed node-type vocabulary (swarm ADR-14 §3.1) — the entity-kind/identity
+  # axis. Connectors map their source units onto exactly one of these; a node with
+  # any other type is rejected at the boundary (fail-loud). This is NOT the
+  # relation vocabulary (edge types are validated for format only). Grows only by
+  # a versioned bump, never silent drift.
+  @types ~w(self agent user source article concept entity event file dir task ticket anchor)
   # Graph zones / tuple-classes (T12). `observation` = external evidence;
   # `claim` = LLM-generated (NEVER independent corroboration, ADR-3); the rest are
   # lifecycle classes. Each kind may carry its own TTL/compaction policy.
@@ -42,6 +56,10 @@ defmodule Swarm.Graph.Contract do
   @doc "Allowed `type` format (non-empty lowercase identifier)."
   @spec type_format() :: Regex.t()
   def type_format, do: @type_format
+
+  @doc "The closed node-type vocabulary (entity-kind/identity axis, swarm ADR-14 §3.1)."
+  @spec types() :: [String.t()]
+  def types, do: @types
 
   @doc "The closed node-kind vocabulary (graph zones / tuple-classes, T12)."
   @spec kinds() :: [String.t()]
@@ -64,7 +82,7 @@ defmodule Swarm.Graph.Contract do
   """
   @spec validate_node(map()) :: :ok | {:error, atom()}
   def validate_node(attrs) do
-    with :ok <- check_type(get(attrs, :type)),
+    with :ok <- check_node_type(get(attrs, :type)),
          :ok <- check_scope(get(attrs, :scope) || "private") do
       check_reliability(get(attrs, :reliability))
     end
@@ -91,11 +109,24 @@ defmodule Swarm.Graph.Contract do
 
   # --- field checks ----------------------------------------------------------
 
+  # Edge/relation type: well-formedness only (the relation vocabulary is
+  # connector-defined, not a closed kernel set).
   defp check_type(type) when is_binary(type) do
     if Regex.match?(@type_format, type), do: :ok, else: {:error, :invalid_type_format}
   end
 
   defp check_type(_), do: {:error, :missing_type}
+
+  # Node type: well-formed AND a member of the closed kernel vocabulary (§3.1).
+  defp check_node_type(type) when is_binary(type) do
+    cond do
+      not Regex.match?(@type_format, type) -> {:error, :invalid_type_format}
+      type not in @types -> {:error, :unknown_type}
+      true -> :ok
+    end
+  end
+
+  defp check_node_type(_), do: {:error, :missing_type}
 
   defp check_scope(scope) when is_binary(scope) do
     if scope in @scopes, do: :ok, else: {:error, :unknown_scope}

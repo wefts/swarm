@@ -48,5 +48,8 @@ defmodule Swarm.Graph.Node do
     |> validate_inclusion(:scope, Contract.scopes())
     |> validate_inclusion(:kind, Contract.kinds())
     |> validate_format(:type, Contract.type_format())
+    # swarm ADR-14 §3.1: node `type` is a closed kernel vocabulary, not merely a
+    # well-formed string (edge/relation types stay an open, connector-defined set).
+    |> validate_inclusion(:type, Contract.types())
   end
 end

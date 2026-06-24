@@ -98,8 +98,8 @@ defmodule Swarm.Graph.ZonesTest do
     end
 
     test "the schema version is now 2 (bumped by the zones migration)" do
-      assert Contract.stamped_version() == 2
-      assert Contract.schema_version() == 2
+      assert Contract.stamped_version() == 3
+      assert Contract.schema_version() == 3
     end
   end
 end
