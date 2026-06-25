@@ -42,7 +42,7 @@ defmodule Swarm.Ingest.ContentTest do
 
     assert body == "the body text"
     assert hash == Content.body_hash("the body text")
-    assert seg == "prose-v1"
+    assert seg == "structured-v1"
     assert ref == "wikipedia:1"
 
     assert Repo.query!(
