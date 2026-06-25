@@ -26,6 +26,7 @@ defmodule Swarm.Graph.Retrieval do
   ColBERT.
   """
 
+  alias Swarm.Graph.Corroboration
   alias Swarm.Graph.Traverse
   alias Swarm.ML.Embeddings
   alias Swarm.Repo
@@ -100,7 +101,7 @@ defmodule Swarm.Graph.Retrieval do
       |> group_by_node(spans, floor)
       |> Enum.sort_by(& &1.score, :desc)
       |> Enum.take(limit)
-      |> attach_identity()
+      |> attach_identity(scopes)
 
     expanded =
       if Keyword.get(opts, :expand, true),
@@ -263,10 +264,14 @@ defmodule Swarm.Graph.Retrieval do
     Application.get_env(:swarm, :retrieval, [])[:dense] != false
   end
 
-  # Attach node identity + trust (reliability) — every memory names its node.
-  defp attach_identity([]), do: []
+  # Attach node identity + trust — every memory names its node. `confidence` is
+  # the node's evidential corroboration (ADR-13: combine_typed over independent
+  # origins) when it has typed assertions, else its intrinsic reliability. Both
+  # the identity meta and the corroboration are batched (one query each), so this
+  # stays bounded by the result set, never a graph scan.
+  defp attach_identity([], _scopes), do: []
 
-  defp attach_identity(memories) do
+  defp attach_identity(memories, scopes) do
     ids = Enum.map(memories, & &1.node_id)
 
     meta =
@@ -274,14 +279,18 @@ defmodule Swarm.Graph.Retrieval do
       |> Map.get(:rows)
       |> Map.new(fn [id, type, key, rel] -> {id, {type, key, rel}} end)
 
+    corr = Corroboration.for_nodes(ids, scopes: scopes)
+
     Enum.map(memories, fn m ->
       {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
-      # `relevance` (cosine) is already on the memory from grouping; add identity +
-      # `confidence` (graph trust). Round relevance for a clean external number.
+      # Corroboration when the node carries independent typed evidence; otherwise
+      # fall back to intrinsic reliability (an un-enriched node is not penalised).
+      confidence = Map.get(corr, m.node_id, rel)
+
       Map.merge(m, %{
         type: type,
         key: key,
-        confidence: rel,
+        confidence: confidence,
         relevance: Float.round(m.relevance, 4)
       })
     end)
