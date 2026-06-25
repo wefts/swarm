@@ -103,6 +103,13 @@ applies per `type` is settled by a recall measurement in the build campaign (§7
 guessed here. Re-aggregation is a cheap recompute when the chunk set changes
 (§7 write-amplification).
 
+> **Status (Phase 2, 2026-06-25): the per-type choice is DEFERRED, not settled.** Retrieval
+> is entirely **chunk-level** (`chunk.vec`); `node.vec` is currently **write-only** — set on
+> embed but read by no retrieval/gate/core path. With no consumer, a recall measurement
+> cannot distinguish aggregate from identity, so the choice is deferred (the aggregate mean
+> remains the harmless default) until a node-level dense consumer exists. Picking it now
+> would be guessing at something nothing reads.
+
 ## 3. Normalization seams this spec newly specifies
 
 ### 3.1 Kernel-owned type vocabulary
@@ -224,6 +231,28 @@ positives the floor removed:
   **content-less stub** title can still false-`found` an out-of-scope query
   (`board/todo/key-arm-answerability`); `"my"` *inside* a title trips the ownership path
   (`board/todo/first-person-false-ownership`).
+
+### 5.3 Weighted RRF — protect exact hits without losing paraphrase (Phase 2, built)
+
+Card 7 measured the two arms separately on a 2-source slice and found a real ranking
+defect the equal-weight fuse caused, plus the reason the dense arm must stay:
+
+- **Dense is essential.** On paraphrase queries (locally-generated NL questions, words
+  differing from the source) the lexical arm gets ~0–3% recall@5; hybrid reaches ~72%
+  on **both** source shapes (intranet + Wikipedia). The dense arm is the only thing
+  that answers a natural-language question — not optional.
+- **But dense demoted exact hits.** After structure-aware chunking (§2 stage 5) made
+  chunks finer, a multi-chunk dense "magnet" node could out-accumulate a single exact
+  **lexical** hit; an ablation showed 100% of the lost cases were exact-lexical hits
+  demoted by dense fusion (0 were missing/mis-scoped chunks).
+- **Fix: weighted RRF.** The fused SQL scales the lexical term by `lex_weight` and the
+  dense term by `dense_weight` (`config :swarm, :retrieval`; per-call overridable).
+  Because a paraphrase query has **no lexical rows**, raising `lex_weight` cannot change
+  paraphrase ranking — it only floors exact keyword hits on verbatim/keyword queries.
+  Tuned by sweep to **`lex_weight: 3.0`, `dense_weight: 1.0`**: group verbatim hybrid
+  recall@5 94.7→100% and MRR 0.687→0.878, public verbatim MRR 0.966→0.99, while group
+  paraphrase recall held (71.7→70.0%, MRR 0.437→0.456). The relevance floor (§5.1) still
+  gates dense-only hits on absolute cosine; weighting is orthogonal to it.
 
 ## 6. Reconciliation with existing canon
 

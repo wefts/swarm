@@ -85,6 +85,41 @@ defmodule Swarm.Graph.RetrievalTest do
     assert "LexHit" in ks
   end
 
+  test "weighted RRF protects an exact lexical hit from dense-magnet demotion" do
+    # Card 7: a multi-chunk "magnet" node (many near-neighbour dense hits, no keyword
+    # match) can out-accumulate a single exact lexical hit under equal RRF weights.
+    # Weighting the lexical arm higher floors the exact hit back to the top, while
+    # leaving paraphrase ranking untouched (paraphrase has no lexical rows).
+    lex = node!("Lex", "public")
+    chunk!(lex, 0, "the unique zebra keyword", 0)
+
+    mag = node!("Magnet", "public")
+    for i <- 0..3, do: chunk!(mag, i, "generic filler text number #{i}", 5)
+
+    q = "zebra"
+    qv = vecn(5)
+
+    %{memories: equal} =
+      Retrieval.search(q, ["public"],
+        query_vec: qv,
+        expand: false,
+        lex_weight: 1.0,
+        dense_weight: 1.0
+      )
+
+    assert hd(keys(equal)) == "Magnet"
+
+    %{memories: weighted} =
+      Retrieval.search(q, ["public"],
+        query_vec: qv,
+        expand: false,
+        lex_weight: 5.0,
+        dense_weight: 1.0
+      )
+
+    assert hd(keys(weighted)) == "Lex"
+  end
+
   test "stage-2 traversal expands seeds into multi-hop neighbours" do
     seed = node!("Seed", "public")
     neighbour = node!("Neighbour", "public")
@@ -143,6 +178,10 @@ defmodule Swarm.Graph.RetrievalTest do
 
     # cos is 1.0 for an identical vector; a floor above 1.0 refuses everything dense
     assert %{status: :not_found} =
-             Retrieval.search("zzz qqq", ["public"], query_vec: vecn(0), floor: 1.01, expand: false)
+             Retrieval.search("zzz qqq", ["public"],
+               query_vec: vecn(0),
+               floor: 1.01,
+               expand: false
+             )
   end
 end

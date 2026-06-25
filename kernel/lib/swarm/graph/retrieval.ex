@@ -82,6 +82,7 @@ defmodule Swarm.Graph.Retrieval do
     k = Keyword.get(opts, :rrf_k, 60)
     spans = Keyword.get(opts, :spans, 3)
     floor = Keyword.get(opts, :floor, configured_floor())
+    {lex_w, dense_w} = weights(opts)
 
     # An explicitly supplied query vector ALWAYS wins (tests, callers that pre-embed);
     # otherwise embed only if the dense arm is enabled (config-gated, so unit tests
@@ -95,7 +96,7 @@ defmodule Swarm.Graph.Retrieval do
 
     memories =
       query
-      |> fused_chunks(scopes, candidates, k, qvec)
+      |> fused_chunks(scopes, candidates, k, qvec, lex_w, dense_w)
       |> group_by_node(spans, floor)
       |> Enum.sort_by(& &1.score, :desc)
       |> Enum.take(limit)
@@ -124,9 +125,16 @@ defmodule Swarm.Graph.Retrieval do
            lex: boolean()
          }
 
-  @spec fused_chunks(String.t(), [String.t()], pos_integer(), pos_integer(), Pgvector.t() | nil) ::
-          [fused()]
-  defp fused_chunks(query, scopes, candidates, k, nil) do
+  @spec fused_chunks(
+          String.t(),
+          [String.t()],
+          pos_integer(),
+          pos_integer(),
+          Pgvector.t() | nil,
+          float(),
+          float()
+        ) :: [fused()]
+  defp fused_chunks(query, scopes, candidates, k, nil, _lex_w, _dense_w) do
     # Lexical-only (no query vector): a keyword match is the only relevance signal,
     # so `cos` is unknown (nil) and every hit is a lexical hit.
     sql = """
@@ -149,12 +157,14 @@ defmodule Swarm.Graph.Retrieval do
     run_fused(sql, [query, scopes, candidates, k])
   end
 
-  defp fused_chunks(query, scopes, candidates, k, qvec) do
+  defp fused_chunks(query, scopes, candidates, k, qvec, lex_w, dense_w) do
     # Each arm carries its rank (for RRF) plus the dense arm's ABSOLUTE cosine
-    # similarity (`1 - distance`) and a lexical-hit flag. Absolute cosine is the
-    # calibratable relevance signal RRF-rank alone discards (the diagnosis): it
-    # drives the relevance floor and the ranking, so out-of-scope queries (no
-    # lexical hit, low cosine) can be refused and magnets cannot win on rank credit.
+    # similarity (`1 - distance`) and a lexical-hit flag. **Weighted RRF** (Card 7):
+    # the lexical term is scaled by `$6` and the dense term by `$7`, so an exact
+    # keyword hit (`w_lex > w_dense`) resists demotion by a multi-chunk dense
+    # "magnet" — while PARAPHRASE ranking is untouched (a paraphrase query has no
+    # lexical rows, so only the dense term applies). Absolute cosine still drives
+    # the relevance floor and is reported as the calibrated relevance signal.
     sql = """
     WITH q AS (SELECT plainto_tsquery('simple', $1) AS tsq),
     lexical AS (
@@ -162,7 +172,7 @@ defmodule Swarm.Graph.Retrieval do
              row_number() OVER (
                ORDER BY ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) DESC
              ) AS rnk,
-             NULL::float8 AS cos, true AS lex
+             NULL::float8 AS cos, true AS lex, $6::float8 AS w
       FROM chunk k JOIN node n ON n.id = k.node_id
       WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
       LIMIT $3
@@ -170,14 +180,14 @@ defmodule Swarm.Graph.Retrieval do
     dense AS (
       SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
              row_number() OVER (ORDER BY k.vec <=> $5) AS rnk,
-             (1.0 - (k.vec <=> $5))::float8 AS cos, false AS lex
+             (1.0 - (k.vec <=> $5))::float8 AS cos, false AS lex, $7::float8 AS w
       FROM chunk k JOIN node n ON n.id = k.node_id
       WHERE n.scope = ANY($2) AND k.vec IS NOT NULL
       ORDER BY k.vec <=> $5
       LIMIT $3
     )
     SELECT node_id, ordinal, text,
-           sum(1.0 / ($4 + rnk))::float8 AS rrf,
+           sum(w / ($4 + rnk))::float8 AS rrf,
            max(cos) AS cos,
            bool_or(lex) AS lex
     FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
@@ -185,7 +195,7 @@ defmodule Swarm.Graph.Retrieval do
     ORDER BY rrf DESC
     """
 
-    run_fused(sql, [query, scopes, candidates, k, qvec])
+    run_fused(sql, [query, scopes, candidates, k, qvec, lex_w, dense_w])
   end
 
   defp run_fused(sql, params) do
@@ -218,7 +228,8 @@ defmodule Swarm.Graph.Retrieval do
               node_id: node_id,
               score: kept |> Enum.map(& &1.rrf) |> Enum.sum(),
               relevance: kept |> Enum.map(&(&1.cos || 0.0)) |> Enum.max(),
-              spans: sorted |> Enum.take(spans_per) |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
+              spans:
+                sorted |> Enum.take(spans_per) |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
             }
           ]
       end
@@ -233,6 +244,16 @@ defmodule Swarm.Graph.Retrieval do
 
   defp configured_floor do
     Application.get_env(:swarm, :retrieval, [])[:floor] || @default_floor
+  end
+
+  # Weighted-RRF arm weights (Card 7). Per-call `:lex_weight`/`:dense_weight` override
+  # config, which overrides the equal-weight default (1.0/1.0 — identical to the
+  # original behaviour, so nothing changes until a weight is set).
+  defp weights(opts) do
+    cfg = Application.get_env(:swarm, :retrieval, [])
+    lex = Keyword.get(opts, :lex_weight) || cfg[:lex_weight] || 1.0
+    dense = Keyword.get(opts, :dense_weight) || cfg[:dense_weight] || 1.0
+    {lex / 1, dense / 1}
   end
 
   # Whether the dense arm is on by default. True in production; a deployment (or
@@ -257,7 +278,12 @@ defmodule Swarm.Graph.Retrieval do
       {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
       # `relevance` (cosine) is already on the memory from grouping; add identity +
       # `confidence` (graph trust). Round relevance for a clean external number.
-      Map.merge(m, %{type: type, key: key, confidence: rel, relevance: Float.round(m.relevance, 4)})
+      Map.merge(m, %{
+        type: type,
+        key: key,
+        confidence: rel,
+        relevance: Float.round(m.relevance, 4)
+      })
     end)
   end
 

@@ -17,10 +17,14 @@ config :swarm, :embedding, dim: 1024
 # (dense-only hits below it are out-of-scope → `:not_found`). `dense` toggles the
 # vector arm; the test env has no embedding sidecar (and no embedded chunks), so it
 # runs lexical-only — disabled below — to avoid an unreachable-ML round-trip per query.
-config :swarm, :retrieval, floor: 0.45, dense: true
+# `lex_weight`/`dense_weight` are the weighted-RRF arm weights (Card 7): lex_weight=3
+# floors exact keyword hits so a dense "magnet" cannot demote them, while leaving
+# paraphrase ranking untouched (paraphrase queries have no lexical rows). Tuned on the
+# 2-source slice — verbatim MRR 0.69→0.88, paraphrase recall held ~70%.
+config :swarm, :retrieval, floor: 0.45, dense: true, lex_weight: 3.0, dense_weight: 1.0
 
 if config_env() == :test do
-  config :swarm, :retrieval, floor: 0.45, dense: false
+  config :swarm, :retrieval, floor: 0.45, dense: false, lex_weight: 3.0, dense_weight: 1.0
 end
 
 # Decay + saturation parameters (ADR-9). These belong to the tuning inventory
