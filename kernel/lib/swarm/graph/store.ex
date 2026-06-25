@@ -1,8 +1,10 @@
 defmodule Swarm.Graph.Store do
   @moduledoc """
   Node and edge writes. `add_node` is a validated Ecto insert; `add_edge` is the
-  atomic insert-or-increment upsert on the natural key, with the ADR-9
-  reinforcement guard (seen_count grows only from provenance-distinct events).
+  atomic insert-or-increment upsert on the natural key, with the reinforcement
+  guard: `seen_count` grows only from a **new distinct evidential origin**
+  (workspace ADR-13), and the provenance key still dedups emission instances so a
+  single event never counts twice (ADR-9 endogenous-loop guard).
 
   Performance: both are O(1) in graph size — single indexed-row writes (the
   upsert touches one edge row, one provenance row, one increment), never a scan
@@ -13,7 +15,7 @@ defmodule Swarm.Graph.Store do
   alias Swarm.Graph.Node
   alias Swarm.Repo
 
-  @typedoc "Result of `add_edge`: the edge id, its current distinct-provenance count, and whether this call reinforced it."
+  @typedoc "Result of `add_edge`: the edge id, its current distinct-origin count, and whether this call reinforced it (introduced a new origin)."
   @type edge_result :: %{id: integer(), seen_count: integer(), reinforced: boolean()}
 
   @doc "Insert a node. See `Swarm.Graph.Node` for fields; `type` is required."
@@ -89,11 +91,17 @@ defmodule Swarm.Graph.Store do
   @doc """
   Upsert a typed edge on the natural key `(src, type, dst, visibility_scope)`.
 
-  Reinforcement (ADR-9): `seen_count` increments only when `provenance` is a
-  new, distinct event for this edge — re-detecting the same event is a no-op for
-  the count. `provenance` is a caller-owned key for the originating ingest event.
+  Reinforcement (workspace ADR-13): `seen_count` counts **distinct evidential
+  origins** and increments only when this call introduces an origin the edge has
+  not seen. `provenance` is the caller-owned *emission-instance* key — re-detecting
+  the same event is a no-op for the count (ADR-9 endogenous-loop guard); a fresh
+  event of an **already-counted origin** is recorded (audit trail) but does **not**
+  reinforce. `:origin` is the evidential source identity (connector-derived, stable
+  across re-emissions); it **defaults to `provenance`** when absent — every event
+  its own origin, the pre-v4 behaviour — so an N-derivatives-of-one-source caller
+  passes one origin to keep corroboration honest.
 
-  `opts`: `:scope` (default `"private"`), `:weight`, `:reliability`.
+  `opts`: `:scope` (default `"private"`), `:weight`, `:reliability`, `:origin`.
   """
   @spec add_edge(integer(), integer(), String.t(), String.t(), keyword()) ::
           {:ok, edge_result()} | {:error, term()}
@@ -102,6 +110,7 @@ defmodule Swarm.Graph.Store do
     scope = Keyword.get(opts, :scope, "private")
     weight = Keyword.get(opts, :weight, 1.0)
     reliability = Keyword.get(opts, :reliability, 1.0)
+    origin = Keyword.get(opts, :origin, provenance)
 
     Repo.transaction(fn ->
       # swarm ADR-4: enforce the contract at the write boundary — type/scope
@@ -110,26 +119,39 @@ defmodule Swarm.Graph.Store do
       # silently store a leaking or malformed edge.
       {src_scope, dst_scope} = endpoint_scopes(src, dst)
 
-      case Contract.validate_edge(src_scope, dst_scope, type, scope, reliability, provenance) do
+      case Contract.validate_edge(
+             src_scope,
+             dst_scope,
+             type,
+             scope,
+             reliability,
+             provenance,
+             origin
+           ) do
         :ok -> :ok
         {:error, reason} -> Repo.rollback({:contract, reason})
       end
 
       edge_id = upsert_identity(src, dst, type, scope, weight, reliability)
 
-      if record_provenance(edge_id, provenance) do
-        seen = bump_seen(edge_id)
+      case record_event(edge_id, provenance, origin) do
+        :new_origin ->
+          # A new distinct origin adds exactly 1 to count(DISTINCT origin).
+          seen = bump_seen(edge_id)
 
-        emit_outbox(
-          "edge_reinforced",
-          "edge:#{edge_id}",
-          %{id: edge_id, src: src, dst: dst, type: type, seen_count: seen},
-          "edge:#{edge_id}:#{provenance}"
-        )
+          emit_outbox(
+            "edge_reinforced",
+            "edge:#{edge_id}",
+            %{id: edge_id, src: src, dst: dst, type: type, seen_count: seen},
+            "edge:#{edge_id}:#{provenance}"
+          )
 
-        %{id: edge_id, seen_count: seen, reinforced: true}
-      else
-        %{id: edge_id, seen_count: current_seen(edge_id), reinforced: false}
+          %{id: edge_id, seen_count: seen, reinforced: true}
+
+        # Fresh event under an already-counted origin, or a duplicate event:
+        # recorded (or no-op) but corroboration does not grow.
+        _ ->
+          %{id: edge_id, seen_count: current_seen(edge_id), reinforced: false}
       end
     end)
   end
@@ -377,17 +399,19 @@ defmodule Swarm.Graph.Store do
   defp repoint_one(eid, new_src, new_dst, etype, scope) do
     case existing_edge(new_src, etype, new_dst, scope) do
       target when is_integer(target) and target != eid ->
-        # Natural-key collision: union the alias edge's provenance into the survivor,
-        # recompute its distinct-provenance seen_count, then drop the alias edge.
+        # Natural-key collision: union the alias edge's (provenance, origin) rows
+        # into the survivor, recompute its distinct-ORIGIN seen_count (workspace
+        # ADR-13 — a merge counts distinct evidential origins, so folding two
+        # spellings of one source cannot over-corroborate), then drop the alias edge.
         Repo.query!(
-          "INSERT INTO edge_provenance (edge_id, provenance) " <>
-            "SELECT $1, provenance FROM edge_provenance WHERE edge_id = $2 " <>
+          "INSERT INTO edge_provenance (edge_id, provenance, origin) " <>
+            "SELECT $1, provenance, origin FROM edge_provenance WHERE edge_id = $2 " <>
             "ON CONFLICT (edge_id, provenance) DO NOTHING",
           [target, eid]
         )
 
         Repo.query!(
-          "UPDATE edge SET seen_count = (SELECT count(*) FROM edge_provenance WHERE edge_id = $1), last_seen = now(), updated_at = now() WHERE id = $1",
+          "UPDATE edge SET seen_count = (SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance WHERE edge_id = $1), last_seen = now(), updated_at = now() WHERE id = $1",
           [target]
         )
 
@@ -448,17 +472,40 @@ defmodule Swarm.Graph.Store do
     id
   end
 
-  # Record one provenance event; true iff it was new (distinct) for this edge.
-  @spec record_provenance(integer(), String.t()) :: boolean()
-  defp record_provenance(edge_id, provenance) do
+  # Record one (provenance, origin) event and classify what it did for the edge's
+  # distinct-origin count (workspace ADR-13):
+  #   :duplicate       — the same emission instance, already recorded (no-op);
+  #   :existing_origin — a new event, but its origin is already counted (audit only);
+  #   :new_origin      — a new event introducing an origin the edge had not seen.
+  @spec record_event(integer(), String.t(), String.t()) ::
+          :duplicate | :existing_origin | :new_origin
+  defp record_event(edge_id, provenance, origin) do
     sql = """
-    INSERT INTO edge_provenance (edge_id, provenance)
-    VALUES ($1, $2)
+    INSERT INTO edge_provenance (edge_id, provenance, origin)
+    VALUES ($1, $2, $3)
     ON CONFLICT (edge_id, provenance) DO NOTHING
     RETURNING edge_id
     """
 
-    Repo.query!(sql, [edge_id, provenance]).num_rows == 1
+    if Repo.query!(sql, [edge_id, provenance, origin]).num_rows == 1 do
+      # New event recorded. Is this the FIRST row carrying this origin (the row we
+      # just inserted included)? If so it is a new distinct origin → reinforces.
+      #
+      # Race-safety: this read-then-classify is exact only because the caller's
+      # `upsert_identity` already holds the edge row lock for this transaction
+      # (its `ON CONFLICT DO UPDATE` locks the conflicting row), serialising
+      # concurrent same-edge reinforcements. Do NOT drop that conflict-update or
+      # this count can race two same-origin events into a double reinforcement.
+      %{rows: [[c]]} =
+        Repo.query!(
+          "SELECT count(*) FROM edge_provenance WHERE edge_id = $1 AND coalesce(origin, provenance) = $2",
+          [edge_id, origin]
+        )
+
+      if c == 1, do: :new_origin, else: :existing_origin
+    else
+      :duplicate
+    end
   end
 
   # Atomic increment in the engine (ADR-1), not a read-modify-write in app code.

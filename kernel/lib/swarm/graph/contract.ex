@@ -27,10 +27,10 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
-  # v3 — the data-memory-model epoch (swarm ADR-14): the content/chunk side-store
-  # plus this closed node-type vocabulary. Bumped together; mirrored in
-  # `graph_schema_meta` by the v3 migration.
-  @schema_version 3
+  # v4 — evidential origin (workspace ADR-13): `edge_provenance` gains an `origin`
+  # axis and `seen_count` counts distinct origins, not distinct emission events.
+  # Mirrored in `graph_schema_meta` by the v4 migration.
+  @schema_version 4
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/
@@ -90,17 +90,19 @@ defmodule Swarm.Graph.Contract do
 
   @doc """
   Validate an edge given its endpoints' current scopes. Enforces type, scope
-  vocabulary, reliability range, that both endpoints exist (non-nil scope), and
-  the ADR-5 visibility invariant (edge scope no wider than the narrowest
-  endpoint). `:ok` or `{:error, reason}`.
+  vocabulary, reliability range, that both endpoints exist (non-nil scope), the
+  ADR-5 visibility invariant (edge scope no wider than the narrowest endpoint),
+  and that both the emission-instance `provenance` and the evidential `origin`
+  (workspace ADR-13) keys are present. `:ok` or `{:error, reason}`.
   """
-  @spec validate_edge(String.t() | nil, String.t() | nil, term(), term(), term(), term()) ::
+  @spec validate_edge(String.t() | nil, String.t() | nil, term(), term(), term(), term(), term()) ::
           :ok | {:error, atom()}
-  def validate_edge(src_scope, dst_scope, type, scope, reliability, provenance) do
+  def validate_edge(src_scope, dst_scope, type, scope, reliability, provenance, origin) do
     with :ok <- check_type(type),
          :ok <- check_scope(scope),
          :ok <- check_reliability(reliability),
          :ok <- check_provenance(provenance),
+         :ok <- check_origin(origin),
          :ok <- check_endpoint(src_scope),
          :ok <- check_endpoint(dst_scope) do
       check_visibility(scope, src_scope, dst_scope)
@@ -146,14 +148,25 @@ defmodule Swarm.Graph.Contract do
   defp check_endpoint(_), do: {:error, :unknown_endpoint}
 
   # Shape only: a provenance key must be present and non-blank. This is the
-  # *emission-instance* key the ADR-9 reinforcement guard dedups on; whether it
-  # tracks *evidential origin* (the independence hazard) is the separate open
-  # decision in ADR-9 / confidence-calculus.md, NOT settled here.
+  # *emission-instance* key the ADR-9 reinforcement guard dedups on (one event
+  # never counts twice); evidential independence is the `origin` axis below.
   defp check_provenance(p) when is_binary(p) do
     if String.trim(p) == "", do: {:error, :blank_provenance}, else: :ok
   end
 
   defp check_provenance(_), do: {:error, :blank_provenance}
+
+  # Shape only: an origin key must be present and non-blank (workspace ADR-13).
+  # `origin` is the *evidential source identity* — derived by the connector from
+  # content/source so re-emitting the same fact reuses the same key — that
+  # corroboration and reinforcement count distinct instances of. `Store.add_edge`
+  # defaults it to the provenance key when a caller does not supply one (every
+  # event its own origin = pre-v4 behaviour), so it is always present here.
+  defp check_origin(o) when is_binary(o) do
+    if String.trim(o) == "", do: {:error, :blank_origin}, else: :ok
+  end
+
+  defp check_origin(_), do: {:error, :blank_origin}
 
   # The visibility invariant: rank(edge) <= min(rank(src), rank(dst)).
   defp check_visibility(scope, src_scope, dst_scope) do
