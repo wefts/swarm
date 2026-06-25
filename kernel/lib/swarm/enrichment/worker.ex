@@ -4,7 +4,8 @@ defmodule Swarm.Enrichment.Worker do
   object claims from a node's stored text and write them as **typed assertions**
   onto the graph. This is the cost-asymmetry pillar in the flesh — an LLM call of
   ~120 s/source — so it is rare and deliberate, never the continuous default
-  (scheduling is EW-4/EW-5; this module is the extraction + write step).
+  (scheduling is EW-4/EW-5; this module is extraction + write, gated by the
+  watermark).
 
   What it writes (model B, EW-1): each triple becomes an edge between the subject
   and object **entity** nodes, carrying `evidence_kind: "claim"` — the assertion is
@@ -15,16 +16,24 @@ defmodule Swarm.Enrichment.Worker do
   origin). The LLM model is injectable (`:gen_fun`) so the write/parse logic is
   tested deterministically without a 120 s round-trip.
 
+  **Watermark (EOS-4 §1a):** before extracting, a content-sensitive watermark is
+  consulted — an unchanged, already-`fresh` node is skipped (zero LLM calls); a
+  changed body / bumped policy / bumped model re-enriches. On a content-change
+  re-enrich the prior claims are **reconciled** (stale triples dropped, surviving
+  ones kept) so enrichment is not append-only memory for edited documents.
+
   **Zone / convergence guard (EOS-4 §1c):** the worker NEVER enriches an
   LLM-generated zone (`claim`/`hypothesis`/`derived`) — feeding the worker its own
-  output is the unbounded worker→graph→worker loop. It enriches only external
-  zones (`observation`/article). The generation-counter half of the guard is EW-5.
+  output is the unbounded worker→graph→worker loop. The generation-counter half is
+  EW-5.
 
   Privacy: claims inherit the source node's scope (group-scope content stays
   group); the model is LOCAL (config). Enrichment output IS content — never logged.
   """
 
+  alias Swarm.Enrichment.Watermark
   alias Swarm.Graph.Store
+  alias Swarm.Ingest.Content
   alias Swarm.ML.Generation
   alias Swarm.Repo
 
@@ -36,8 +45,6 @@ defmodule Swarm.Enrichment.Worker do
             "Keep subject/object short noun phrases. Output STRICT JSON only, no prose: " <>
             "{\"claims\":[{\"s\":\"subject\",\"p\":\"predicate\",\"o\":\"object\"}]}. At most 8 claims."
 
-  # LLM-generated zones — enriching one feeds the worker its own output (the
-  # convergence guard; EOS-4 §1c). `node.kind` says what the node IS.
   @generated_kinds ~w(claim hypothesis derived)
 
   @typedoc "Outcome of one enrichment: how many triples were extracted and how many became edges."
@@ -48,12 +55,14 @@ defmodule Swarm.Enrichment.Worker do
   `claim`-kind assertion edges between entity nodes.
 
   `opts`:
-  - `:gen_fun` — the generation function `(model, prompt, keyword) -> {:ok, raw} |
-    {:error, term}`; defaults to the real `Swarm.ML.Generation.generate/3`.
+  - `:gen_fun` — `(model, prompt, keyword) -> {:ok, raw} | {:error, term}`;
+    defaults to the real `Swarm.ML.Generation.generate/3`.
   - `:model` — overrides the configured local enrichment model.
+  - `:force` — bypass the watermark (re-extract even if fresh).
 
-  Returns `{:ok, result}`, `{:skip, reason}` (zone guard / no body), or a typed
-  `{:error, reason}` (fail-loud — a generation failure is an error, not "0 claims").
+  Returns `{:ok, result}`, `{:skip, reason}` (`:generated_zone` / `:no_body` /
+  `:watermarked`), or a typed `{:error, reason}` (fail-loud — a generation failure
+  is an error, not "0 claims").
   """
   @spec enrich(integer(), keyword()) :: {:ok, result()} | {:skip, atom()} | {:error, term()}
   def enrich(node_id, opts \\ []) when is_integer(node_id) do
@@ -62,62 +71,106 @@ defmodule Swarm.Enrichment.Worker do
         {:error, :no_such_node}
 
       %{kind: kind} when kind in @generated_kinds ->
-        # Convergence guard: never enrich the worker's own output zone.
         {:skip, :generated_zone}
 
       node ->
         case body(node_id) do
-          b when is_binary(b) and b != "" -> extract_and_write(node, b, opts)
+          b when is_binary(b) and b != "" -> gate(node, b, opts)
           _ -> {:skip, :no_body}
         end
     end
   end
 
-  @spec extract_and_write(map(), String.t(), keyword()) :: {:ok, result()} | {:error, term()}
-  defp extract_and_write(node, body, opts) do
+  # Watermark gate: skip an unchanged, fresh node (no LLM call); otherwise run.
+  @spec gate(map(), String.t(), keyword()) :: {:ok, result()} | {:skip, atom()} | {:error, term()}
+  defp gate(node, body, opts) do
     cfg = Application.get_env(:swarm, :enrichment, [])
     model = Keyword.get(opts, :model) || cfg[:model] || "qwen3:14b"
-    max_passage = cfg[:max_passage] || 2_400
-    gen = Keyword.get(opts, :gen_fun, &Generation.generate/3)
+    policy = cfg[:policy_version] || 1
+    hash = Content.body_hash(body)
 
+    if Keyword.get(opts, :force, false) or Watermark.needs?(node.id, hash, policy, model) do
+      run(node, body, %{hash: hash, policy: policy, model: model}, opts)
+    else
+      {:skip, :watermarked}
+    end
+  end
+
+  @spec run(map(), String.t(), map(), keyword()) :: {:ok, result()} | {:error, term()}
+  defp run(node, body, %{hash: hash, policy: policy, model: model}, opts) do
+    max_passage = Application.get_env(:swarm, :enrichment, [])[:max_passage] || 2_400
+    gen = Keyword.get(opts, :gen_fun, &Generation.generate/3)
     prompt = "PASSAGE:\n" <> String.slice(body, 0, max_passage) <> "\n\nJSON:"
+    gen_ct = Watermark.generation(node.id)
+
+    # The model call is OUTSIDE any transaction — it is slow (~120 s) and must not
+    # hold a DB connection/lock open.
+    stamp = fn state ->
+      %{
+        content_hash: hash,
+        policy_version: policy,
+        model: model,
+        generation: gen_ct,
+        state: state
+      }
+    end
 
     case gen.(model, prompt, json: false, system: @system) do
       {:ok, raw} ->
         claims = parse(raw)
-        {:ok, %{claims: length(claims), edges: write_claims(node, claims)}}
+
+        # A malformed triple is dropped and the run continues; an unexpected WRITE
+        # failure aborts the run (council, codex): otherwise `kept` would be
+        # incomplete and reconcile could delete a still-live prior claim. On abort
+        # we skip reconcile + the fresh watermark, and record `error` to retry.
+        case write_claims(node, claims) do
+          {:ok, edge_ids} ->
+            reconcile(node.id, edge_ids)
+            Watermark.record(node.id, stamp.("fresh"))
+            {:ok, %{claims: length(claims), edges: length(edge_ids)}}
+
+          {:error, reason} ->
+            Watermark.record(node.id, stamp.("error"))
+            {:error, {:write_failed, reason}}
+        end
 
       {:error, reason} ->
-        # Fail loud (ADR-7): a model/transport failure is an ERROR, distinct from
-        # "the passage stated no claims" (which is a successful run with 0 claims).
+        # Fail loud (ADR-7), and record an `error` watermark so the node is retried
+        # (needs?/4 treats a non-fresh state as needing re-enrichment).
+        Watermark.record(node.id, stamp.("error"))
         {:error, {:generation_failed, reason}}
     end
   end
 
   # Write each triple as a claim assertion. One source = one evidential `origin`
-  # (so its claims don't self-corroborate); one enrichment run = one `provenance`
-  # (so a re-run dedups per edge). Entities are `observation` things; the EDGE
-  # carries `evidence_kind: "claim"` (EW-1). A malformed triple is dropped with a
-  # logged reason (no silent drop), never crashing the run.
-  @spec write_claims(map(), [map()]) :: non_neg_integer()
+  # (claims don't self-corroborate); one run = one `provenance` (a re-run dedups
+  # per edge). A malformed triple is `{:skip, _}` — dropped with a logged reason
+  # (no silent drop), run continues. A genuine write failure is `{:error, _}` and
+  # HALTS the run (returns `{:error, reason}`) so reconcile never sees an
+  # incomplete set. Returns `{:ok, edge_ids}` or `{:error, reason}`.
+  @spec write_claims(map(), [map()]) :: {:ok, [integer()]} | {:error, term()}
   defp write_claims(node, claims) do
-    origin = "enrich:origin:node:#{node.id}"
-    provenance = "enrich:node:#{node.id}"
+    origin = origin(node.id)
+    provenance = provenance(node.id)
     reliability = Application.get_env(:swarm, :enrichment, [])[:claim_reliability] || 0.5
 
-    Enum.reduce(claims, 0, fn claim, acc ->
+    Enum.reduce_while(claims, {:ok, []}, fn claim, {:ok, ids} ->
       case write_one(node, claim, origin, provenance, reliability) do
-        :ok ->
-          acc + 1
+        {:ok, edge_id} ->
+          {:cont, {:ok, [edge_id | ids]}}
 
-        {:dropped, reason} ->
+        {:skip, reason} ->
           Logger.debug("enrichment: dropped triple from node #{node.id}: #{inspect(reason)}")
-          acc
+          {:cont, {:ok, ids}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
 
-  @spec write_one(map(), map(), String.t(), String.t(), float()) :: :ok | {:dropped, term()}
+  @spec write_one(map(), map(), String.t(), String.t(), float()) ::
+          {:ok, integer()} | {:skip, term()} | {:error, term()}
   defp write_one(node, %{s: s, p: p, o: o}, origin, provenance, reliability) do
     pred = predicate(p)
     subj_key = entity_key(s)
@@ -125,10 +178,10 @@ defmodule Swarm.Enrichment.Worker do
 
     cond do
       pred == "" ->
-        {:dropped, :bad_predicate}
+        {:skip, :bad_predicate}
 
       subj_key == "" or obj_key == "" ->
-        {:dropped, :blank_entity}
+        {:skip, :blank_entity}
 
       true ->
         subj = Store.upsert_node("entity", subj_key, scope: node.scope)
@@ -140,11 +193,68 @@ defmodule Swarm.Enrichment.Worker do
                evidence_kind: "claim",
                reliability: reliability
              ) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:dropped, reason}
+          {:ok, %{id: edge_id}} -> {:ok, edge_id}
+          # A well-formed claim that failed to PERSIST → abort (not a silent drop).
+          {:error, reason} -> {:error, reason}
         end
     end
   end
+
+  # Stale-claim replacement (EW-2 council, codex): on a content-change re-enrich,
+  # drop THIS source's prior assertions that are not in the new extraction. Remove
+  # only this source's provenance row (an edge still attested by another source
+  # survives, with seen_count recomputed); delete an edge only when it has no
+  # provenance left. Scoped to this source's stale edges (indexed), one transaction.
+  @spec reconcile(integer(), [integer()]) :: :ok
+  defp reconcile(node_id, kept_edge_ids) do
+    prov = provenance(node_id)
+
+    %{rows: stale_rows} =
+      Repo.query!(
+        "SELECT edge_id FROM edge_provenance WHERE provenance = $1 AND edge_id <> ALL($2::bigint[])",
+        [prov, kept_edge_ids]
+      )
+
+    stale = Enum.map(stale_rows, fn [id] -> id end)
+
+    if stale != [] do
+      Repo.transaction(fn ->
+        # Lock the stale edge rows for the txn (defense-in-depth, council/gemma):
+        # serialise against a concurrent writer touching the same edges, so the
+        # prune → orphan-delete → recompute sequence sees a stable set. (Enrichment
+        # is single-threaded per the scheduler, so this is belt-and-suspenders.)
+        Repo.query!("SELECT id FROM edge WHERE id = ANY($1::bigint[]) FOR UPDATE", [stale])
+
+        Repo.query!(
+          "DELETE FROM edge_provenance WHERE provenance = $1 AND edge_id = ANY($2::bigint[])",
+          [prov, stale]
+        )
+
+        # Edges with no remaining provenance are orphaned → delete; the rest just
+        # lost a source, so recompute their distinct-origin seen_count.
+        Repo.query!(
+          "DELETE FROM edge e WHERE e.id = ANY($1::bigint[]) " <>
+            "AND NOT EXISTS (SELECT 1 FROM edge_provenance ep WHERE ep.edge_id = e.id)",
+          [stale]
+        )
+
+        Repo.query!(
+          "UPDATE edge e SET seen_count = " <>
+            "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+            "WHERE e.id = ANY($1::bigint[])",
+          [stale]
+        )
+      end)
+    end
+
+    :ok
+  end
+
+  @spec origin(integer()) :: String.t()
+  defp origin(node_id), do: "enrich:origin:node:#{node_id}"
+
+  @spec provenance(integer()) :: String.t()
+  defp provenance(node_id), do: "enrich:node:#{node_id}"
 
   # Robust parse (spike lesson): slice first '{' .. last '}' so stray prose/think
   # tokens don't break decode; keep only well-formed string triples.

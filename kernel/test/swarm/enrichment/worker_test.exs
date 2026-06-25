@@ -130,4 +130,126 @@ defmodule Swarm.Enrichment.WorkerTest do
       assert_in_delta Corroboration.node(france, scopes: ["public"]), 0.5, 0.02
     end
   end
+
+  defp edge?(subj, pred, obj) do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT 1 FROM edge e JOIN node s ON s.id = e.src JOIN node d ON d.id = e.dst " <>
+          "WHERE s.key = $1 AND e.type = $2 AND d.key = $3",
+        [subj, pred, obj]
+      )
+
+    rows != []
+  end
+
+  describe "watermark gating + stale-claim replacement (EW-3)" do
+    test "an unchanged, fresh node is NOT re-enriched (zero LLM calls)" do
+      node = source_with_body("Paris is the capital of France.")
+      gen = gen_returning(~s({"claims":[{"s":"Paris","p":"located_in","o":"France"}]}))
+
+      assert {:ok, %{edges: 1}} = Worker.enrich(node, gen_fun: gen)
+      assert_received :gen_called
+
+      # Same content, fresh watermark → skipped, no model call.
+      assert {:skip, :watermarked} = Worker.enrich(node, gen_fun: gen)
+      refute_received :gen_called
+    end
+
+    test "a changed body re-enriches" do
+      node = source_with_body("first version")
+      gen = gen_returning(~s({"claims":[{"s":"A","p":"is_a","o":"B"}]}))
+
+      assert {:ok, _} = Worker.enrich(node, gen_fun: gen)
+      assert_received :gen_called
+
+      :ok = Content.put_body(node, "a substantively different body")
+      assert {:ok, _} = Worker.enrich(node, gen_fun: gen)
+      assert_received :gen_called
+    end
+
+    test "a bumped model re-enriches; force bypasses the watermark" do
+      node = source_with_body("text")
+      gen = gen_returning(~s({"claims":[{"s":"A","p":"is_a","o":"B"}]}))
+
+      assert {:ok, _} = Worker.enrich(node, gen_fun: gen, model: "model-1")
+      assert_received :gen_called
+
+      # different model ⇒ re-enrich
+      assert {:ok, _} = Worker.enrich(node, gen_fun: gen, model: "model-2")
+      assert_received :gen_called
+
+      # same (model-2) ⇒ skip, but :force overrides
+      assert {:skip, :watermarked} = Worker.enrich(node, gen_fun: gen, model: "model-2")
+      refute_received :gen_called
+      assert {:ok, _} = Worker.enrich(node, gen_fun: gen, model: "model-2", force: true)
+      assert_received :gen_called
+    end
+
+    test "a generation error records an error state and is retried" do
+      node = source_with_body("text")
+      err = fn _m, _p, _o -> {:error, :down} end
+      ok = gen_returning(~s({"claims":[{"s":"A","p":"is_a","o":"B"}]}))
+
+      assert {:error, {:generation_failed, :down}} = Worker.enrich(node, gen_fun: err)
+      # error state ⇒ NOT fresh ⇒ retried (not skipped) on the next run
+      assert {:ok, %{edges: 1}} = Worker.enrich(node, gen_fun: ok)
+      assert_received :gen_called
+    end
+
+    test "content-change re-enrich REPLACES stale claims (orphaned claim removed)" do
+      node = source_with_body("v1")
+
+      both =
+        gen_returning(~s({"claims":[{"s":"A","p":"loc","o":"B"},{"s":"C","p":"loc","o":"D"}]}))
+
+      assert {:ok, %{edges: 2}} = Worker.enrich(node, gen_fun: both)
+      assert edge?("A", "loc", "B")
+      assert edge?("C", "loc", "D")
+
+      :ok = Content.put_body(node, "v2 — C/D dropped")
+      only_ab = gen_returning(~s({"claims":[{"s":"A","p":"loc","o":"B"}]}))
+      assert {:ok, %{edges: 1}} = Worker.enrich(node, gen_fun: only_ab)
+
+      # A/B survives; C/D was this source's only claim and is dropped from the new
+      # extraction → its provenance row goes, the edge is orphaned → removed.
+      assert edge?("A", "loc", "B")
+      refute edge?("C", "loc", "D")
+    end
+
+    test "a stale claim still attested by ANOTHER source survives (provenance pruned, not the edge)" do
+      n1 = source_with_body("n1 v1")
+      n2 = source_with_body("n2")
+
+      both =
+        gen_returning(~s({"claims":[{"s":"A","p":"loc","o":"B"},{"s":"C","p":"loc","o":"D"}]}))
+
+      cd = gen_returning(~s({"claims":[{"s":"C","p":"loc","o":"D"}]}))
+
+      assert {:ok, _} = Worker.enrich(n1, gen_fun: both)
+      # n2 independently asserts C-loc-D → a second origin on that edge.
+      assert {:ok, _} = Worker.enrich(n2, gen_fun: cd)
+
+      %{rows: [[seen2]]} =
+        Repo.query!(
+          "SELECT seen_count FROM edge WHERE type = 'loc' AND src = (SELECT id FROM node WHERE key='C')"
+        )
+
+      assert seen2 == 2
+
+      # n1 re-enriches, dropping C-loc-D.
+      :ok = Content.put_body(n1, "n1 v2 — C/D dropped")
+      only_ab = gen_returning(~s({"claims":[{"s":"A","p":"loc","o":"B"}]}))
+      assert {:ok, _} = Worker.enrich(n1, gen_fun: only_ab)
+
+      # The edge SURVIVES (n2 still attests it), with seen_count recomputed to 1.
+      assert edge?("C", "loc", "D")
+
+      %{rows: [[seen1]]} =
+        Repo.query!(
+          "SELECT seen_count FROM edge WHERE type = 'loc' AND src = (SELECT id FROM node WHERE key='C')"
+        )
+
+      assert seen1 == 1
+    end
+  end
 end
