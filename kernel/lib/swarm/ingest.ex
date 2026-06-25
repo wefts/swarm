@@ -12,6 +12,10 @@ defmodule Swarm.Ingest do
   - **dedup** — a cheap provenance-key pre-filter (`Dedup`) skips repeats; the DB
     upsert (node identity key + edge provenance guard) is the authoritative,
     restart-durable dedup, so a duplicate event never double-writes.
+  - **evidential origin** (workspace ADR-13) — an event may carry a stable
+    `origin` (the source identity, distinct from the per-event `provenance`);
+    every relation in the event shares it, so N derivative events of one source
+    reinforce an edge once, not N times. Absent ⇒ defaults to `provenance`.
 
   **Visibility on ingest (ADR-5).** Node scope comes from the event; default-deny
   is `private`. An edge inherits the **narrowest** scope of its two endpoints
@@ -77,10 +81,37 @@ defmodule Swarm.Ingest do
       {:ok,
        %{
          provenance: provenance,
+         # Evidential origin (workspace ADR-13): the STABLE source identity a
+         # connector derives from content (same fact re-emitted ⇒ same origin),
+         # distinct from the per-event `provenance` (emission instance). It is what
+         # reinforcement/corroboration count distinct instances of, so N derivative
+         # events of one source do not over-corroborate. Absent ⇒ defaults to
+         # `provenance` (every event its own origin = pre-ADR-13 behaviour); a
+         # derivative-capable connector SHOULD supply it (see `ports.md`).
+         origin: origin(event, provenance),
          occurred_at: occurred_at,
          entities: Enum.map(Map.get(event, :entities, []), &normalize_entity/1),
          relations: Enum.map(Map.get(event, :relations, []), &normalize_relation/1)
        }}
+    end
+  end
+
+  @spec origin(map(), String.t()) :: String.t()
+  defp origin(event, provenance) do
+    case Map.get(event, :origin) do
+      o when is_binary(o) and o != "" ->
+        nfc(o)
+
+      _ ->
+        # Compatibility fallback (not silent): a derivative-capable connector that
+        # omits `origin` re-opens the ADR-13 correlated-evidence hazard, so the
+        # degradation is logged, tagged by source, never quietly applied.
+        Logger.warning(
+          "ingest: event from source=#{inspect(Map.get(event, :source))} has no evidential " <>
+            "origin; defaulting origin:=provenance (ADR-13) — derivative-capable connectors must set origin"
+        )
+
+        provenance
     end
   end
 
@@ -141,7 +172,7 @@ defmodule Swarm.Ingest do
         ids = upsert_entities(norm.entities)
         persist_content(norm.entities, ids, norm.provenance)
         scopes = Map.new(norm.entities, &{&1.key, &1.scope})
-        write_relations(norm.relations, ids, scopes, norm.provenance)
+        write_relations(norm.relations, ids, scopes, norm.provenance, norm.origin)
       end)
 
     case result do
@@ -179,11 +210,13 @@ defmodule Swarm.Ingest do
   end
 
   # Write every relation in the event's transaction; a contract rejection on any
-  # one rolls the whole event back (so it quarantines, not half-writes).
-  @spec write_relations([map()], map(), map(), String.t()) :: :ok
-  defp write_relations(relations, ids, scopes, provenance) do
+  # one rolls the whole event back (so it quarantines, not half-writes). All
+  # relations in one event share the event's evidential `origin` (the source that
+  # asserts them).
+  @spec write_relations([map()], map(), map(), String.t(), String.t()) :: :ok
+  defp write_relations(relations, ids, scopes, provenance, origin) do
     Enum.each(relations, fn rel ->
-      case write_relation(rel, ids, scopes, provenance) do
+      case write_relation(rel, ids, scopes, provenance, origin) do
         :ok -> :ok
         {:error, reason} -> Swarm.Repo.rollback(reason)
       end
@@ -192,13 +225,13 @@ defmodule Swarm.Ingest do
     :ok
   end
 
-  @spec write_relation(map(), map(), map(), String.t()) :: :ok | {:error, term()}
-  defp write_relation(rel, ids, scopes, provenance) do
+  @spec write_relation(map(), map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
+  defp write_relation(rel, ids, scopes, provenance, origin) do
     case {Map.get(ids, rel.from), Map.get(ids, rel.to)} do
       {src, dst} when is_integer(src) and is_integer(dst) ->
         scope = narrowest(Map.get(scopes, rel.from), Map.get(scopes, rel.to))
 
-        case Store.add_edge(src, dst, rel.type, provenance, scope: scope) do
+        case Store.add_edge(src, dst, rel.type, provenance, scope: scope, origin: origin) do
           {:ok, _} -> :ok
           {:error, reason} -> {:error, reason}
         end
