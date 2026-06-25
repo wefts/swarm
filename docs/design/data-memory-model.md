@@ -157,9 +157,13 @@ Claims (C2) and typed relations (C3) attach to nodes that already exist:
   **budget** and an **observable backlog** (no silent "never").
 - **Produce**: `claim`/`derived` nodes (ADR-11 `kind`) linked to their evidence; typed
   relation edges between entity nodes.
-- **Corroboration safety**: `Confidence.combine_typed/1` already collapses all
-  LLM-generated kinds into ONE group (claim/hypothesis/derived → max-within), so a burst
-  of enrichment claims **cannot** inflate confidence — the ADR-9 defense already covers it.
+- **Corroboration safety (ready contract, NOT yet wired — see ADR-9).**
+  `Confidence.combine_typed/1` is *defined* to collapse all LLM-generated kinds into ONE group
+  (claim/hypothesis/derived → max-within), which *would* stop a burst of enrichment claims from
+  inflating confidence. But the cognitive-activation spike (2026-06-25) ground-truthed it as
+  **dead code — zero callers**; live `Traverse` confidence is a naive chain product with no
+  lineage grouping. So this is the *intended* defense, not an active one; **wiring it into the
+  read path is exactly the workspace ADR-9 (evidential-origin) work**, not something already covered.
 - **Rejected**: cheap-heuristic triple extraction (poisons the graph).
 
 ## 5. Retrieval interface (hybrid-then-traverse)

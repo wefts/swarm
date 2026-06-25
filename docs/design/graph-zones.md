@@ -24,7 +24,11 @@ Input `[{confidence, kind}]`. All LLM-generated kinds (`claim`/`hypothesis`/`der
 - `[{0.8,"claim"}, {0.8,"claim"}, {0.8,"claim"}]` → `0.8` (one group, not inflated)
 - `[{0.8,"observation"}, {0.8,"observation"}]` → `0.96` (independent corroboration)
 
-A hallucination cannot raise confidence by being repeated across models.
+A hallucination cannot raise confidence by being repeated across models — *once this is
+wired*. **Status (cognitive-activation spike, 2026-06-25):** `combine_typed/1` is correct as a
+pure function but has **zero callers** — `Swarm.Graph.Traverse` still uses a naive chain product,
+so the guarantee above is the *contract*, not yet the live behavior. Wiring it into the read path
+is the workspace **ADR-9** (evidential-origin) work.
 
 ## Reward-gated persistence — `edge.reward` + `Store.set_reward/2`
 

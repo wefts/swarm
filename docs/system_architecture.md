@@ -321,12 +321,15 @@ contract, validated at *every* write through `Swarm.Graph.Contract` at the
 Each node also carries a **kind** — its trace class — under swarm ADR-11 (the N3
 defense against error-cascade): `observation` (external evidence), `claim`
 (LLM-generated), `hypothesis`, `coordination`, `lease`, `derived`, `presentation`,
-`durable_fact`. This typing is what keeps a hallucination from inflating
-confidence by repetition: `Swarm.Graph.Confidence.combine_typed/1` collapses *all*
+`durable_fact`. This typing is the *designed* defense against a hallucination
+inflating confidence by repetition: `Swarm.Graph.Confidence.combine_typed/1` collapses *all*
 LLM-generated kinds into a single group (max within the group), while each
 external kind is its own independent group combined noisy-OR. So three generated
-contributions of 0.8 yield 0.8, but two independent observations of 0.8 yield
-0.96. Persistence is **reward-gated**: a refuted trace (`reward < 0`) is excluded
+contributions of 0.8 *would* yield 0.8, while two independent observations of 0.8 yield
+0.96. **Caveat (ground-truthed by the cognitive-activation spike, 2026-06-25):**
+`combine_typed/1` is a *ready contract with zero callers* — live `Traverse` still uses a naive
+chain product with no lineage grouping, so this defense is **not yet wired**. Wiring it (and
+making evidential origin first-class) is the open **workspace ADR-9** work. Persistence is **reward-gated**: a refuted trace (`reward < 0`) is excluded
 from traversal immediately and reaped by GC; `reward ≥ 0` persists on the decay
 schedule. Adding `node.kind` and `edge.reward` **bumped the schema v1→v2** — the
 first real exercise of swarm ADR-4's migration round-trip policy.
