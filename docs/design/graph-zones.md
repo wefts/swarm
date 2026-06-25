@@ -24,11 +24,13 @@ Input `[{confidence, kind}]`. All LLM-generated kinds (`claim`/`hypothesis`/`der
 - `[{0.8,"claim"}, {0.8,"claim"}, {0.8,"claim"}]` → `0.8` (one group, not inflated)
 - `[{0.8,"observation"}, {0.8,"observation"}]` → `0.96` (independent corroboration)
 
-A hallucination cannot raise confidence by being repeated across models — *once this is
-wired*. **Status (cognitive-activation spike, 2026-06-25):** `combine_typed/1` is correct as a
-pure function but has **zero callers** — `Swarm.Graph.Traverse` still uses a naive chain product,
-so the guarantee above is the *contract*, not yet the live behavior. Wiring it into the read path
-is the workspace **ADR-9** (evidential-origin) work.
+A hallucination cannot raise confidence by being repeated across models. **Now LIVE (workspace
+ADR-13 / EOS-2, 2026-06-25):** `combine_typed/1` was a zero-caller pure function until the
+evidential-origin epic wired it into the read path via node-local `Swarm.Graph.Corroboration`
+(structural edges excluded; **origin-dedup before** the combine), paired with the strength-side
+per-origin reinforcement ceiling (`seen_count = count(distinct origin)`). The guarantee above is
+now live behavior, verified, in both dimensions. (Lineage-aware clustering of semantically-
+correlated *distinct* origins is the deferred next cut — ADR-13.)
 
 ## Reward-gated persistence — `edge.reward` + `Store.set_reward/2`
 

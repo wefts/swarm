@@ -159,13 +159,15 @@ Claims (C2) and typed relations (C3) attach to nodes that already exist:
   **budget** and an **observable backlog** (no silent "never").
 - **Produce**: `claim`/`derived` nodes (ADR-11 `kind`) linked to their evidence; typed
   relation edges between entity nodes.
-- **Corroboration safety (ready contract, NOT yet wired — see ADR-9).**
-  `Confidence.combine_typed/1` is *defined* to collapse all LLM-generated kinds into ONE group
-  (claim/hypothesis/derived → max-within), which *would* stop a burst of enrichment claims from
-  inflating confidence. But the cognitive-activation spike (2026-06-25) ground-truthed it as
-  **dead code — zero callers**; live `Traverse` confidence is a naive chain product with no
-  lineage grouping. So this is the *intended* defense, not an active one; **wiring it into the
-  read path is exactly the workspace ADR-9 (evidential-origin) work**, not something already covered.
+- **Corroboration safety (now WIRED — workspace ADR-13 / EOS-2).**
+  `Confidence.combine_typed/1` collapses all LLM-generated kinds into ONE group
+  (claim/hypothesis/derived → max-within), so a burst of enrichment claims cannot inflate
+  confidence. It was dead code until the **evidential-origin** epic (workspace ADR-13) wired it
+  into the read path via node-local `Swarm.Graph.Corroboration` (structural edges excluded;
+  **origin-dedup before** the combine), paired with the strength-side per-origin reinforcement
+  ceiling (`seen_count = count(distinct origin)`). N derivatives of one origin no longer
+  over-corroborate, in both dimensions — verified. (Lineage-aware clustering of semantically-
+  correlated *distinct* origins is the deferred next cut; ADR-13 §Consequences.)
 - **Rejected**: cheap-heuristic triple extraction (poisons the graph).
 
 ## 5. Retrieval interface (hybrid-then-traverse)
