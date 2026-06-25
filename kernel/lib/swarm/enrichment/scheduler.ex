@@ -54,27 +54,93 @@ defmodule Swarm.Enrichment.Scheduler do
     generation = next_generation()
 
     candidates = novel_candidates(model, policy)
-    queued = candidates |> Priority.queue(opts) |> Enum.take(max)
-    worker_opts = Keyword.put(opts, :generation, generation)
 
+    # Score every candidate once (Priority.explain); reused for the decision audit
+    # (acted-on rows) AND the per-pass distribution summary (all candidates) — so
+    # the threshold is calibratable from real data, not just from a truncated sample.
+    explains = Enum.map(candidates, fn id -> {id, Priority.explain(id, opts)} end)
+    record_pass_summary(explains, generation)
+
+    worth =
+      explains
+      |> Enum.filter(fn {_id, e} -> e.worth_it end)
+      |> Enum.sort_by(fn {_id, e} -> e.score end, :desc)
+
+    queued = Enum.take(worth, max)
+    worker_opts = Keyword.put(opts, :generation, generation)
     ctx = %{generation: generation, lease_ms: lease_ms, opts: worker_opts}
 
-    {enriched, skipped} =
-      Enum.reduce(queued, {0, 0}, fn {node_id, score}, {ok, sk} ->
-        case enrich_candidate(node_id, score, ctx) do
-          :enriched -> {ok + 1, sk}
-          :locked -> {ok, sk + 1}
-          :noop -> {ok, sk}
-        end
+    outcomes =
+      Enum.map(queued, fn {node_id, explain} ->
+        {node_id, explain, enrich_candidate(node_id, explain.score, ctx)}
       end)
+
+    record_decisions(outcomes, generation)
 
     %{
       generation: generation,
       considered: length(candidates),
       queued: length(queued),
-      enriched: enriched,
-      skipped_locked: skipped
+      enriched: Enum.count(outcomes, fn {_id, _e, oc} -> oc == :enriched end),
+      skipped_locked: Enum.count(outcomes, fn {_id, _e, oc} -> oc == :locked end)
     }
+  end
+
+  # One row per pass: the full candidate score distribution (percentiles + counts).
+  # Captures the decision boundary the acted-on audit can't (below-threshold scores)
+  # without per-row volume — the unbiased calibration signal (council/codex). No-op
+  # when a pass has no candidates.
+  @spec record_pass_summary([{integer(), map()}], integer()) :: :ok
+  defp record_pass_summary([], _generation), do: :ok
+
+  defp record_pass_summary(explains, generation) do
+    scores = explains |> Enum.map(fn {_id, e} -> e.score end) |> Enum.sort()
+    n = length(scores)
+    pct = fn p -> Enum.at(scores, min(n - 1, trunc(p * (n - 1)))) end
+    {_id, sample} = hd(explains)
+    worth_it = Enum.count(explains, fn {_id, e} -> e.worth_it end)
+
+    Repo.query!(
+      "INSERT INTO enrichment_pass " <>
+        "(generation, candidate_count, worth_it_count, score_min, score_p50, score_p90, score_p99, score_max, threshold) " <>
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+      [
+        generation,
+        n,
+        worth_it,
+        hd(scores),
+        pct.(0.5),
+        pct.(0.9),
+        pct.(0.99),
+        List.last(scores),
+        sample.threshold
+      ]
+    )
+
+    :ok
+  end
+
+  # Persist each acted-on candidate's score components + decision (CTC-2). Non-
+  # sensitive features only (ids/scores — never content). Bounded by max_per_pass.
+  @spec record_decisions([{integer(), map(), atom()}], integer()) :: :ok
+  defp record_decisions(outcomes, generation) do
+    Enum.each(outcomes, fn {node_id, e, outcome} ->
+      decision =
+        case outcome do
+          :enriched -> "enriched"
+          :locked -> "locked"
+          :noop -> "skipped"
+        end
+
+      Repo.query!(
+        "INSERT INTO enrichment_decision " <>
+          "(node_id, generation, novelty, central, criticality, score, threshold, decision) " <>
+          "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        [node_id, generation, e.novel, e.central, e.criticality, e.score, e.threshold, decision]
+      )
+    end)
+
+    :ok
   end
 
   # Lease → enrich → release one candidate. `:enriched` | `:locked` (another pass

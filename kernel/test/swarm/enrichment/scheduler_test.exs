@@ -43,6 +43,51 @@ defmodule Swarm.Enrichment.SchedulerTest do
       assert summary.enriched == 5
     end
 
+    test "persists a priority-decision audit row per acted-on candidate (CTC-2 prereq)" do
+      for i <- 1..3, do: source("doc #{i} content")
+
+      summary = Scheduler.run_pass(gen_fun: gen_per_node())
+
+      %{rows: rows} =
+        Repo.query!(
+          "SELECT node_id, generation, novelty, score, threshold, decision FROM enrichment_decision ORDER BY node_id"
+        )
+
+      # one row per enriched candidate, with score components + decision (no content)
+      assert length(rows) == summary.enriched
+
+      Enum.each(rows, fn [node_id, gen, novelty, score, threshold, decision] ->
+        assert is_integer(node_id)
+        assert gen == summary.generation
+        assert novelty == true
+        assert is_float(score) and score >= threshold
+        assert decision == "enriched"
+      end)
+
+      # no content/key columns exist — the audit is non-sensitive features only
+      %{columns: cols} = Repo.query!("SELECT * FROM enrichment_decision LIMIT 0")
+      refute "key" in cols
+      refute "body" in cols
+    end
+
+    test "persists a per-pass score-distribution summary over ALL candidates (CTC-2, unbiased)" do
+      for i <- 1..8, do: source("doc #{i} with content")
+
+      summary = Scheduler.run_pass(gen_fun: gen_per_node())
+
+      %{rows: [[gen, cand, worth, smin, smax, thr]]} =
+        Repo.query!(
+          "SELECT generation, candidate_count, worth_it_count, score_min, score_max, threshold FROM enrichment_pass"
+        )
+
+      assert gen == summary.generation
+      # the summary spans ALL candidates (8), not just the acted-on top-N (5)
+      assert cand == summary.considered
+      assert worth >= summary.queued
+      assert is_float(smin) and is_float(smax) and smin <= smax
+      assert is_float(thr)
+    end
+
     test "converges: a second pass over unchanged content does nothing (fixpoint)" do
       for i <- 1..3, do: source("doc #{i}")
 

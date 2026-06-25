@@ -26,11 +26,12 @@ defmodule Swarm.GraphCase do
   @doc "Wipe the graph tables (and reset ids) so each test starts clean."
   @spec truncate_graph() :: :ok
   def truncate_graph do
-    # `entity_resolution_audit` has no FK to node (it must outlive a merged-away
-    # node), so it is not reached by the CASCADE — truncate it explicitly.
-    # `enrichment_watermark` is reached via its node FK, but list it for clarity.
+    # `entity_resolution_audit` and `enrichment_decision` have no FK to node (they
+    # outlive the node — audit trails), so they are not reached by the CASCADE —
+    # truncate them explicitly. `enrichment_watermark` is reached via its node FK,
+    # but list it for clarity.
     Swarm.Repo.query!(
-      "TRUNCATE node, edge, edge_provenance, content, chunk, node_alias, outbox, dead_letter, stagnant, enrichment_watermark, entity_resolution_audit RESTART IDENTITY CASCADE"
+      "TRUNCATE node, edge, edge_provenance, content, chunk, node_alias, outbox, dead_letter, stagnant, enrichment_watermark, entity_resolution_audit, enrichment_decision, enrichment_pass RESTART IDENTITY CASCADE"
     )
 
     # Reset the stigmergy cursor (the singleton row survives TRUNCATE of outbox).
