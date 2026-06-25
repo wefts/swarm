@@ -64,3 +64,16 @@ config :swarm, :gc, enabled: true, interval_ms: 3_600_000, floor: 0.05
 # Stagnation watchdog (swarm ADR-12 / T13): surface unclaimed coordination traces
 # every 10 min; `ttl_s` is the age past which an unclaimed trace is a stalled claim.
 config :swarm, :stagnation, enabled: true, interval_ms: 600_000, ttl_s: 3_600
+
+# Reward-gated enrichment (workspace ADR-13 / EOS-4): the LOCAL model the worker
+# drives for S-P-O extraction, the policy version that invalidates watermarks when
+# the extraction prompt/parse changes, and the passage cap fed to the model.
+# Extraction is rare + deliberate (~120 s/source) — never the continuous default.
+config :swarm, :enrichment,
+  model: "qwen3:14b",
+  policy_version: 1,
+  max_passage: 2_400,
+  # Prior reliability of a single unverified LLM claim (ADR-3): plausible, not
+  # certain. Corroboration collapses repeated claims (combine_typed), and external
+  # reward later confirms/refutes (ADR-11); this is the entering prior, not truth.
+  claim_reliability: 0.5
