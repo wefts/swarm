@@ -92,9 +92,40 @@ defmodule Swarm.Ingest.ContentTest do
     Content.put_body(nid, "alpha\n\nbeta\n\ngamma")
 
     assert {:ok, 3} = Content.embed(nid, max_tokens: 1, embed_fun: fake_embedder([1.0, 1.0, 1.0]))
-    assert {:ok, 3} = Content.embed(nid, max_tokens: 1, embed_fun: fake_embedder([2.0, 2.0, 2.0]))
+    # Same body ⇒ write-amplification bound skips; :force re-embeds and REPLACES.
+    assert {:ok, 3} =
+             Content.embed(nid,
+               max_tokens: 1,
+               force: true,
+               embed_fun: fake_embedder([2.0, 2.0, 2.0])
+             )
 
     assert Repo.query!("SELECT count(*) FROM chunk WHERE node_id = $1", [nid]).rows == [[3]]
+  end
+
+  test "embed skips an UNCHANGED body (write-amplification bound, §7)" do
+    nid = node!("Stable Page")
+    Content.put_body(nid, "alpha\n\nbeta\n\ngamma")
+    parent = self()
+    counting = fn texts -> send(parent, :embedded) && fake_embedder([1.0, 1.0, 1.0]).(texts) end
+
+    assert {:ok, 3} = Content.embed(nid, max_tokens: 1, embed_fun: counting)
+    assert_received :embedded
+
+    # Re-firing on the same body ⇒ no re-segment/re-embed; the embedder is NOT called.
+    assert {:ok, :unchanged} = Content.embed(nid, max_tokens: 1, embed_fun: counting)
+    refute_received :embedded
+  end
+
+  test "embed re-embeds after the body CHANGES" do
+    nid = node!("Edited Page")
+    Content.put_body(nid, "alpha\n\nbeta\n\ngamma")
+    assert {:ok, 3} = Content.embed(nid, max_tokens: 1, embed_fun: fake_embedder([1.0, 1.0, 1.0]))
+    assert {:ok, :unchanged} = Content.embed(nid, max_tokens: 1, embed_fun: fake_embedder([1.0]))
+
+    # A changed body invalidates the bound → re-embeds.
+    Content.put_body(nid, "delta\n\nepsilon")
+    assert {:ok, 2} = Content.embed(nid, max_tokens: 1, embed_fun: fake_embedder([2.0, 2.0]))
   end
 
   test "embed on a node with no content is a no-op" do

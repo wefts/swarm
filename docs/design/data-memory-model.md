@@ -98,17 +98,19 @@ Stages, in order; every stage is cheap/deterministic so it runs on the continuou
 `chunk.vec` set (mean / length-weighted mean) **or** a dedicated identity/topic vector
 (embed the canonical name + short descriptor) — explicitly **not** a single
 full-document embedding (false for long/heterogeneous sources, "mean-pooling drift").
-Prose source nodes lean aggregate; pure entity/concept nodes lean identity vector. Which
-applies per `type` is settled by a recall measurement in the build campaign (§7), not
-guessed here. Re-aggregation is a cheap recompute when the chunk set changes
-(§7 write-amplification).
+Prose source nodes are aggregate; pure entity/concept nodes are identity vector.
+Re-aggregation is a cheap recompute when the chunk set changes (§7 write-amplification).
 
-> **Status (Phase 2, 2026-06-25): the per-type choice is DEFERRED, not settled.** Retrieval
-> is entirely **chunk-level** (`chunk.vec`); `node.vec` is currently **write-only** — set on
-> embed but read by no retrieval/gate/core path. With no consumer, a recall measurement
-> cannot distinguish aggregate from identity, so the choice is deferred (the aggregate mean
-> remains the harmless default) until a node-level dense consumer exists. Picking it now
-> would be guessing at something nothing reads.
+> **Status (2026-06-25): the per-type split is RESOLVED BY CONSTRUCTION, not by an
+> aggregate-vs-identity recall measurement (that measurement is moot).** A node-level
+> consumer now exists — entity-resolution's ANN over `node.vec` (`Swarm.EntityResolution`).
+> It reads only **entity** vecs, and entity nodes are **bodiless** (no chunks), so an
+> identity vector (embed the key) is the *only* option — there is nothing to compare. **Prose
+> `node.vec` still has no reader**, so it is **non-contractual**: the aggregate mean is a
+> harmless default, not a guarantee, until a prose-node dense consumer exists. The real
+> remaining measurement (codex) is the ER consumer's *candidate quality* (recall/precision of
+> the gated proposals) across ≥2 source shapes — an operator step on the real corpus (the
+> public `er_validate` run showed precision: a true dup merged, a distinct pair did not).
 
 ## 3. Normalization seams this spec newly specifies
 
@@ -281,12 +283,15 @@ defect the equal-weight fuse caused, plus the reason the dense arm must stay:
 ## 7. Known costs / open implementation questions (for the build campaign)
 
 - **Write-amplification**: editing a coarse node's body re-segments → re-embeds its chunks
-  → re-aggregates `node.vec`. Bound by `body_hash` (skip unchanged) and per-partition
-  diffing (re-embed only changed windows).
+  → re-aggregates `node.vec`. **Bounded by `body_hash` (BUILT — `content.embedded_hash`):**
+  `Content.embed` skips when the current body was already embedded (the at-least-once tailer
+  re-fires `content_added`), re-embeds on a changed body or `:force` (e.g. a model change).
+  Per-partition diffing (re-embed only changed windows) is a further optimization — deferred
+  until large-prose re-embedding is measurably painful.
 - **Segmenter ownership**: prose vs code/log/JSON segmenters are per-connector; only the
   *contract* (ordered partitions ≤ token limit) is kernel-owned.
-- **Aggregate-vs-identity vector**: whether `node.vec` is a chunk-aggregate or a separate
-  identity vector may differ by `type` — to be settled with a recall measurement in the
-  build campaign, not guessed here.
+- **Aggregate-vs-identity vector**: RESOLVED by construction (§2.3) — entity (bodiless) =
+  identity, prose = aggregate (non-contractual until a prose reader exists). The open
+  measurement is the ER consumer's candidate quality, not the vector form.
 - **Alias-table population**: source-declared equivalences first; embedding-candidate soft
   matches behind the rare LLM-confirm gate.

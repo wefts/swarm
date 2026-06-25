@@ -31,6 +31,10 @@ defmodule Swarm.Ingest.Embedder do
       {:ok, :no_content} ->
         {:ok, %{node_id: node_id, chunks: 0}}
 
+      {:ok, :unchanged} ->
+        # Body already embedded (write-amplification bound, ADR-14 §7) — a no-op.
+        {:ok, %{node_id: node_id, chunks: 0}}
+
       {:error, reason} ->
         Logger.warning("embedder: node #{node_id} embed failed — #{inspect(reason)}")
         {:error, reason}

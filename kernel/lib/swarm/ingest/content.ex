@@ -56,24 +56,60 @@ defmodule Swarm.Ingest.Content do
   Segment + embed a node's stored body into `chunk` rows and aggregate `node.vec`
   (Phase B — the worker step, outside the ingest tx). `opts[:embed_fun]` injects
   the embedder (default: the real ML boundary). Returns `{:ok, n_chunks}`,
-  `{:ok, :no_content}` if the node has no body, or `{:error, reason}` (the body is
-  preserved, so a transient embed failure can be retried).
+  `{:ok, :no_content}` if the node has no body, `{:ok, :unchanged}` if the body was
+  already embedded (write-amplification bound, ADR-14 §7), or `{:error, reason}`
+  (the body is preserved, so a transient embed failure can be retried).
+
+  `opts[:force]` re-embeds even an unchanged body (e.g. an embed-model change —
+  vectors live in one model space, ADR-6).
   """
   @spec embed(integer(), keyword()) ::
-          {:ok, non_neg_integer()} | {:ok, :no_content} | {:error, term()}
+          {:ok, non_neg_integer() | :no_content | :unchanged} | {:error, term()}
   def embed(node_id, opts \\ []) when is_integer(node_id) do
-    case body(node_id) do
+    case content_row(node_id) do
+      %{body: body, body_hash: body_hash, embedded_hash: embedded_hash} ->
+        embed_unless_fresh(node_id, body, body_hash, embedded_hash, opts)
+
       nil ->
         {:ok, :no_content}
+    end
+  end
 
-      body ->
-        embed_fun = Keyword.get(opts, :embed_fun, &default_embed/1)
+  # Write-amplification bound: skip when the current body was already embedded
+  # (same hash), unless forced. The at-least-once tailer re-fires `content_added`;
+  # without this, an unchanged body would re-segment + re-embed + re-aggregate.
+  @spec embed_unless_fresh(integer(), String.t(), String.t(), String.t() | nil, keyword()) ::
+          {:ok, non_neg_integer() | :no_content | :unchanged} | {:error, term()}
+  defp embed_unless_fresh(node_id, body, body_hash, embedded_hash, opts) do
+    if not Keyword.get(opts, :force, false) and embedded_hash == body_hash do
+      {:ok, :unchanged}
+    else
+      do_embed(node_id, body, body_hash, opts)
+    end
+  end
 
-        case Segmenter.segment(body, opts) do
-          [] -> {:ok, :no_content}
-          parts -> embed_parts(node_id, parts, embed_fun)
+  @spec do_embed(integer(), String.t(), String.t(), keyword()) ::
+          {:ok, non_neg_integer() | :no_content} | {:error, term()}
+  defp do_embed(node_id, body, body_hash, opts) do
+    embed_fun = Keyword.get(opts, :embed_fun, &default_embed/1)
+
+    case Segmenter.segment(body, opts) do
+      [] ->
+        {:ok, :no_content}
+
+      parts ->
+        with {:ok, n} <- embed_parts(node_id, parts, embed_fun) do
+          mark_embedded(node_id, body_hash)
+          {:ok, n}
         end
     end
+  end
+
+  # Stamp the body hash the chunks/`node.vec` were embedded from (the §7 bound key).
+  @spec mark_embedded(integer(), String.t()) :: :ok
+  defp mark_embedded(node_id, body_hash) do
+    Repo.query!("UPDATE content SET embedded_hash = $2 WHERE node_id = $1", [node_id, body_hash])
+    :ok
   end
 
   @doc "SHA-256 hex digest of a body — the exact-duplicate key on `content.body_hash`."
@@ -151,11 +187,18 @@ defmodule Swarm.Ingest.Content do
     |> Enum.map(&(&1 / n))
   end
 
-  @spec body(integer()) :: String.t() | nil
-  defp body(node_id) do
-    case Repo.query!("SELECT body FROM content WHERE node_id = $1", [node_id]) do
-      %{rows: [[body]]} -> body
-      _ -> nil
+  @spec content_row(integer()) ::
+          %{body: String.t(), body_hash: String.t(), embedded_hash: String.t() | nil} | nil
+  defp content_row(node_id) do
+    case Repo.query!(
+           "SELECT body, body_hash, embedded_hash FROM content WHERE node_id = $1",
+           [node_id]
+         ) do
+      %{rows: [[body, body_hash, embedded_hash]]} ->
+        %{body: body, body_hash: body_hash, embedded_hash: embedded_hash}
+
+      _ ->
+        nil
     end
   end
 
