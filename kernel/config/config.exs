@@ -65,6 +65,13 @@ config :swarm, :gc, enabled: true, interval_ms: 3_600_000, floor: 0.05
 # every 10 min; `ttl_s` is the age past which an unclaimed trace is a stalled claim.
 config :swarm, :stagnation, enabled: true, interval_ms: 600_000, ttl_s: 3_600
 
+# Entity-resolution soft-match (swarm ADR-13 §3.2). A candidate pair needs BOTH a
+# vector signal (`vec_threshold` cosine over entity identity vecs) AND an
+# independent lexical signal (`lex_threshold` token-Jaccard of the keys) — cosine
+# alone over-proposes and a false merge contaminates evidence (decorrelated
+# council). `max_pairs` bounds a proposal pass. Tuning inventory (ADR-8).
+config :swarm, :entity_resolution, vec_threshold: 0.85, lex_threshold: 0.2, max_pairs: 50
+
 # Reward-gated enrichment (workspace ADR-13 / EOS-4): the LOCAL model the worker
 # drives for S-P-O extraction, the policy version that invalidates watermarks when
 # the extraction prompt/parse changes, and the passage cap fed to the model.
