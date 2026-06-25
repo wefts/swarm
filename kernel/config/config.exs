@@ -65,6 +65,11 @@ config :swarm, :gc, enabled: true, interval_ms: 3_600_000, floor: 0.05
 # every 10 min; `ttl_s` is the age past which an unclaimed trace is a stalled claim.
 config :swarm, :stagnation, enabled: true, interval_ms: 600_000, ttl_s: 3_600
 
+# Bounded traversal (swarm ADR-3): the edge-visit budget for one confidence walk.
+# Generous — normal traversals never truncate; the safety valve for pathological
+# density (the relaxation is O(max_depth · reachable_edges), not fanout^depth).
+config :swarm, :traverse, edge_budget: 100_000
+
 # Entity-resolution soft-match (swarm ADR-13 §3.2). A candidate pair needs BOTH a
 # vector signal (`vec_threshold` cosine over entity identity vecs) AND an
 # independent lexical signal (`lex_threshold` token-Jaccard of the keys) — cosine

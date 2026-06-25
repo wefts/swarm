@@ -53,6 +53,16 @@ defmodule Swarm.Config do
   @spec decay() :: keyword()
   defp decay, do: Application.get_env(:swarm, :decay, lambda: 0.01, saturation_s: 2.0)
 
+  @doc """
+  Edge-visit budget for a single bounded traversal (ADR-3): beyond it the walk
+  returns a best-effort result flagged truncated rather than running unbounded.
+  Generous by default so normal traversals never truncate; the safety valve for
+  pathological density. Tuning inventory (ADR-8).
+  """
+  @spec traverse_edge_budget() :: pos_integer()
+  def traverse_edge_budget,
+    do: Application.get_env(:swarm, :traverse, edge_budget: 100_000)[:edge_budget] || 100_000
+
   @spec env(String.t(), String.t()) :: String.t()
   defp env(key, default), do: System.get_env(key) || default
 end
