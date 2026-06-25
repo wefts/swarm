@@ -61,14 +61,27 @@ Bump the ADR-4 schema version **3 → 4** (round-trip tested per the ADR-4 polic
   is returned only when the event introduces a **new distinct origin** for the
   edge; a fresh provenance under an *existing* origin is recorded (audit trail)
   but does **not** bump `seen_count`.
-- A **per-origin reinforcement ceiling** caps one origin's contribution — the
-  strength-dimension mirror of ADR-3's "max within a shared-ancestor group". One
-  origin emitting N derivative events cannot push strength past the ceiling. The
-  ceiling constant lives in the ADR-8 tuning inventory, never inline.
+- The **per-origin reinforcement ceiling IS the distinct-origin counting** (EOS-1,
+  delivered) — the strength-dimension mirror of ADR-3's "max within a
+  shared-ancestor group". One origin's marginal contribution to `seen_count` is
+  exactly **1** (a repeated origin contributes 0), so a source cannot reinforce
+  past one witness no matter how many derivative events it emits. There is **no
+  separate ceiling constant**: a ceiling > 1 per origin would contradict the
+  witness semantics, and < 1 is source weighting, not a ceiling. EOS-3 is
+  therefore *verify + document* (a test proving one origin's N derivative events
+  leave `seen_count`/strength at one origin's contribution while N distinct origins
+  still accrue), not new mechanism.
+- Because `Swarm.Graph.Strength` reads only `seen_count`, this cap holds at the
+  strength input; `Strength` itself (Hill saturation + decay) is unchanged and
+  still bounds growth ACROSS many distinct origins.
 
 This closes the immortal-edge hazard (ADR-9 §Consequences): a connector
-re-emitting derivatives of one source refreshes `last_seen` but cannot reinforce
-past one origin's ceiling.
+re-emitting derivatives of one source neither bumps `seen_count` nor refreshes
+`last_seen` (EOS-1's `:existing_origin` path), so it cannot pin the edge.
+
+Deferred (not a ceiling): *weighted* per-origin contributions (source trust,
+extraction confidence) and clustering distinct-but-correlated origin **keys**
+(semantic lineage) — the ADR-13 first-cut boundary, §6.
 
 ## 3. Read path — wire `combine_typed` into traversal/retrieval
 

@@ -1,6 +1,8 @@
 defmodule Swarm.Graph.StoreTest do
   use Swarm.GraphCase, async: false
 
+  alias Swarm.Graph.Strength
+
   describe "add_node/1" do
     test "inserts with defaults (scope private, fence 0)" do
       assert {:ok, node} = Graph.add_node(%{type: "concept"})
@@ -107,6 +109,33 @@ defmodule Swarm.Graph.StoreTest do
 
       # 4 events, 3 distinct origins (A, B, C) → seen_count 3.
       assert last.seen_count == 3
+    end
+  end
+
+  describe "per-origin reinforcement ceiling (ADR-13 EOS-3 — distinct counting IS the cap)" do
+    setup do
+      %{a: add_node!(%{type: "concept"}), b: add_node!(%{type: "article"})}
+    end
+
+    test "one origin's N derivative events cannot push strength past one origin", %{a: a, b: b} do
+      {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", origin: "src-A")
+      {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-2", origin: "src-A")
+      {:ok, last} = Graph.add_edge(a, b, "mentions", "ev-3", origin: "src-A")
+
+      # The ceiling: one origin's marginal contribution is capped at one, no matter
+      # how many derivative events it emits (the strength-dimension mirror of ADR-3's
+      # "max within a shared-ancestor group"). seen_count is the only strength input.
+      assert last.seen_count == 1
+      assert Strength.strength(last.seen_count, 0) == Strength.strength(1, 0)
+    end
+
+    test "distinct origins still accrue — the cap is per-origin, not global", %{a: a, b: b} do
+      {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", origin: "src-A")
+      {:ok, two} = Graph.add_edge(a, b, "mentions", "ev-2", origin: "src-B")
+
+      assert two.seen_count == 2
+      # Genuine independent origins raise strength (Hill saturation still bounds it).
+      assert Strength.strength(2, 0) > Strength.strength(1, 0)
     end
   end
 end
