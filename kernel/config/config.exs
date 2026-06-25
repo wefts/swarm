@@ -82,4 +82,14 @@ config :swarm, :enrichment,
   # Hill-normalised by `central_k`) and criticality (1 − corroboration). Only nodes
   # scoring ≥ `threshold` enter the queue. Weights/threshold are the tuning
   # inventory (ADR-8) — re-derive per corpus, never scatter literals.
-  priority: [threshold: 0.35, w_central: 0.5, w_crit: 0.5, central_k: 5.0]
+  priority: [threshold: 0.35, w_central: 0.5, w_crit: 0.5, central_k: 5.0],
+  # Bounded fan-out per scheduled scan (EOS-4 §1c): a pass enriches at most this many
+  # worth-it nodes — the scheduler does the work, never a blanket on-write reactor
+  # (the spike fired 564× from one seed). Auto-scheduling is a deliberate deployment
+  # choice; `run_pass/1` is the unit, invoked by an operator/cron, off by default.
+  max_per_pass: 5,
+  # Per-candidate lease (ms): the scheduler CAS-claims a node before enriching it,
+  # so two overlapping passes never double-spend the LLM on the same source. A
+  # row lease (NOT a held DB connection — the ~120 s model call must not pin one);
+  # it auto-expires for crash recovery. 10 min ≫ a single extraction.
+  lease_ms: 600_000

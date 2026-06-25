@@ -59,6 +59,10 @@ defmodule Swarm.Enrichment.Worker do
     defaults to the real `Swarm.ML.Generation.generate/3`.
   - `:model` — overrides the configured local enrichment model.
   - `:force` — bypass the watermark (re-extract even if fresh).
+  - `:generation` — the scheduler's pass counter, recorded in the watermark
+    (defaults to the node's current generation). Gen-N output is only eligible
+    input in gen-N+1 (the scheduler snapshots candidates per pass), so the
+    worker→graph→worker loop is generation-bounded.
 
   Returns `{:ok, result}`, `{:skip, reason}` (`:generated_zone` / `:no_body` /
   `:watermarked`), or a typed `{:error, reason}` (fail-loud — a generation failure
@@ -101,7 +105,7 @@ defmodule Swarm.Enrichment.Worker do
     max_passage = Application.get_env(:swarm, :enrichment, [])[:max_passage] || 2_400
     gen = Keyword.get(opts, :gen_fun, &Generation.generate/3)
     prompt = "PASSAGE:\n" <> String.slice(body, 0, max_passage) <> "\n\nJSON:"
-    gen_ct = Watermark.generation(node.id)
+    gen_ct = Keyword.get(opts, :generation) || Watermark.generation(node.id)
 
     # The model call is OUTSIDE any transaction — it is slow (~120 s) and must not
     # hold a DB connection/lock open.
