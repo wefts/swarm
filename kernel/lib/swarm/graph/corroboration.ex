@@ -19,7 +19,8 @@ defmodule Swarm.Graph.Corroboration do
   like `links_to`/`child_of` which are topology, not evidence), reduces them to
   **one typed contribution per distinct
   evidential `origin`** (the strongest assertion within that origin, tagged by the
-  asserting node's `kind`), then applies `combine_typed/1`:
+  edge's `evidence_kind` — what the assertion CONTRIBUTES, not what its source node
+  *is*; ADR-13 refines EOS-2), then applies `combine_typed/1`:
 
   - co-located LLM-generated assertions (`claim`/`hypothesis`/`derived`) collapse
     into one group — a hallucination cannot corroborate itself by repetition;
@@ -97,16 +98,16 @@ defmodule Swarm.Graph.Corroboration do
     |> Confidence.combine_typed()
   end
 
-  # Incoming assertions of each node, with the asserting node's kind and the edge's
-  # decayed reliability, one row per distinct (edge, provenance) carrying its
-  # origin. Decay mirrors `Swarm.Graph.Traverse` (per-hop `exp(-λ·age_days)`).
+  # Incoming assertions of each node: the edge's evidence_kind (what the assertion
+  # CONTRIBUTES — ADR-13/EW-1, not the source node's kind) and decayed reliability,
+  # one row per distinct (edge, provenance) carrying its origin. Decay mirrors
+  # `Swarm.Graph.Traverse` (per-hop `exp(-λ·age_days)`).
   @spec query([integer()], float(), [String.t()] | nil) :: {String.t(), list()}
   defp query(node_ids, lambda, nil) do
     {"""
-     SELECT e.dst, coalesce(ep.origin, ep.provenance), n.kind,
+     SELECT e.dst, coalesce(ep.origin, ep.provenance), e.evidence_kind,
             e.reliability * exp(-$2::float8 * EXTRACT(EPOCH FROM (now() - e.last_seen)) / 86400.0)
        FROM edge e
-       JOIN node n ON n.id = e.src
        JOIN edge_provenance ep ON ep.edge_id = e.id
       WHERE e.dst = ANY($1) AND e.reward >= 0
         AND e.type <> ALL($3::text[])
@@ -114,8 +115,13 @@ defmodule Swarm.Graph.Corroboration do
   end
 
   defp query(node_ids, lambda, scopes) when is_list(scopes) do
+    # Visibility is filtered on BOTH the edge scope AND the source node scope
+    # (defense-in-depth): the edge-scope ≤ narrowest-endpoint invariant is only
+    # write-enforced (ADR-4 names durability gaps), so a read that must not leak
+    # cannot rely on it alone (council, codex). evidence_kind still comes from the
+    # edge — visibility and kind are separate concerns.
     {"""
-     SELECT e.dst, coalesce(ep.origin, ep.provenance), n.kind,
+     SELECT e.dst, coalesce(ep.origin, ep.provenance), e.evidence_kind,
             e.reliability * exp(-$2::float8 * EXTRACT(EPOCH FROM (now() - e.last_seen)) / 86400.0)
        FROM edge e
        JOIN node n ON n.id = e.src AND n.scope = ANY($3::text[])

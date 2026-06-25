@@ -27,10 +27,12 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
-  # v4 — evidential origin (workspace ADR-13): `edge_provenance` gains an `origin`
-  # axis and `seen_count` counts distinct origins, not distinct emission events.
-  # Mirrored in `graph_schema_meta` by the v4 migration.
-  @schema_version 4
+  # v5 — edge-level evidential kind (workspace ADR-13, refines EOS-2): an
+  # assertion carries its own `evidence_kind` (what it CONTRIBUTES), so the
+  # corroboration calculus no longer mis-reads an entity source node's kind.
+  # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
+  # `graph_schema_meta` by each migration.
+  @schema_version 5
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/
@@ -92,17 +94,36 @@ defmodule Swarm.Graph.Contract do
   Validate an edge given its endpoints' current scopes. Enforces type, scope
   vocabulary, reliability range, that both endpoints exist (non-nil scope), the
   ADR-5 visibility invariant (edge scope no wider than the narrowest endpoint),
-  and that both the emission-instance `provenance` and the evidential `origin`
-  (workspace ADR-13) keys are present. `:ok` or `{:error, reason}`.
+  that both the emission-instance `provenance` and the evidential `origin`
+  (workspace ADR-13) keys are present, and that `evidence_kind` is in the kind
+  vocabulary. `:ok` or `{:error, reason}`.
   """
-  @spec validate_edge(String.t() | nil, String.t() | nil, term(), term(), term(), term(), term()) ::
-          :ok | {:error, atom()}
-  def validate_edge(src_scope, dst_scope, type, scope, reliability, provenance, origin) do
+  @spec validate_edge(
+          String.t() | nil,
+          String.t() | nil,
+          term(),
+          term(),
+          term(),
+          term(),
+          term(),
+          term()
+        ) :: :ok | {:error, atom()}
+  def validate_edge(
+        src_scope,
+        dst_scope,
+        type,
+        scope,
+        reliability,
+        provenance,
+        origin,
+        evidence_kind
+      ) do
     with :ok <- check_type(type),
          :ok <- check_scope(scope),
          :ok <- check_reliability(reliability),
          :ok <- check_provenance(provenance),
          :ok <- check_origin(origin),
+         :ok <- check_evidence_kind(evidence_kind),
          :ok <- check_endpoint(src_scope),
          :ok <- check_endpoint(dst_scope) do
       check_visibility(scope, src_scope, dst_scope)
@@ -167,6 +188,16 @@ defmodule Swarm.Graph.Contract do
   end
 
   defp check_origin(_), do: {:error, :blank_origin}
+
+  # The assertion's evidential kind (workspace ADR-13): what this edge CONTRIBUTES
+  # to corroboration — `observation` (external) vs `claim`/`derived` (generated),
+  # drawn from the same closed kind vocabulary as `node.kind`. Mis-typed kinds are
+  # rejected fail-loud (the DB CHECK is defense-in-depth behind this).
+  defp check_evidence_kind(k) when is_binary(k) do
+    if k in @kinds, do: :ok, else: {:error, :unknown_evidence_kind}
+  end
+
+  defp check_evidence_kind(_), do: {:error, :unknown_evidence_kind}
 
   # The visibility invariant: rank(edge) <= min(rank(src), rank(dst)).
   defp check_visibility(scope, src_scope, dst_scope) do

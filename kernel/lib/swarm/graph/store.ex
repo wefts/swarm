@@ -101,7 +101,9 @@ defmodule Swarm.Graph.Store do
   its own origin, the pre-v4 behaviour — so an N-derivatives-of-one-source caller
   passes one origin to keep corroboration honest.
 
-  `opts`: `:scope` (default `"private"`), `:weight`, `:reliability`, `:origin`.
+  `opts`: `:scope` (default `"private"`), `:weight`, `:reliability`, `:origin`,
+  `:evidence_kind` (what the assertion contributes to corroboration — default
+  `"observation"`; the enrichment worker sets `"claim"`).
   """
   @spec add_edge(integer(), integer(), String.t(), String.t(), keyword()) ::
           {:ok, edge_result()} | {:error, term()}
@@ -111,6 +113,7 @@ defmodule Swarm.Graph.Store do
     weight = Keyword.get(opts, :weight, 1.0)
     reliability = Keyword.get(opts, :reliability, 1.0)
     origin = Keyword.get(opts, :origin, provenance)
+    evidence_kind = Keyword.get(opts, :evidence_kind, "observation")
 
     Repo.transaction(fn ->
       # swarm ADR-4: enforce the contract at the write boundary — type/scope
@@ -126,13 +129,14 @@ defmodule Swarm.Graph.Store do
              scope,
              reliability,
              provenance,
-             origin
+             origin,
+             evidence_kind
            ) do
         :ok -> :ok
         {:error, reason} -> Repo.rollback({:contract, reason})
       end
 
-      edge_id = upsert_identity(src, dst, type, scope, weight, reliability)
+      edge_id = upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind)
 
       case record_event(edge_id, provenance, origin) do
         :new_origin ->
@@ -457,18 +461,30 @@ defmodule Swarm.Graph.Store do
   # Insert the edge identity, or no-op onto the existing row; return its id. The
   # no-op `DO UPDATE` lets us RETURNING the id on conflict without clobbering
   # weight/reliability of an already-reinforced edge.
-  @spec upsert_identity(integer(), integer(), String.t(), String.t(), float(), float()) ::
+  @spec upsert_identity(
+          integer(),
+          integer(),
+          String.t(),
+          String.t(),
+          float(),
+          float(),
+          String.t()
+        ) ::
           integer()
-  defp upsert_identity(src, dst, type, scope, weight, reliability) do
+  defp upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind) do
+    # evidence_kind is set on first insert (like weight/reliability); the no-op
+    # DO UPDATE keeps the original on reinforcement.
     sql = """
-    INSERT INTO edge (src, dst, type, visibility_scope, weight, reliability, seen_count)
-    VALUES ($1, $2, $3, $4, $5, $6, 0)
+    INSERT INTO edge (src, dst, type, visibility_scope, weight, reliability, evidence_kind, seen_count)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
     ON CONFLICT (src, type, dst, visibility_scope)
     DO UPDATE SET last_seen = edge.last_seen
     RETURNING id
     """
 
-    %{rows: [[id]]} = Repo.query!(sql, [src, dst, type, scope, weight, reliability])
+    %{rows: [[id]]} =
+      Repo.query!(sql, [src, dst, type, scope, weight, reliability, evidence_kind])
+
     id
   end
 
