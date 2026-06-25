@@ -76,4 +76,10 @@ config :swarm, :enrichment,
   # Prior reliability of a single unverified LLM claim (ADR-3): plausible, not
   # certain. Corroboration collapses repeated claims (combine_typed), and external
   # reward later confirms/refutes (ADR-11); this is the entering prior, not truth.
-  claim_reliability: 0.5
+  claim_reliability: 0.5,
+  # Worth-it priority (EOS-4 §1b, the scheduler): novelty is the hard gate (a
+  # fresh-watermarked node scores 0); among novel nodes, rank by centrality (degree,
+  # Hill-normalised by `central_k`) and criticality (1 − corroboration). Only nodes
+  # scoring ≥ `threshold` enter the queue. Weights/threshold are the tuning
+  # inventory (ADR-8) — re-derive per corpus, never scatter literals.
+  priority: [threshold: 0.35, w_central: 0.5, w_crit: 0.5, central_k: 5.0]
