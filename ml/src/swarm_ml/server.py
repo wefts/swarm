@@ -160,7 +160,23 @@ def build_server(config: ServerConfig) -> tuple[grpc.Server, int]:
 
     Binding here (not in ``main``) lets tests bind ``:0`` and learn the port.
     """
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=config.max_workers))
+    # Permit the kernel's client-side keepalive PINGs on long-lived, idle
+    # channels. The kernel holds a small pool of persistent gRPC channels (it must
+    # NOT reconnect per call — that path crashes grpc-elixir 0.11.5 on disconnect)
+    # and PINGs them to detect a half-open connection promptly. gRPC's server
+    # defaults are hostile to that: ``max_pings_without_data`` (2) plus a 5-minute
+    # ``min_ping_interval_without_data_ms`` make the server GOAWAY an idle, pinging
+    # client after ~40s, forcing needless reconnect churn. These options let idle
+    # keepalive pings through so the channels actually stay long-lived.
+    keepalive_options = [
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.max_pings_without_data", 0),
+        ("grpc.http2.min_ping_interval_without_data_ms", 10_000),
+    ]
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=config.max_workers),
+        options=keepalive_options,
+    )
     embed_pb2_grpc.add_EmbedderServicer_to_server(EmbedderService(config=config), server)
     embed_pb2_grpc.add_GeneratorServicer_to_server(
         GeneratorService(ollama_base_url=config.ollama_base_url), server

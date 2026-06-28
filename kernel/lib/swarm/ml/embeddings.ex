@@ -22,10 +22,9 @@ defmodule Swarm.ML.Embeddings do
           {:ok, %{vectors: [[float()]], namespace: String.t(), dim: non_neg_integer()}}
           | {:error, term()}
   def embed(texts, opts \\ []) when is_list(texts) do
-    cfg = Swarm.Config.ml_boundary()
-    namespace = Keyword.get(opts, :namespace, cfg.namespace)
+    namespace = Keyword.get(opts, :namespace, Swarm.Config.ml_boundary().namespace)
 
-    Boundary.with_channel(cfg.address, &call(&1, texts, namespace))
+    Boundary.with_channel(&call(&1, texts, namespace))
   end
 
   @spec call(GRPC.Channel.t(), [String.t()], String.t()) ::

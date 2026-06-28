@@ -50,6 +50,20 @@ config :swarm, :consilium,
 # per-escalation ceiling so the consilium is the tighter, earlier refusal.
 config :swarm, :llm, max_prompt_tokens: 64_000
 
+# ML channel pool (the kernel↔ML transport). A small pool of long-lived gRPC
+# channels to the Python `ml` service that NEVER disconnect — sidestepping the
+# grpc 0.11.5 `:disconnect` crash that took embeddings (and all retrieval) down.
+# `size` ≈ ml replicas (2) × 2; each worker resolves `ml` DNS independently so
+# the pool spreads across replicas. `keepalive_ms` is REQUIRED: gun's HTTP/2
+# keepalive defaults off, and a half-open channel would otherwise hang to its
+# deadline. `SWARM_ML_POOL_SIZE` overrides size at deploy time.
+config :swarm, :ml_pool,
+  enabled: true,
+  size: 4,
+  keepalive_ms: 20_000,
+  backoff_ms: 500,
+  backoff_max_ms: 5_000
+
 # Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
 config :swarm, :core_api, port: 50061, start_server: true
 

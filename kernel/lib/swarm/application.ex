@@ -7,22 +7,33 @@ defmodule Swarm.Application do
 
   @impl Application
   def start(_type, _args) do
-    children = [
-      Swarm.Repo,
-      # Connection supervisor for the gRPC client to the Python ML pillar.
-      {GRPC.Client.Supervisor, []},
-      # Ingestion (Domain 2): dedup pre-filter, bounded queue, plugin registry.
-      Swarm.Ingest.Dedup,
-      Swarm.Ingest.Queue,
-      Swarm.Plugins.Registry,
-      # Gate (Domain 5): cost telemetry counters.
-      Swarm.Gate.Telemetry
-    ]
+    children =
+      [
+        Swarm.Repo,
+        # Connection supervisor for the gRPC client to the Python ML pillar.
+        {GRPC.Client.Supervisor, []}
+      ] ++
+        ml_pool() ++
+        [
+          # Ingestion (Domain 2): dedup pre-filter, bounded queue, plugin registry.
+          Swarm.Ingest.Dedup,
+          Swarm.Ingest.Queue,
+          Swarm.Plugins.Registry,
+          # Gate (Domain 5): cost telemetry counters.
+          Swarm.Gate.Telemetry
+        ]
 
     # one_for_one: a child crash restarts only that child — graceful degradation,
     # not a swarm-wide outage.
     opts = [strategy: :one_for_one, name: Swarm.Supervisor]
     Supervisor.start_link(children ++ core_api() ++ stigmergy() ++ gc() ++ stagnation(), opts)
+  end
+
+  # The long-lived ML channel pool (the kernel↔ML transport). Off in tests, which
+  # exercise the boundary with an injected connect fun and never touch a live ML
+  # service. Started after GRPC.Client.Supervisor (its workers depend on it).
+  defp ml_pool do
+    if Swarm.Config.ml_pool().enabled, do: [Swarm.ML.ChannelPool], else: []
   end
 
   # Stagnation watchdog (swarm ADR-12 / T13) — periodically surfaces unclaimed

@@ -28,8 +28,6 @@ defmodule Swarm.ML.Generation do
         over
 
       :ok ->
-        cfg = Swarm.Config.ml_boundary()
-
         request = %GenerateRequest{
           model: model,
           prompt: prompt,
@@ -37,7 +35,7 @@ defmodule Swarm.ML.Generation do
           json: Keyword.get(opts, :json, false)
         }
 
-        Boundary.with_channel(cfg.address, &call(&1, request))
+        Boundary.with_channel(&call(&1, request))
     end
   end
 

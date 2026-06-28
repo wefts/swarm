@@ -16,6 +16,39 @@ defmodule Swarm.Config do
     }
   end
 
+  @typedoc """
+  ML channel pool (the kernel↔ML transport). `connect_fun` is injectable so the
+  pool can be exercised without a live ML service in unit tests.
+  """
+  @type ml_pool :: %{
+          enabled: boolean(),
+          size: pos_integer(),
+          address: String.t(),
+          keepalive_ms: pos_integer(),
+          backoff_ms: pos_integer(),
+          backoff_max_ms: pos_integer(),
+          connect_fun: (String.t(), keyword() -> {:ok, GRPC.Channel.t()} | {:error, term()})
+        }
+
+  @doc """
+  Long-lived ML channel pool config. Defaults match the 2-replica `ml` service
+  (size ≈ replicas × 2); `SWARM_ML_POOL_SIZE` overrides size at deploy time.
+  """
+  @spec ml_pool() :: ml_pool()
+  def ml_pool do
+    cfg = Application.get_env(:swarm, :ml_pool, [])
+
+    %{
+      enabled: Keyword.get(cfg, :enabled, true),
+      size: env_int("SWARM_ML_POOL_SIZE", Keyword.get(cfg, :size, 4)),
+      address: ml_boundary().address,
+      keepalive_ms: Keyword.get(cfg, :keepalive_ms, 10_000),
+      backoff_ms: Keyword.get(cfg, :backoff_ms, 500),
+      backoff_max_ms: Keyword.get(cfg, :backoff_max_ms, 5_000),
+      connect_fun: Keyword.get(cfg, :connect_fun, &GRPC.Stub.connect/2)
+    }
+  end
+
   @typedoc "Consilium fleet: parallel panel models and the synthesizing judge."
   @type consilium :: %{panel: [String.t()], judge: String.t(), token_ceiling: pos_integer()}
 
@@ -65,4 +98,12 @@ defmodule Swarm.Config do
 
   @spec env(String.t(), String.t()) :: String.t()
   defp env(key, default), do: System.get_env(key) || default
+
+  @spec env_int(String.t(), integer()) :: integer()
+  defp env_int(key, default) do
+    case System.get_env(key) do
+      nil -> default
+      val -> String.to_integer(val)
+    end
+  end
 end
