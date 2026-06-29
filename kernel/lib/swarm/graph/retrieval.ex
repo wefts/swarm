@@ -135,11 +135,30 @@ defmodule Swarm.Graph.Retrieval do
           float(),
           float()
         ) :: [fused()]
+  # Lexical query for the FTS arm: an OR of the query's content lexemes (stopwords,
+  # punctuation, 1-char tokens dropped). `plainto_tsquery` ANDs EVERY term, so one
+  # extra word the answer page lacks (e.g. "Nebula" for a page titled "Public IP")
+  # excluded the right page entirely; OR-recall + `ts_rank` (which scores by term
+  # coverage) brings it back and ranks multi-term matches higher. Empty (all stopwords)
+  # ⇒ "" — `to_tsquery('simple','')` matches nothing, so the arm is a no-op and the
+  # dense arm alone applies (the prior behaviour, never worse).
+  @lex_stopwords ~w(a an and are as at be but by for from how if in into is it of on or
+                    that the this to was what when where which who why with хто що як де чи)
+  @spec or_tsquery(String.t()) :: String.t()
+  defp or_tsquery(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.reject(&(String.length(&1) < 2 or &1 in @lex_stopwords))
+    |> Enum.uniq()
+    |> Enum.join(" | ")
+  end
+
   defp fused_chunks(query, scopes, candidates, k, nil, _lex_w, _dense_w) do
     # Lexical-only (no query vector): a keyword match is the only relevance signal,
     # so `cos` is unknown (nil) and every hit is a lexical hit.
     sql = """
-    WITH q AS (SELECT plainto_tsquery('simple', $1) AS tsq),
+    WITH q AS (SELECT to_tsquery('simple', $1) AS tsq),
     lexical AS (
       SELECT k.node_id, k.ordinal, k.text,
              row_number() OVER (
@@ -155,7 +174,7 @@ defmodule Swarm.Graph.Retrieval do
     ORDER BY rrf DESC
     """
 
-    run_fused(sql, [query, scopes, candidates, k])
+    run_fused(sql, [or_tsquery(query), scopes, candidates, k])
   end
 
   defp fused_chunks(query, scopes, candidates, k, qvec, lex_w, dense_w) do
@@ -167,7 +186,7 @@ defmodule Swarm.Graph.Retrieval do
     # lexical rows, so only the dense term applies). Absolute cosine still drives
     # the relevance floor and is reported as the calibrated relevance signal.
     sql = """
-    WITH q AS (SELECT plainto_tsquery('simple', $1) AS tsq),
+    WITH q AS (SELECT to_tsquery('simple', $1) AS tsq),
     lexical AS (
       SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
              row_number() OVER (
@@ -196,7 +215,7 @@ defmodule Swarm.Graph.Retrieval do
     ORDER BY rrf DESC
     """
 
-    run_fused(sql, [query, scopes, candidates, k, qvec, lex_w, dense_w])
+    run_fused(sql, [or_tsquery(query), scopes, candidates, k, qvec, lex_w, dense_w])
   end
 
   defp run_fused(sql, params) do

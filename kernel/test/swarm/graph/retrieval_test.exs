@@ -43,6 +43,23 @@ defmodule Swarm.Graph.RetrievalTest do
     assert is_float(m.confidence)
   end
 
+  test "an extra query term does not exclude the answer page (OR-recall, not plainto AND)" do
+    # The answer page does not contain the query's extra words ("nebula"/"what").
+    ans = node!("Public IP", "public")
+    chunk!(ans, 0, "The public outbound IP address is 198.51.100.7", 0)
+    # A distractor sharing only the extra word.
+    other = node!("Nebula Architecture", "public")
+    chunk!(other, 0, "Nebula runs on a layered service architecture", 1)
+
+    # Lexical-only (no query_vec ⇒ dense arm skipped) isolates the FTS arm. Under the
+    # old plainto (what & is & nebula & public & ip) the answer chunk — lacking
+    # "nebula"/"what" — was excluded; OR-recall ranks by term coverage and surfaces it.
+    %{memories: mems} =
+      Retrieval.search("What is Nebula Public IP?", ["public"], dense: false, expand: false)
+
+    assert "Public IP" in keys(mems)
+  end
+
   test "the scope predicate gates the LEXICAL arm — a private span never leaks" do
     pub = node!("PubDoc", "public")
     priv = node!("PrivDoc", "private")
