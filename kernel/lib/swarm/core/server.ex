@@ -10,6 +10,8 @@ defmodule Swarm.Core.Server do
   alias Swarm.Core
 
   alias Swarm.Core.V1.{
+    ActivityEvent,
+    ActivityFeedResponse,
     AskResponse,
     Citation,
     DeliberationResponse,
@@ -154,6 +156,34 @@ defmodule Swarm.Core.Server do
         # an empty body, only the status (no partial read).
         %NeighborhoodResponse{status: :NOT_FOUND, center_id: req.node_id}
     end
+  end
+
+  @spec activity_feed(Swarm.Core.V1.ActivityFeedRequest.t(), GRPC.Server.Stream.t()) ::
+          ActivityFeedResponse.t()
+  def activity_feed(req, _stream) do
+    page =
+      Core.activity_feed(
+        scopes: scopes(req.scopes),
+        cursor: req.cursor,
+        limit: req.limit,
+        kinds: req.kinds
+      )
+
+    %ActivityFeedResponse{
+      status: wire_status(page.status),
+      next_cursor: page.next_cursor,
+      events:
+        Enum.map(
+          page.events,
+          &%ActivityEvent{
+            kind: &1.kind,
+            at: &1.at,
+            subject_type: &1.subject_type,
+            outcome: &1.outcome,
+            count: &1.count
+          }
+        )
+    }
   end
 
   defp scopes([]), do: ["public"]

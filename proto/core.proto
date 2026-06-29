@@ -19,6 +19,10 @@ service Core {
   // A bounded, scope-filtered neighborhood around one node: nodes + typed edges
   // (ADR-15). The "connections" surface — never the full hairball.
   rpc Neighborhood(NeighborhoodRequest) returns (NeighborhoodResponse);
+  // Worker/job activity as a polled, scope-safe typed event log with an OPAQUE
+  // cursor (ADR-15). Poll, not stream; no raw sequence on the wire — the kernel
+  // skips out-of-scope events server-side so hidden volume/timing is not inferable.
+  rpc ActivityFeed(ActivityFeedRequest) returns (ActivityFeedResponse);
 }
 
 message AskRequest {
@@ -168,4 +172,28 @@ message NeighborhoodResponse {
   repeated NodeView nodes = 3;   // excludes the center; confidence desc then id
   repeated EdgeView edges = 4;   // only between returned in-scope nodes; (src,dst,relation)
   bool truncated = 5;            // node_limit or ADR-3 edge-budget hit (best-effort)
+}
+
+// --- ActivityFeed (ADR-15) -------------------------------------------------
+
+message ActivityFeedRequest {
+  string cursor = 1;                 // opaque resume token from a prior next_cursor; "" ⇒ most recent
+  uint32 limit = 2;                  // clamped to [1,100]; 0 ⇒ default 50
+  repeated string kinds = 3;         // event-kind filter (closed set); empty ⇒ all kinds
+  repeated string scopes = 4;
+  string viewer = 5;
+}
+
+message ActivityEvent {
+  string kind = 1;          // closed set, e.g. "node_added" | "edge_reinforced" | "node_merged"
+  string at = 2;            // ISO-8601
+  string subject_type = 3;  // referenced node type (scope-gated, in-scope only); "" if none
+  string outcome = 4;       // typed outcome (e.g. "merged" | "refused"); "" if n/a
+  int64 count = 5;          // typed count of IN-SCOPE subjects only; 0 if n/a
+}
+
+message ActivityFeedResponse {
+  AnswerStatus status = 1;            // FOUND | NOT_FOUND (no visible events) | ERROR
+  repeated ActivityEvent events = 2;  // already scope-filtered; ordered oldest→newest within the page
+  string next_cursor = 3;             // opaque token to pass as the next request.cursor
 }

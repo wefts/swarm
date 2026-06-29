@@ -87,6 +87,27 @@ defmodule Swarm.Config do
     }
   end
 
+  @typedoc "ActivityFeed page-size bounds (swarm ADR-15)."
+  @type activity_feed :: %{default_limit: pos_integer(), max_limit: pos_integer()}
+
+  @doc """
+  ActivityFeed page-size bounds (ADR-15): `default_limit` (used when the request
+  asks for 0) and `max_limit` (the hard clamp). Per-poll work is bounded by the
+  database stopping the scope-filtered scan at the returned `limit` — there is no
+  wire-visible scan budget on purpose (a seq-window budget would let poll count
+  leak hidden-event volume; ADR-15 council). The opaque-cursor key lives under the
+  same `:activity_feed` env (`:cursor_key`, read by `Activity.Cursor`).
+  """
+  @spec activity_feed() :: activity_feed()
+  def activity_feed do
+    cfg = Application.get_env(:swarm, :activity_feed, [])
+
+    %{
+      default_limit: Keyword.get(cfg, :default_limit, 50),
+      max_limit: Keyword.get(cfg, :max_limit, 100)
+    }
+  end
+
   @doc "Hard per-call prompt ceiling at the model boundary (T5, ADR-7); the global backstop."
   @spec max_prompt_tokens() :: pos_integer()
   def max_prompt_tokens do

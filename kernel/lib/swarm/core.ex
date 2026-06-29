@@ -11,7 +11,7 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Consilium, Deliberation, Gate, Repo}
+  alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Neighborhood, Retrieval}
 
   @default_scopes ["public"]
@@ -254,6 +254,14 @@ defmodule Swarm.Core do
   @spec deliberation(String.t(), String.t(), [String.t()]) ::
           {:ok, Deliberation.record()} | :not_found
   defdelegate deliberation(ask_ref, viewer, scopes), to: Deliberation, as: :fetch
+
+  @doc """
+  One poll of the scope-safe worker/job ActivityFeed (ADR-15). `opts`: `:scopes`,
+  `:cursor` (opaque; `""` ⇒ most recent), `:limit`, `:kinds`. Delegates to
+  `Swarm.Activity`; events are already scope-filtered and the cursor is opaque.
+  """
+  @spec activity_feed(keyword()) :: Activity.page()
+  defdelegate activity_feed(opts), to: Activity, as: :feed
 
   @doc """
   The kernel's **self-model** (T8): what it knows, how fresh, what it can do —
