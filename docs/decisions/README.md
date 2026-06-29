@@ -37,3 +37,5 @@ This sequence is **independent** of the workspace ADR sequence: a reference like
   Accepted · Complete
 - [ADR-14: Data/Memory Model](0014-data-memory-model.md) —
   Accepted · Complete
+- [ADR-15: Dashboard Projection RPCs](0015-dashboard-projection-rpcs.md) —
+  Proposed · Complete
