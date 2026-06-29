@@ -86,7 +86,24 @@ message DeliberationResponse {
   Anonymous escalations are **not** retained (`ask_ref` empty). Persist is a single
   insert **after** `deliberate/2` returns (never holds a connection across the LLM).
 - **Retention/GC**: bounded by a configurable TTL + a max-row cap, GC'd via the
-  ADR-10 decay-driven trace lifecycle. (Policy values live in config, not here.)
+  ADR-10 decay-driven trace lifecycle. **The build wires these as config keys (not
+  constants) so they are tunable without a code change** — recommended defaults:
+
+  ```elixir
+  # config/config.exs — recommended defaults; tune per instance without code change
+  config :swarm, :deliberation,
+    enabled: true,            # master switch; false ⇒ never retain, ask_ref always "" (RPC returns NOT_FOUND)
+    retention_ttl_days: 30,   # a deliberation is re-openable for this long, then GC-eligible
+    max_rows: 10_000          # hard ceiling regardless of TTL; over-cap ⇒ evict oldest first
+  ```
+
+  Rationale for the defaults (two-person local instance; escalations are rare and
+  costly, not per-ask): 30 days comfortably covers re-opening recent thinking; the
+  10k cap is the backstop (≈ tens of MB at a few KB of panel text per row — even at
+  50 escalations/day it is ~6 weeks of headroom before the cap, not the TTL, bites).
+  Eviction fires on **either** TTL expiry **or** over-cap (oldest-first), on the
+  existing ADR-10 trace-GC pass — no new timer. `enabled: false` is the clean
+  kill-switch (no retention, the "see the thinking" affordance never appears).
 - **Scope/viewer enforcement (the no-leak rule)**: the row is returned **only** when
   **both** (a) the requesting `viewer` matches the owning asker, **and** (b) the
   request's current `scopes` still **cover** the stored `effective_scope`. Owner-

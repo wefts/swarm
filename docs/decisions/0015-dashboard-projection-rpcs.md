@@ -118,11 +118,13 @@ Why retention wins, despite its cost (new kernel state + a retention/GC policy):
 
 **Cost accepted, and bounded:** a `deliberation` store keyed by `ask_ref`, stamped
 with `viewer` + `scopes` + `created_at`, GC'd by the existing decay-driven trace
-lifecycle (ADR-10) under a configurable TTL + a max-row cap. **Anonymous
-escalations are not retained** (no `viewer` ⇒ no `ask_ref` ⇒ nothing to re-open
-and nothing ownerless on disk). The persist is a single insert **after**
-`deliberate/2` returns (post-LLM) — it does not hold a connection across the model
-call.
+lifecycle (ADR-10) under a **configurable** TTL + max-row cap (the build wires them
+as config keys, not constants, so they tune without a code change; recommended
+defaults `enabled: true`, `retention_ttl_days: 30`, `max_rows: 10_000` —
+rationale + the kill-switch in the spec). **Anonymous escalations are not retained**
+(no `viewer` ⇒ no `ask_ref` ⇒ nothing to re-open and nothing ownerless on disk).
+The persist is a single insert **after** `deliberate/2` returns (post-LLM) — it
+does not hold a connection across the model call.
 
 ## Consequences
 
