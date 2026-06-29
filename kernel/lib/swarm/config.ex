@@ -64,6 +64,29 @@ defmodule Swarm.Config do
     }
   end
 
+  @typedoc "Retained-deliberation policy (swarm ADR-15): kill-switch + retention bounds."
+  @type deliberation :: %{
+          enabled: boolean(),
+          retention_ttl_days: pos_integer(),
+          max_rows: pos_integer()
+        }
+
+  @doc """
+  Deliberation retention policy (ADR-15). `enabled: false` is the kill-switch (never
+  retain, `ask_ref` always empty); `retention_ttl_days` + `max_rows` bound the store,
+  reaped on the ADR-10 trace-GC pass. Tunable per instance without a code change.
+  """
+  @spec deliberation() :: deliberation()
+  def deliberation do
+    cfg = Application.get_env(:swarm, :deliberation, [])
+
+    %{
+      enabled: Keyword.get(cfg, :enabled, true),
+      retention_ttl_days: Keyword.get(cfg, :retention_ttl_days, 30),
+      max_rows: Keyword.get(cfg, :max_rows, 10_000)
+    }
+  end
+
   @doc "Hard per-call prompt ceiling at the model boundary (T5, ADR-7); the global backstop."
   @spec max_prompt_tokens() :: pos_integer()
   def max_prompt_tokens do

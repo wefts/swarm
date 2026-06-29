@@ -111,7 +111,8 @@ message DeliberationResponse {
   re-open a deliberation derived under it (no stale-authorization bypass — a council
   finding). Any failure — mismatched viewer, current scopes that no longer cover,
   or an unknown/expired `ask_ref` — ⇒ `NOT_FOUND` (existence never revealed),
-  timing-uniform.
+  timing-uniform. A non-`FOUND` response carries **only `status`** — no
+  `answer`/`panel`/`created_at` partial read from a found-but-unauthorized row.
 
 ## RPC 2 — `Neighborhood` (bounded, scoped graph connections)
 

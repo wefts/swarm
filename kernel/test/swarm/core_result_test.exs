@@ -131,4 +131,32 @@ defmodule Swarm.CoreResultTest do
       Core.ask("storage", tools_opts(retriever: fn _q, _s, _o -> raise "kernel bug" end))
     end
   end
+
+  # ADR-15: an escalation WITH a viewer retains its deliberation, surfaced as an
+  # opaque ask_ref on the answer; an anonymous escalation retains nothing.
+  defp ok_gen do
+    fn _model, _prompt, opts ->
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"synthesized","confidence":0.8})},
+        else: {:ok, "panel take"}
+    end
+  end
+
+  test "escalate with a viewer retains a deliberation (opaque ask_ref, re-openable)" do
+    a = Core.ask("explain storage", escalate_opts(ok_gen(), viewer: "alice"))
+
+    assert a.tier == "escalate"
+    ask_ref = Map.get(a, :ask_ref, "")
+    assert ask_ref != ""
+    assert {:ok, d} = Swarm.Deliberation.fetch(ask_ref, "alice", ["public"])
+    assert d.judge == "j"
+    assert d.panel == [%{model: "m1", answer: "panel take"}]
+  end
+
+  test "escalate without a viewer retains nothing (ask_ref empty)" do
+    a = Core.ask("explain storage", escalate_opts(ok_gen()))
+
+    assert a.tier == "escalate"
+    assert Map.get(a, :ask_ref, "") == ""
+  end
 end

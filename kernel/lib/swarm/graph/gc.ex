@@ -88,6 +88,13 @@ defmodule Swarm.Graph.GC do
     reaped = reap(floor: state.floor)
     sat = saturation()
     Logger.info("graph GC: reaped #{reaped} evaporated edge(s); working set #{sat.edges} edges")
+    # Piggyback the ADR-15 deliberation-retention reap on this pass — no new timer
+    # (the spec's "GC'd on the existing trace-GC pass"). Bounded by config TTL+cap.
+    if Swarm.Deliberation.enabled?() do
+      n = Swarm.Deliberation.reap()
+      if n > 0, do: Logger.info("graph GC: reaped #{n} expired/over-cap deliberation(s)")
+    end
+
     schedule(state.interval)
     {:noreply, state}
   end

@@ -12,7 +12,12 @@ defmodule Swarm.Core.Server do
   alias Swarm.Core.V1.{
     AskResponse,
     Citation,
+    DeliberationResponse,
+    EdgeView,
     NamespaceStamp,
+    NeighborhoodResponse,
+    NodeView,
+    PanelTake,
     SearchHit,
     SearchResponse,
     StatusResponse,
@@ -28,6 +33,9 @@ defmodule Swarm.Core.Server do
       confidence: a.confidence,
       tier: a.tier,
       status: wire_status(a.status),
+      # Set only when an escalation retained a deliberation for a non-anonymous
+      # asker (ADR-15); empty otherwise. The channel keys the affordance on it.
+      ask_ref: Map.get(a, :ask_ref, ""),
       citations:
         Enum.map(
           a.citations,
@@ -76,6 +84,76 @@ defmodule Swarm.Core.Server do
     %SearchResponse{
       hits: Enum.map(hits, &%SearchHit{id: &1.id, type: &1.type, key: &1.key, score: &1.score})
     }
+  end
+
+  @spec deliberation(Swarm.Core.V1.DeliberationRequest.t(), GRPC.Server.Stream.t()) ::
+          DeliberationResponse.t()
+  def deliberation(req, _stream) do
+    case Core.deliberation(req.ask_ref, req.viewer, scopes(req.scopes)) do
+      {:ok, d} ->
+        %DeliberationResponse{
+          status: :FOUND,
+          ask_ref: d.ask_ref,
+          answer: d.answer,
+          confidence: d.confidence,
+          disagreement: d.disagreement,
+          panel: Enum.map(d.panel, &%PanelTake{model: &1.model, answer: &1.answer}),
+          judge: d.judge,
+          created_at: d.created_at
+        }
+
+      :not_found ->
+        # Unknown/expired ask_ref, or the viewer is not the owner / scopes no longer
+        # cover it — existence never revealed; only the status, no partial read.
+        %DeliberationResponse{status: :NOT_FOUND}
+    end
+  end
+
+  @spec neighborhood(Swarm.Core.V1.NeighborhoodRequest.t(), GRPC.Server.Stream.t()) ::
+          NeighborhoodResponse.t()
+  def neighborhood(req, _stream) do
+    opts = [
+      scopes: scopes(req.scopes),
+      depth: req.depth,
+      node_limit: req.node_limit,
+      relation_types: req.relation_types
+    ]
+
+    case Core.neighborhood(req.node_id, opts) do
+      {:ok, r} ->
+        %NeighborhoodResponse{
+          status: :FOUND,
+          center_id: r.center_id,
+          nodes:
+            Enum.map(
+              r.nodes,
+              &%NodeView{
+                id: &1.id,
+                type: &1.type,
+                key: &1.key,
+                scope: &1.scope,
+                confidence: &1.confidence,
+                depth: &1.depth
+              }
+            ),
+          edges:
+            Enum.map(
+              r.edges,
+              &%EdgeView{
+                src_id: &1.src_id,
+                dst_id: &1.dst_id,
+                relation: &1.relation,
+                reliability: &1.reliability
+              }
+            ),
+          truncated: r.truncated
+        }
+
+      {:error, :not_found} ->
+        # Center not visible to the scopes (or absent) — existence never revealed;
+        # an empty body, only the status (no partial read).
+        %NeighborhoodResponse{status: :NOT_FOUND, center_id: req.node_id}
+    end
   end
 
   defp scopes([]), do: ["public"]

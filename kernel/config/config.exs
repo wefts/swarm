@@ -67,6 +67,13 @@ config :swarm, :ml_pool,
 # Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
 config :swarm, :core_api, port: 50061, start_server: true
 
+# Retained deliberations (swarm ADR-15): the kernel keeps each escalation's
+# panel-vs-judge verdict (discarded otherwise) keyed by an opaque ask_ref, so a
+# past answer can re-open its "how it decided" view — owner + current-scope gated
+# on read. `enabled: false` is the kill-switch (never retain). Bounds are reaped on
+# the ADR-10 trace-GC pass (no new timer); tune per instance without a code change.
+config :swarm, :deliberation, enabled: true, retention_ttl_days: 30, max_rows: 10_000
+
 # Stigmergy tailer (swarm ADR-2): the single reader of the graph-change outbox.
 # `poll_ms` is the fallback cadence; LISTEN/NOTIFY drives the low-latency path.
 config :swarm, :stigmergy, enabled: true, poll_ms: 1_000, gap_ms: 2_000

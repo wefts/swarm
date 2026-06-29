@@ -11,8 +11,8 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Consilium, Gate, Repo}
-  alias Swarm.Graph.Retrieval
+  alias Swarm.{Consilium, Deliberation, Gate, Repo}
+  alias Swarm.Graph.{Neighborhood, Retrieval}
 
   @default_scopes ["public"]
   @search_limit 10
@@ -30,11 +30,14 @@ defmodule Swarm.Core do
   @type status :: :found | :not_found | :partial | :error
   @type citation :: %{source: String.t(), ref: String.t(), confidence: float()}
   @type answer :: %{
-          answer: String.t(),
-          confidence: float(),
-          tier: String.t(),
-          status: status(),
-          citations: [citation()]
+          :answer => String.t(),
+          :confidence => float(),
+          :tier => String.t(),
+          :status => status(),
+          :citations => [citation()],
+          # Set only on an escalation that retained a deliberation for a
+          # non-anonymous asker (ADR-15); absent otherwise.
+          optional(:ask_ref) => String.t()
         }
   @type hit :: %{id: integer(), type: String.t(), key: String.t(), score: float()}
   @typedoc "Typed retrieval outcome: ok / partial (some sources failed) / hard error."
@@ -234,6 +237,25 @@ defmodule Swarm.Core do
   end
 
   @doc """
+  Bounded, scope-enforced neighborhood projection around a node (ADR-15) — the
+  read-only "connections" surface. Delegates to `Swarm.Graph.Neighborhood`; the
+  kernel enforces scope (the channel passes only an identity + allowed scopes).
+  `opts`: `:scopes`, `:depth`, `:node_limit`, `:relation_types`.
+  """
+  @spec neighborhood(integer(), keyword()) ::
+          {:ok, Neighborhood.result()} | {:error, :not_found}
+  defdelegate neighborhood(center_id, opts), to: Neighborhood, as: :query
+
+  @doc """
+  Fetch a retained panel-vs-judge deliberation by `ask_ref` (ADR-15), returned only
+  to the owning `viewer` whose current `scopes` cover the asking scopes — otherwise
+  `:not_found` (existence never revealed). Delegates to `Swarm.Deliberation`.
+  """
+  @spec deliberation(String.t(), String.t(), [String.t()]) ::
+          {:ok, Deliberation.record()} | :not_found
+  defdelegate deliberation(ask_ref, viewer, scopes), to: Deliberation, as: :fetch
+
+  @doc """
   The kernel's **self-model** (T8): what it knows, how fresh, what it can do —
   from REAL state, never a guess. Graph size + per-type inventory + last activity
   + embedding-namespace stamps (ADR-6) + live capabilities (attached connectors,
@@ -347,21 +369,28 @@ defmodule Swarm.Core do
             {:partial, h, _failed} -> {h, :partial}
           end
 
-        synthesize(query, hits, base_status, opts)
+        synthesize(query, hits, base_status, scopes, opts)
     end
   end
 
-  defp synthesize(query, hits, base_status, opts) do
+  defp synthesize(query, hits, base_status, scopes, opts) do
     grounding = Enum.map_join(hits, "\n", fn h -> "- #{h.type}: #{h.key}" end)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
+        # Retain the panel-vs-judge verdict (ADR-15) so the answer can re-open its
+        # deliberation — only for a non-anonymous asker, under the asking scopes; a
+        # single insert AFTER the LLM returned. "" when not retained.
+        viewer = Keyword.get(opts, :viewer, "")
+        ask_ref = Deliberation.maybe_persist(verdict, viewer, scopes)
+
         %{
           answer: verdict.answer,
           confidence: verdict.confidence,
           tier: "escalate",
           status: base_status,
-          citations: Enum.map(hits, &cite/1)
+          citations: Enum.map(hits, &cite/1),
+          ask_ref: ask_ref
         }
 
       {:error, reason} ->
