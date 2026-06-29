@@ -115,6 +115,8 @@ config :swarm, :enrichment,
   # Hill-normalised by `central_k`) and criticality (1 − corroboration). Only nodes
   # scoring ≥ `threshold` enter the queue. Weights/threshold are the tuning
   # inventory (ADR-8) — re-derive per corpus, never scatter literals.
+  # threshold is the ADR-8 tuning knob; the default gates little (calibrate per corpus
+  # and override at runtime via SWARM_ENRICH_THRESHOLD — see runtime.exs).
   priority: [threshold: 0.35, w_central: 0.5, w_crit: 0.5, central_k: 5.0],
   # Bounded fan-out per scheduled scan (EOS-4 §1c): a pass enriches at most this many
   # worth-it nodes — the scheduler does the work, never a blanket on-write reactor

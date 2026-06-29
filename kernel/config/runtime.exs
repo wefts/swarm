@@ -48,6 +48,15 @@ if judge = System.get_env("SWARM_CONSILIUM_JUDGE") do
   config :swarm, :consilium, judge: judge
 end
 
+# Enrichment reward-gate threshold — the ADR-8 tuning knob, calibrated PER CORPUS
+# (calibrate.exs). The config.exs default (0.35) gates little; a calibrated run sets
+# SWARM_ENRICH_THRESHOLD to its corpus p50 (prod ≈ 0.58, derived 2026-06-29) so
+# enrichment is selective. Deep-merges into the :enrichment priority — the weights
+# (w_central/w_crit/central_k) are preserved. Unset ⇒ the product default stands.
+if threshold = System.get_env("SWARM_ENRICH_THRESHOLD") do
+  config :swarm, :enrichment, priority: [threshold: String.to_float(threshold)]
+end
+
 if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.
