@@ -50,7 +50,11 @@ ADR-7) and the **kernel enforces**; the channel only passes an authenticated
 identity. Each returns ids / typed fields the channel renders **verbatim**
 (presentation determinism, T7) — never prose, never a raw row, never a payload
 blob. Each carries the ADR-6 `AnswerStatus` so absence (`NOT_FOUND`) is distinct
-from an outage (`ERROR`). Full message shapes: `../design/dashboard-projection-rpcs.md`.
+from an outage (`ERROR`). **On any non-`FOUND` status the response carries only
+`status` — every other field is zero-valued** (a review-step finding: a `NOT_FOUND`
+must never carry a `created_at`, partial payload, or any value read from a
+found-but-unauthorized row, which would leak existence + timing). Full message
+shapes: `../design/dashboard-projection-rpcs.md`.
 
 1. **`Deliberation(ask_ref)` — a separate RPC, backed by bounded kernel retention.**
    The kernel **persists** each escalation verdict keyed by a minted, **opaque,

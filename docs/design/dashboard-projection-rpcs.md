@@ -22,6 +22,14 @@ authorise building it (that is the gated kernel phase). Implements swarm ADR-15.
   signalled by an explicit `truncated` flag (Neighborhood), never by overloading
   `PARTIAL`. A `NOT_FOUND` must be **timing-indistinguishable** from an
   out-of-scope/absent case (don't leak existence via latency).
+- **Empty body on non-FOUND (a review-step finding).** On any status other than
+  `FOUND`, the response carries **only `status`** — every other field is its zero
+  value. In particular a `NOT_FOUND` never carries a `created_at`, a partial panel,
+  a `center_id`/`next_cursor`, or **any** value read from a found-but-unauthorized
+  row (which would leak existence + timing). Echoing a caller-supplied id
+  (`ask_ref`, `node_id`) back would be harmless but adds nothing, so it is omitted
+  too — the rule is simply: non-FOUND ⇒ only `status`. This is a build done-condition
+  for all three RPCs.
 - Fields are ids / typed values rendered **verbatim** by the channel (T7) — no
   prose, no raw DB row, no payload blob crosses the wire.
 - **Wire-type choices are deliberately consistent with the shipped contract**, not
