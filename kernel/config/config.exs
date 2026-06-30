@@ -21,10 +21,27 @@ config :swarm, :embedding, dim: 1024
 # floors exact keyword hits so a dense "magnet" cannot demote them, while leaving
 # paraphrase ranking untouched (paraphrase queries have no lexical rows). Tuned on the
 # 2-source slice — verbatim MRR 0.69→0.88, paraphrase recall held ~70%.
-config :swarm, :retrieval, floor: 0.45, dense: true, lex_weight: 3.0, dense_weight: 1.0
+# `title_weight` is the title arm (ADR-0016): a node whose `node.key` matches the query
+# (`ts_rank_cd` over the title) gets a SINGLE RRF boost on its surviving chunks, so a
+# page whose title IS the query (e.g. "Public IP") floats over body-only mentions. It
+# re-orders survivors only (no floor bypass → no title-term flooding). Above the body
+# weights; calibrated on the real-corpus qa probe (ADR-8 tuning inventory): a sweep
+# 5→15→30→60 put the title-matched value page at #1 from weight ~30 (recall@10 held,
+# MRR ~doubled, no regression vs baseline); 30 is the knee, higher gives marginal gain.
+config :swarm, :retrieval,
+  floor: 0.45,
+  dense: true,
+  lex_weight: 3.0,
+  dense_weight: 1.0,
+  title_weight: 30.0
 
 if config_env() == :test do
-  config :swarm, :retrieval, floor: 0.45, dense: false, lex_weight: 3.0, dense_weight: 1.0
+  config :swarm, :retrieval,
+    floor: 0.45,
+    dense: false,
+    lex_weight: 3.0,
+    dense_weight: 1.0,
+    title_weight: 30.0
 end
 
 # Decay + saturation parameters (ADR-9). These belong to the tuning inventory

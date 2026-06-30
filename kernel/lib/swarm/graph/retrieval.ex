@@ -83,7 +83,7 @@ defmodule Swarm.Graph.Retrieval do
     k = Keyword.get(opts, :rrf_k, 60)
     spans = Keyword.get(opts, :spans, 3)
     floor = Keyword.get(opts, :floor, configured_floor())
-    {lex_w, dense_w} = weights(opts)
+    {lex_w, dense_w, title_w} = weights(opts)
 
     # An explicitly supplied query vector ALWAYS wins (tests, callers that pre-embed);
     # otherwise embed only if the dense arm is enabled (config-gated, so unit tests
@@ -98,7 +98,7 @@ defmodule Swarm.Graph.Retrieval do
     memories =
       query
       |> fused_chunks(scopes, candidates, k, qvec, lex_w, dense_w)
-      |> group_by_node(spans, floor)
+      |> group_by_node(spans, floor, k, title_w)
       |> Enum.sort_by(& &1.score, :desc)
       |> Enum.take(limit)
       |> attach_identity(scopes)
@@ -123,7 +123,8 @@ defmodule Swarm.Graph.Retrieval do
            text: String.t(),
            rrf: float(),
            cos: float() | nil,
-           lex: boolean()
+           lex: boolean(),
+           title_rnk: integer() | nil
          }
 
   @spec fused_chunks(
@@ -154,48 +155,93 @@ defmodule Swarm.Graph.Retrieval do
     |> Enum.join(" | ")
   end
 
-  defp fused_chunks(query, scopes, candidates, k, nil, _lex_w, _dense_w) do
-    # Lexical-only (no query vector): a keyword match is the only relevance signal,
-    # so `cos` is unknown (nil) and every hit is a lexical hit.
+  defp fused_chunks(query, scopes, candidates, k, nil, lex_w, _dense_w) do
+    # Lexical-only (no query vector): a body-keyword match is the only per-chunk
+    # signal, so `cos` is unknown (nil). The **title arm** (ADR-0016) is the
+    # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over `node.key` — LEFT
+    # JOINed so each surviving chunk learns its node's title rank; the per-node
+    # title boost is applied ONCE in `group_by_node` (never multiplied by chunk
+    # count). Scope is enforced on BOTH the body arm and `titled` (no-leak). The
+    # body ranking is computed + `LIMIT`ed in a subquery BEFORE `row_number`, so the
+    # top-N by `ts_rank` is what survives (an un-ordered `LIMIT` could keep arbitrary
+    # rows).
     sql = """
     WITH q AS (SELECT to_tsquery('simple', $1) AS tsq),
+    titled AS (
+      SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
+      FROM (
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        FROM node n
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        ORDER BY trank DESC
+        LIMIT $3
+      ) tn
+    ),
     lexical AS (
-      SELECT k.node_id, k.ordinal, k.text,
-             row_number() OVER (
-               ORDER BY ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) DESC
-             ) AS rnk
-      FROM chunk k JOIN node n ON n.id = k.node_id
-      WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
-      LIMIT $3
+      SELECT chunk_id, node_id, ordinal, text,
+             row_number() OVER (ORDER BY score DESC) AS rnk, $5::float8 AS w
+      FROM (
+        SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
+               ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) AS score
+        FROM chunk k JOIN node n ON n.id = k.node_id
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
+        ORDER BY score DESC
+        LIMIT $3
+      ) ls
+    ),
+    fused AS (
+      SELECT node_id, ordinal, text, chunk_id,
+             sum(w / ($4 + rnk))::float8 AS body_rrf,
+             NULL::float8 AS cos, true AS lex
+      FROM lexical
+      GROUP BY chunk_id, node_id, ordinal, text
     )
-    SELECT node_id, ordinal, text, (1.0 / ($4 + rnk))::float8 AS rrf,
-           NULL::float8 AS cos, true AS lex
-    FROM lexical
-    ORDER BY rrf DESC
+    SELECT f.node_id, f.ordinal, f.text, f.body_rrf, f.cos, f.lex, t.rnk AS title_rnk
+    FROM fused f LEFT JOIN titled t ON t.node_id = f.node_id
+    ORDER BY f.body_rrf DESC
     """
 
-    run_fused(sql, [or_tsquery(query), scopes, candidates, k])
+    run_fused(sql, [or_tsquery(query), scopes, candidates, k, lex_w])
   end
 
   defp fused_chunks(query, scopes, candidates, k, qvec, lex_w, dense_w) do
-    # Each arm carries its rank (for RRF) plus the dense arm's ABSOLUTE cosine
-    # similarity (`1 - distance`) and a lexical-hit flag. **Weighted RRF** (Card 7):
-    # the lexical term is scaled by `$6` and the dense term by `$7`, so an exact
-    # keyword hit (`w_lex > w_dense`) resists demotion by a multi-chunk dense
-    # "magnet" — while PARAPHRASE ranking is untouched (a paraphrase query has no
-    # lexical rows, so only the dense term applies). Absolute cosine still drives
-    # the relevance floor and is reported as the calibrated relevance signal.
+    # Body arms (lexical + dense) carry their rank (for weighted RRF) plus the dense
+    # arm's ABSOLUTE cosine (`1 - distance`) and a lexical-hit flag; fused per chunk.
+    # **Weighted RRF** (Card 7): the lexical term is scaled by `$6`, the dense term
+    # by `$7`, so an exact keyword hit resists demotion by a multi-chunk dense
+    # "magnet"; PARAPHRASE ranking is untouched. The **title arm** (ADR-0016) is the
+    # `titled` CTE (in-scope nodes ranked by `ts_rank_cd` over `node.key`), LEFT
+    # JOINed so each chunk learns its node's title rank; the per-node title boost is
+    # added ONCE in `group_by_node`, so a page whose title IS the query floats over
+    # body-only mentions WITHOUT a chunk-count multiplier and WITHOUT bypassing the
+    # relevance gate (it re-orders survivors, it does not admit new ones). Absolute
+    # cosine still drives the relevance floor and is the reported relevance. The
+    # lexical body arm is ordered + `LIMIT`ed BEFORE `row_number` (top-N, not
+    # arbitrary rows); dense already orders by distance. Scope on EVERY arm.
     sql = """
     WITH q AS (SELECT to_tsquery('simple', $1) AS tsq),
+    titled AS (
+      SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
+      FROM (
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        FROM node n
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        ORDER BY trank DESC
+        LIMIT $3
+      ) tn
+    ),
     lexical AS (
-      SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
-             row_number() OVER (
-               ORDER BY ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) DESC
-             ) AS rnk,
+      SELECT chunk_id, node_id, ordinal, text,
+             row_number() OVER (ORDER BY score DESC) AS rnk,
              NULL::float8 AS cos, true AS lex, $6::float8 AS w
-      FROM chunk k JOIN node n ON n.id = k.node_id
-      WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
-      LIMIT $3
+      FROM (
+        SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
+               ts_rank(to_tsvector('simple', k.text), (SELECT tsq FROM q)) AS score
+        FROM chunk k JOIN node n ON n.id = k.node_id
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', k.text) @@ (SELECT tsq FROM q)
+        ORDER BY score DESC
+        LIMIT $3
+      ) ls
     ),
     dense AS (
       SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
@@ -205,14 +251,17 @@ defmodule Swarm.Graph.Retrieval do
       WHERE n.scope = ANY($2) AND k.vec IS NOT NULL
       ORDER BY k.vec <=> $5
       LIMIT $3
+    ),
+    fused AS (
+      SELECT node_id, ordinal, text, chunk_id,
+             sum(w / ($4 + rnk))::float8 AS body_rrf,
+             max(cos) AS cos, bool_or(lex) AS lex
+      FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
+      GROUP BY chunk_id, node_id, ordinal, text
     )
-    SELECT node_id, ordinal, text,
-           sum(w / ($4 + rnk))::float8 AS rrf,
-           max(cos) AS cos,
-           bool_or(lex) AS lex
-    FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
-    GROUP BY chunk_id, node_id, ordinal, text
-    ORDER BY rrf DESC
+    SELECT f.node_id, f.ordinal, f.text, f.body_rrf, f.cos, f.lex, t.rnk AS title_rnk
+    FROM fused f LEFT JOIN titled t ON t.node_id = f.node_id
+    ORDER BY f.body_rrf DESC
     """
 
     run_fused(sql, [or_tsquery(query), scopes, candidates, k, qvec, lex_w, dense_w])
@@ -221,8 +270,8 @@ defmodule Swarm.Graph.Retrieval do
   defp run_fused(sql, params) do
     %{rows: rows} = Repo.query!(sql, params)
 
-    Enum.map(rows, fn [node_id, ordinal, text, rrf, cos, lex] ->
-      %{node_id: node_id, ordinal: ordinal, text: text, rrf: rrf, cos: cos, lex: lex}
+    Enum.map(rows, fn [node_id, ordinal, text, body_rrf, cos, lex, title_rnk] ->
+      %{node_id: node_id, ordinal: ordinal, text: text, rrf: body_rrf, cos: cos, lex: lex, title_rnk: title_rnk}
     end)
   end
 
@@ -232,32 +281,48 @@ defmodule Swarm.Graph.Retrieval do
   # cosine, no keyword match on this query) is dropped before it can outrank the
   # true answer. A node with no surviving chunk is dropped entirely — that is how
   # an out-of-scope query collapses to `:not_found`.
-  defp group_by_node(chunks, spans_per, floor) do
+  defp group_by_node(chunks, spans_per, floor, k, title_w) do
     chunks
     |> Enum.group_by(& &1.node_id)
     |> Enum.flat_map(fn {node_id, hits} ->
       case Enum.filter(hits, &chunk_relevant?(&1, floor)) do
-        [] ->
-          []
-
-        kept ->
-          sorted = Enum.sort_by(kept, & &1.rrf, :desc)
-
-          [
-            %{
-              node_id: node_id,
-              score: kept |> Enum.map(& &1.rrf) |> Enum.sum(),
-              relevance: kept |> Enum.map(&(&1.cos || 0.0)) |> Enum.max(),
-              spans:
-                sorted |> Enum.take(spans_per) |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
-            }
-          ]
+        [] -> []
+        kept -> [node_memory(node_id, kept, spans_per, k, title_w)]
       end
     end)
   end
 
+  # One memory from a node's surviving chunks: the body score is the RRF sum over
+  # survivors; the title arm (ADR-0016) adds a SINGLE per-node boost (title rank is
+  # uniform across the node's chunks via the LEFT JOIN — take any non-nil), so it is
+  # never multiplied by the node's chunk count and only re-orders nodes that already
+  # have a surviving chunk (no floor bypass → no flooding). Relevance is the best
+  # absolute cosine among survivors.
+  defp node_memory(node_id, kept, spans_per, k, title_w) do
+    body = kept |> Enum.map(& &1.rrf) |> Enum.sum()
+
+    title_boost =
+      case Enum.find_value(kept, & &1.title_rnk) do
+        nil -> 0.0
+        rnk -> title_w / (k + rnk)
+      end
+
+    %{
+      node_id: node_id,
+      score: body + title_boost,
+      relevance: kept |> Enum.map(&(&1.cos || 0.0)) |> Enum.max(),
+      spans:
+        kept
+        |> Enum.sort_by(& &1.rrf, :desc)
+        |> Enum.take(spans_per)
+        |> Enum.map(&%{ordinal: &1.ordinal, text: &1.text})
+    }
+  end
+
   # The relevance gate: a keyword (lexical) hit is relevant regardless of vector
-  # similarity; a dense-only hit must clear the cosine floor.
+  # similarity; a dense-only hit must clear the cosine floor. A title match does
+  # NOT bypass this gate (ADR-0016) — it boosts a node's SURVIVING chunks, so a
+  # title match with no relevant chunk never surfaces (no flooding).
   defp chunk_relevant?(%{lex: true}, _floor), do: true
   defp chunk_relevant?(%{cos: cos}, floor) when is_float(cos), do: cos >= floor
   defp chunk_relevant?(_chunk, _floor), do: false
@@ -266,14 +331,17 @@ defmodule Swarm.Graph.Retrieval do
     Application.get_env(:swarm, :retrieval, [])[:floor] || @default_floor
   end
 
-  # Weighted-RRF arm weights (Card 7). Per-call `:lex_weight`/`:dense_weight` override
-  # config, which overrides the equal-weight default (1.0/1.0 — identical to the
-  # original behaviour, so nothing changes until a weight is set).
+  # Weighted-RRF arm weights (Card 7 + ADR-0016). Per-call
+  # `:lex_weight`/`:dense_weight`/`:title_weight` override config, which overrides
+  # the equal-weight default (1.0 — identical to the original behaviour, so nothing
+  # changes until a weight is set). `title_weight` scales the title arm: above the
+  # body weights it floats a title-matched page over body-only mentions.
   defp weights(opts) do
     cfg = Application.get_env(:swarm, :retrieval, [])
     lex = Keyword.get(opts, :lex_weight) || cfg[:lex_weight] || 1.0
     dense = Keyword.get(opts, :dense_weight) || cfg[:dense_weight] || 1.0
-    {lex / 1, dense / 1}
+    title = Keyword.get(opts, :title_weight) || cfg[:title_weight] || 1.0
+    {lex / 1, dense / 1, title / 1}
   end
 
   # Whether the dense arm is on by default. True in production; a deployment (or

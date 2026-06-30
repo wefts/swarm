@@ -137,6 +137,69 @@ defmodule Swarm.Graph.RetrievalTest do
     assert hd(keys(weighted)) == "Lex"
   end
 
+  # --- title arm (ADR-0016) ---
+
+  test "the title arm floats a title-matched page over a body-heavier distractor" do
+    # The answer page's title IS the query target; its body mentions the terms
+    # lightly (a precise-value page). A distractor repeats the query terms heavily
+    # in its body (higher ts_rank) but its title is unrelated. Both survive the
+    # relevance gate (both are lexical hits). WITHOUT the title arm the body-heavier
+    # distractor leads; the per-node title boost floats the title-matched page to #1.
+    ans = node!("Public IP", "public")
+    chunk!(ans, 0, "Nebula public IP reference", 0)
+
+    distractor = node!("Network Notes", "public")
+    chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing and egress", 1)
+
+    # default config title_weight (5.0) — proves the SHIPPED default fixes the miss.
+    %{memories: mems} = Retrieval.search("Nebula Public IP", ["public"], dense: false, expand: false)
+
+    assert hd(keys(mems)) == "Public IP"
+  end
+
+  test "with the title arm off (title_weight 0) the body-heavier distractor leads" do
+    # The contrast: zero out the title boost and the ranking reverts to body-only,
+    # so the body-heavier distractor wins. Proves the title arm is what floats the
+    # title-matched page — and that it re-orders survivors, never admits new ones.
+    ans = node!("Public IP", "public")
+    chunk!(ans, 0, "Nebula public IP reference", 0)
+
+    distractor = node!("Network Notes", "public")
+    chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing and egress", 1)
+
+    %{memories: mems} =
+      Retrieval.search("Nebula Public IP", ["public"], dense: false, expand: false, title_weight: 0.0)
+
+    assert hd(keys(mems)) == "Network Notes"
+  end
+
+  test "the scope predicate gates the TITLE arm — a private title never leaks" do
+    priv = node!("Secret Public IP", "private")
+    chunk!(priv, 0, "public IP private value", 0)
+
+    %{memories: mems} =
+      Retrieval.search("Public IP", ["public"], dense: false, expand: false, title_weight: 50.0)
+
+    refute "Secret Public IP" in keys(mems)
+  end
+
+  test "a title match with no surviving chunk does NOT surface (no flooding)" do
+    # "Public Holidays" matches the title arm on the common term "public", but its
+    # body has no query-term hit — so it has no surviving chunk and must NOT surface
+    # (the title arm boosts survivors, it does not bypass the relevance gate).
+    answer = node!("Public IP", "public")
+    chunk!(answer, 0, "the public IP value", 0)
+
+    flood = node!("Public Holidays", "public")
+    chunk!(flood, 0, "the office is closed on national days", 1)
+
+    %{memories: mems} =
+      Retrieval.search("Public IP", ["public"], dense: false, expand: false, title_weight: 50.0)
+
+    assert "Public IP" in keys(mems)
+    refute "Public Holidays" in keys(mems)
+  end
+
   test "stage-2 traversal expands seeds into multi-hop neighbours" do
     seed = node!("Seed", "public")
     neighbour = node!("Neighbour", "public")
