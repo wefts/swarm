@@ -30,6 +30,7 @@ defmodule Swarm.Consilium do
   @type verdict :: %{
           answer: String.t(),
           confidence: float(),
+          supported: boolean(),
           disagreement: float(),
           panel: [take()],
           judge: String.t()
@@ -142,7 +143,8 @@ defmodule Swarm.Consilium do
   end
 
   @spec judge(String.t(), String.t(), fun()) ::
-          {:ok, %{answer: String.t(), confidence: float()}} | {:error, term()}
+          {:ok, %{answer: String.t(), confidence: float(), supported: boolean()}}
+          | {:error, term()}
   defp judge(model, prompt, generator) do
     do_judge(model, prompt, generator, @judge_attempts)
   end
@@ -165,11 +167,12 @@ defmodule Swarm.Consilium do
   end
 
   @spec parse_verdict(String.t()) ::
-          {:ok, %{answer: String.t(), confidence: float()}} | {:error, term()}
+          {:ok, %{answer: String.t(), confidence: float(), supported: boolean()}}
+          | {:error, term()}
   defp parse_verdict(raw) do
     case Jason.decode(raw) do
-      {:ok, %{"answer" => a, "confidence" => c}} when is_binary(a) and is_number(c) ->
-        {:ok, %{answer: a, confidence: c / 1}}
+      {:ok, %{"answer" => a, "confidence" => c} = m} when is_binary(a) and is_number(c) ->
+        {:ok, %{answer: a, confidence: c / 1, supported: parse_supported(m)}}
 
       {:ok, _} ->
         {:error, :invalid_verdict_schema}
@@ -178,6 +181,15 @@ defmodule Swarm.Consilium do
         {:error, {:invalid_json, reason}}
     end
   end
+
+  # Groundedness self-flag (the calibration anchor): true ONLY when the judge marks
+  # the answer fully supported by the grounding. FAIL-CLOSED — anything other than an
+  # explicit `true` (absent, null, non-boolean) is treated as NOT supported, so a
+  # schema hiccup can never re-admit the over-confident-ungrounded answer (council:
+  # codex + gemini both flagged fail-open as the fatal mistake).
+  @spec parse_supported(map()) :: boolean()
+  defp parse_supported(%{"supported" => s}) when is_boolean(s), do: s
+  defp parse_supported(_), do: false
 
   # External text is fenced as DATA, not instructions (ADR-7).
   defp panel_prompt(query, grounding) do
@@ -193,9 +205,12 @@ defmodule Swarm.Consilium do
   end
 
   defp judge_system do
-    "You are a synthesis judge. Combine the panel answers into ONE answer " <>
-      "supported by the grounding; drop unsupported claims. Respond as strict " <>
-      "JSON only: {\"answer\": string, \"confidence\": number between 0 and 1}."
+    ~s|You are a synthesis judge. Combine the panel answers into ONE answer | <>
+      ~s|supported by the grounding; drop unsupported claims. Set "supported" to | <>
+      ~s|true ONLY if the grounding actually contains the answer; set it to false | <>
+      ~s|if the grounding does not answer the question (do not guess). Respond as | <>
+      ~s|strict JSON only: {"answer": string, "confidence": number between 0 and | <>
+      ~s|1, "supported": boolean}.|
   end
 
   defp judge_prompt(query, grounding, takes) do

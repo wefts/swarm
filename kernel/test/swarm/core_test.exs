@@ -72,14 +72,16 @@ defmodule Swarm.CoreTest do
 
     generator = fn _model, _prompt, opts ->
       if Keyword.get(opts, :json),
-        do: {:ok, ~s({"answer": "synthesized verdict", "confidence": 0.8})},
+        do: {:ok, ~s({"answer": "synthesized verdict", "confidence": 0.8, "supported": true})},
         else: {:ok, "panel take"}
     end
 
     a = Core.ask("storage engine details", escalate_opts(generator))
     assert a.tier == "escalate"
     assert a.answer == "synthesized verdict"
-    assert a.confidence == 0.8
+    # confidence is calibrated (judge × agreement × retrieval cap); the real retriever
+    # supplies the relevance signal, so assert it stays a sane, non-crushed number.
+    assert a.confidence > 0.0 and a.confidence <= 0.8
   end
 
   test "ask stays fail-loud when the judge fails (low confidence, no raw text)" do

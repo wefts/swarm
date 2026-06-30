@@ -102,7 +102,7 @@ defmodule Swarm.CoreResultTest do
   test "escalate with a successful synthesis → :found" do
     gen = fn _model, _prompt, opts ->
       if Keyword.get(opts, :json),
-        do: {:ok, ~s({"answer":"synthesized","confidence":0.8})},
+        do: {:ok, ~s({"answer":"synthesized","confidence":0.8,"supported":true})},
         else: {:ok, "panel take"}
     end
 
@@ -137,7 +137,7 @@ defmodule Swarm.CoreResultTest do
   defp ok_gen do
     fn _model, _prompt, opts ->
       if Keyword.get(opts, :json),
-        do: {:ok, ~s({"answer":"synthesized","confidence":0.8})},
+        do: {:ok, ~s({"answer":"synthesized","confidence":0.8,"supported":true})},
         else: {:ok, "panel take"}
     end
   end
@@ -158,5 +158,172 @@ defmodule Swarm.CoreResultTest do
 
     assert a.tier == "escalate"
     assert Map.get(a, :ask_ref, "") == ""
+  end
+
+  # C1 (chunk-grounding): the consilium must be fed the answer-bearing PASSAGE of a
+  # content hit (its spans), not just "- type: key" titles (the starved-not-dumb bug).
+  test "escalate grounds the consilium on the matched passage, not the bare title" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Public IP",
+           score: 0.72,
+           relevance: 0.72,
+           spans: [%{ordinal: 3, text: "## Networking\nNebula public IP is 203.0.113.7."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"203.0.113.7","confidence":0.8,"supported":true})},
+        else: {:ok, "203.0.113.7"}
+    end
+
+    a = Core.ask("what is the nebula public ip", escalate_opts(gen, retriever: retr))
+    assert a.tier == "escalate"
+
+    # the value-bearing passage reached the model (not just the title line)
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "203.0.113.7"
+    assert prompt =~ "Public IP"
+  end
+
+  # A title/identity key hit (no spans) still contributes its identity line — never
+  # a fabricated passage — so identity/inventory grounding keeps working.
+  test "escalate grounding falls back to the identity line for a span-less hit" do
+    test_pid = self()
+    retr = fn _q, _s, _o -> {:ok, [%{id: 7, type: "ticket", key: "TCK-7", score: 1.0}]} end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"x","confidence":0.5,"supported":true})},
+        else: {:ok, "x"}
+    end
+
+    Core.ask("show ticket details", escalate_opts(gen, retriever: retr))
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "ticket: TCK-7"
+  end
+
+  # C2 (confidence calibration, the lynchpin): a judge that ABSTAINS (supported=false)
+  # must yield a LOW-confidence :not_found, never a high-confidence answer — even when
+  # the judge self-reports 0.9. Fail-closed: a missing `supported` is treated as false.
+  defp judge_gen(json) do
+    fn _model, _prompt, opts ->
+      if Keyword.get(opts, :json), do: {:ok, json}, else: {:ok, "panel take"}
+    end
+  end
+
+  defp hit_with_relevance(r) do
+    fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Public IP",
+           score: r,
+           relevance: r,
+           spans: [%{ordinal: 1, text: "Nebula public IP is 203.0.113.7."}]
+         }
+       ]}
+    end
+  end
+
+  test "an ungrounded answer (supported=false) ⇒ :not_found, confidence 0.0, no citations" do
+    gen =
+      judge_gen(
+        ~s({"answer":"That detail is not in the provided text.","confidence":0.9,"supported":false})
+      )
+
+    a =
+      Core.ask(
+        "what is the nebula public ip",
+        escalate_opts(gen, retriever: hit_with_relevance(0.7))
+      )
+
+    assert a.status == :not_found
+    assert a.confidence == 0.0
+    assert a.citations == []
+    refute a.answer =~ "not in the provided text"
+  end
+
+  test "a missing supported flag fails CLOSED (treated as not grounded)" do
+    gen = judge_gen(~s({"answer":"203.0.113.7","confidence":0.9}))
+
+    a =
+      Core.ask(
+        "what is the nebula public ip",
+        escalate_opts(gen, retriever: hit_with_relevance(0.7))
+      )
+
+    assert a.status == :not_found
+    assert a.confidence == 0.0
+  end
+
+  test "a grounded answer with strong retrieval is NOT crushed (≈ judge × agreement)" do
+    gen = judge_gen(~s({"answer":"203.0.113.7","confidence":0.9,"supported":true}))
+
+    a =
+      Core.ask(
+        "what is the nebula public ip",
+        escalate_opts(gen, retriever: hit_with_relevance(0.6))
+      )
+
+    assert a.status == :found
+    # single-model panel ⇒ disagreement 0 ⇒ agreement 1; relevance 0.6 ≥ target ⇒ cap 1.0
+    assert_in_delta a.confidence, 0.9, 1.0e-6
+  end
+
+  test "a grounded answer on MARGINAL retrieval is capped lower (honest), not zeroed" do
+    gen = judge_gen(~s({"answer":"203.0.113.7","confidence":0.9,"supported":true}))
+
+    a =
+      Core.ask(
+        "what is the nebula public ip",
+        escalate_opts(gen, retriever: hit_with_relevance(0.45))
+      )
+
+    assert a.status == :found
+    # relevance at the floor ⇒ cap 0.6 ⇒ 0.9 × 0.6 = 0.54 (capped, not crushed to 0)
+    assert_in_delta a.confidence, 0.54, 1.0e-6
+  end
+
+  # C3 (claim-aware): a claim-graph fact about the query's entity is surfaced into
+  # the consilium grounding directly (not only if a chunk lands).
+  test "escalate folds a scope-visible claim fact into the grounding" do
+    s = add_node!(%{type: "entity", key: "Nebula", scope: "public"})
+    o = add_node!(%{type: "entity", key: "203.0.113.7", scope: "public"})
+    {:ok, _} = Graph.add_edge(s, o, "public_ip", "p1", evidence_kind: "claim", scope: "public")
+
+    test_pid = self()
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"203.0.113.7","confidence":0.8,"supported":true})},
+        else: {:ok, "203.0.113.7"}
+    end
+
+    # real retriever (no override) → no ingested content; the claim path supplies the fact
+    a = Core.ask("what is the nebula public ip", escalate_opts(gen))
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Known facts"
+    assert prompt =~ "Nebula public_ip 203.0.113.7"
+
+    # a claim-only :found answer (no retrieval hits) is still CITED — explainable.
+    assert a.status == :found
+    assert Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "Nebula public_ip"))
   end
 end

@@ -12,10 +12,18 @@ defmodule Swarm.Core do
   """
 
   alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
-  alias Swarm.Graph.{Neighborhood, Retrieval}
+  alias Swarm.Graph.{Claims, Neighborhood, Retrieval}
 
   @default_scopes ["public"]
   @search_limit 10
+  # Cap the grounding fed to the consilium: enough to carry the answer-bearing
+  # passages of the top hits, bounded so a long corpus can't blow the token ceiling
+  # or dilute the signal (the consilium also budget-refuses over-ceiling).
+  @grounding_char_budget 8_000
+  # Claim facts get their OWN sub-budget so a burst of facts can never crowd the
+  # retrieved passages out of the grounding (code review); passages keep the full
+  # budget below, facts are bounded on top.
+  @facts_char_budget 2_000
   @stopwords ~w(the a an of to and or for with about how what which why who when
                 where is are was were do does did can could should would related
                 show find list recent get see me my our your this that these those)
@@ -39,7 +47,19 @@ defmodule Swarm.Core do
           # non-anonymous asker (ADR-15); absent otherwise.
           optional(:ask_ref) => String.t()
         }
-  @type hit :: %{id: integer(), type: String.t(), key: String.t(), score: float()}
+  @typedoc """
+  A retrieval hit. Content hits (the hybrid arm) additionally carry the cited
+  `spans` (the answer-bearing passages, not just the title) and the absolute-cosine
+  `relevance` (the calibrated retrieval signal) — title/identity key hits do not.
+  """
+  @type hit :: %{
+          :id => integer(),
+          :type => String.t(),
+          :key => String.t(),
+          :score => float(),
+          optional(:spans) => [%{ordinal: integer(), text: String.t()}],
+          optional(:relevance) => float()
+        }
   @typedoc "Typed retrieval outcome: ok / partial (some sources failed) / hard error."
   @type retrieval :: {:ok, [hit()]} | {:partial, [hit()], [term()]} | {:error, term()}
 
@@ -144,7 +164,19 @@ defmodule Swarm.Core do
         query
         |> Retrieval.search(scopes, limit: limit, expand: false)
         |> Map.fetch!(:memories)
-        |> Enum.map(&%{id: &1.node_id, type: &1.type, key: &1.key, score: &1.relevance})
+        |> Enum.map(
+          &%{
+            id: &1.node_id,
+            type: &1.type,
+            key: &1.key,
+            score: &1.relevance,
+            # Keep the cited passages + the calibrated relevance — the consilium is
+            # grounded on the answer-bearing text (not the title), and calibration
+            # anchors on `relevance` (was discarded here; the precise-lookup gap).
+            spans: &1.spans,
+            relevance: &1.relevance
+          }
+        )
 
       merge_hits(content_hits, key_hits, limit)
     end
@@ -382,7 +414,10 @@ defmodule Swarm.Core do
   end
 
   defp synthesize(query, hits, base_status, scopes, opts) do
-    grounding = Enum.map_join(hits, "\n", fn h -> "- #{h.type}: #{h.key}" end)
+    # Claim-aware: surface enrichment claim-graph facts about the query's entities
+    # (scope-enforced) so a precise value answers directly, not only if a chunk lands.
+    facts = Claims.for_query(query, scopes)
+    grounding = build_grounding(facts, hits)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -391,15 +426,7 @@ defmodule Swarm.Core do
         # single insert AFTER the LLM returned. "" when not retained.
         viewer = Keyword.get(opts, :viewer, "")
         ask_ref = Deliberation.maybe_persist(verdict, viewer, scopes)
-
-        %{
-          answer: verdict.answer,
-          confidence: verdict.confidence,
-          tier: "escalate",
-          status: base_status,
-          citations: Enum.map(hits, &cite/1),
-          ask_ref: ask_ref
-        }
+        calibrated_answer(query, verdict, hits, facts, base_status, ask_ref)
 
       {:error, reason} ->
         # Fail-loud: a synthesis failure is an ERROR (distinct from not-found),
@@ -407,6 +434,106 @@ defmodule Swarm.Core do
         error_result({:escalation_failed, reason}, "escalate")
     end
   end
+
+  # Confidence calibration (the lynchpin) — anchor the escalated answer's confidence
+  # on (judge ∧ retrieval-signal ∧ groundedness) so a non-grounded answer cannot
+  # return a high number (the judge self-reports 0.8–0.9 even when abstaining).
+  # Decorrelated council (codex + gemini-3.1-pro): the judge's `supported` self-flag
+  # gates groundedness (fail-closed); retrieval relevance is a ONE-SIDED CAP, never a
+  # raw multiplier (multiplying raw cosine crushes legitimate answers — cosine-space
+  # ≠ confidence-space); disagreement applies a gentle haircut.
+  @relevance_floor 0.45
+  @relevance_full 0.55
+
+  @spec calibrated_answer(
+          String.t(),
+          Consilium.verdict(),
+          [hit()],
+          [Claims.fact()],
+          status(),
+          String.t()
+        ) :: answer()
+  defp calibrated_answer(query, verdict, hits, facts, base_status, ask_ref) do
+    if verdict.supported do
+      %{
+        answer: verdict.answer,
+        confidence: calibrate_confidence(verdict.confidence, verdict.disagreement, hits),
+        tier: "escalate",
+        status: base_status,
+        # Cite both the retrieved passages AND the claim facts that grounded the
+        # answer — so a claim-only answer (no retrieval hits) is still explainable.
+        citations: Enum.map(hits, &cite/1) ++ Enum.map(facts, &fact_cite/1),
+        ask_ref: ask_ref
+      }
+    else
+      # The judge marked the answer NOT grounded (an abstention) — honest `:not_found`,
+      # confidence 0.0, the standard not-found message (NOT the judge's "it's not in the
+      # text" prose), no citations (we don't present examined pages as support). The
+      # deliberation is still retained, so the dashboard can show that it deliberated.
+      query
+      |> not_found("escalate")
+      |> Map.merge(%{confidence: 0.0, ask_ref: ask_ref})
+    end
+  end
+
+  # final = judge_confidence · agreement · retrieval_cap, clamped to [0,1].
+  @spec calibrate_confidence(float(), float(), [hit()]) :: float()
+  defp calibrate_confidence(judge_conf, disagreement, hits) do
+    agreement = 1.0 - 0.5 * disagreement
+    clamp01(judge_conf * agreement * retrieval_cap(hits))
+  end
+
+  # Retrieval relevance as a ONE-SIDED cap, not a scalar (council): at/above the
+  # "good in-scope" target it is 1.0 (a strong answer is NOT penalised → confidence ≈
+  # judge·agreement); only marginal grounding (floor-band) caps it, and never below
+  # 0.6 so a vocabulary-mismatch / multi-source answer is not crushed. Uses the BEST
+  # supporting relevance; no dense signal (identity/lexical hits) ⇒ no cap.
+  # STEP-2 interface note: the entity-aggregation layer synthesises across many
+  # mid-relevance sources — it should pass a corroboration/aggregate signal here so
+  # the per-span max does not under-score a well-corroborated synthesis.
+  @spec retrieval_cap([hit()]) :: float()
+  defp retrieval_cap(hits) do
+    case Enum.flat_map(hits, fn h -> List.wrap(h[:relevance]) end) do
+      [] -> 1.0
+      rels -> ramp(Enum.max(rels))
+    end
+  end
+
+  @spec ramp(float()) :: float()
+  defp ramp(x) when x >= @relevance_full, do: 1.0
+  defp ramp(x) when x <= @relevance_floor, do: 0.6
+  defp ramp(x), do: 0.6 + 0.4 * (x - @relevance_floor) / (@relevance_full - @relevance_floor)
+
+  @spec clamp01(float()) :: float()
+  defp clamp01(x), do: x |> max(0.0) |> min(1.0)
+
+  # Grounding fed to the consilium: the answer-bearing PASSAGES of each hit (the
+  # segmenter's section-prefixed chunk text), not the bare title. A content hit
+  # carries `spans`; a title/identity key hit has none → it contributes only its
+  # identity line (still useful context, never a fabricated passage). Bounded.
+  @spec build_grounding([Claims.fact()], [hit()]) :: String.t()
+  defp build_grounding(facts, hits) do
+    # Facts and passages are budgeted SEPARATELY: facts can't starve the passages
+    # (code review), and the passages keep their full budget.
+    facts_block = facts |> Claims.to_grounding() |> String.slice(0, @facts_char_budget)
+
+    passages =
+      hits
+      |> Enum.map(&hit_grounding/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+      |> String.slice(0, @grounding_char_budget)
+
+    [facts_block, passages] |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
+  end
+
+  @spec hit_grounding(hit()) :: String.t()
+  defp hit_grounding(%{spans: [_ | _] = spans, type: type, key: key}) do
+    passages = spans |> Enum.map_join("\n", & &1.text)
+    "## #{type}: #{key}\n#{passages}"
+  end
+
+  defp hit_grounding(%{type: type, key: key}), do: "- #{type}: #{key}"
 
   # A lookup that resolved to nothing — structured, distinct from an error; the
   # queried terms are echoed so the caller/channel can say what was not found.
@@ -444,6 +571,13 @@ defmodule Swarm.Core do
   defp query_terms(query), do: query |> patterns() |> Enum.map(&String.trim(&1, "%"))
 
   defp cite(hit), do: %{source: hit.type, ref: hit.key, confidence: hit.score}
+
+  # A claim-graph fact as a citation: source "claim", the S-P-O as the ref, the
+  # edge reliability as confidence — so a fact-grounded answer is explainable.
+  @spec fact_cite(Claims.fact()) :: citation()
+  defp fact_cite(f) do
+    %{source: "claim", ref: "#{f.subject} #{f.predicate} #{f.object}", confidence: f.reliability}
+  end
 
   # Significant query terms → ILIKE patterns (drop stopwords and short tokens).
   @spec patterns(String.t()) :: [String.t()]
