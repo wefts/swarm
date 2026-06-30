@@ -2,11 +2,18 @@
 
 ## Status
 
-Proposed — the feasibility spike RAN (2026-06-30, `board/done/retrieval-pg-search-spike.md`)
-and is **green on its primary gates** (BM25 beats the native baseline on relevance; no-leak
-filter-before-rank holds; index stays fresh under writes), but the decorrelated council returned
-**GO-WITH-CONDITIONS** — so this stays **Proposed**, NOT Accepted, until the conditions below are
-met. Full rewrite now would be premature. See "## Spike result".
+**Proposed → MIGRATING** (operator decision 2026-06-30). The feasibility spike was green on its
+primary gates (BM25 beats the native baseline on relevance; no-leak filter-before-rank holds; index
+fresh under writes), council **GO-WITH-CONDITIONS**. Its #1 condition — *compare BM25 against a
+**repaired** native baseline (a title-floor bypass) first* — was then **explored and RESOLVED in
+favour of pg_search**: the native bypass recovers recall on the probe, but doing it cleanly (without
+generic common-word-title flooding) requires **idf-aware title scoring — i.e. reinventing BM25 in
+SQL** (council codex FLAWED + qwen3-coder SWC; see "## Native-bypass exploration"). So the operator
+**chose to migrate to pg_search**. This ADR stays **Proposed on paper** until the remaining
+production conditions pass (PG16 from-source image, larger holdout, no-leak suite, ops gates — see
+"## Spike result") and a final council flips it to **Accepted**; the migration is now an active epic
+(`board/doing/retrieval-pg-search-migration.md`). Full rewrite proceeds behind a feature flag with the
+native arm retained until production burn-in is clean.
 
 ## Record Completeness
 
@@ -120,6 +127,26 @@ cheap native bypass recovers Kubernetes and performs near BM25, the extension is
    rehearsed; analyzer/tokenizer drift documented + accepted (Tantivy ≠ PG `simple`).
 6. Keep **RRF** (no raw BM25⊕vector score fusion); keep the native arm behind a feature flag until
    production burn-in is clean.
+
+## Native-bypass exploration — the repaired-baseline condition (2026-06-30)
+
+The council's #1 condition was to first try the cheap, dependency-free native fix: a **coverage-gated
+title-floor bypass** so a precise/thin page whose title IS the query (e.g. "KUBERNETES") surfaces even
+with no body hit. Built + measured (`board/done/retrieval-native-title-bypass.md`, not shipped):
+
+- It **recovers recall** on the 7-q probe (recall@10 0.857→1.0, the Kubernetes page reached top-10),
+  and at high `title_weight` even matches/exceeds BM25's MRR — BUT that was tuned on the same tiny
+  title-biased gold (overfit).
+- A decorrelated council (codex **FLAWED** + qwen3-coder **SWC**, convergent) found the deep flaw:
+  the coverage gate is a **crude idf proxy** — a generic one-word title ("Report", "Status") gets
+  cov=1.0 on any query containing that word and floods past the floor, dominating real body evidence
+  via the title boost. What distinguishes "KUBERNETES" (rescue) from "Report" (junk) is **term idf**,
+  which `ts_rank`/coverage don't model. Plus a coverage stopword asymmetry and a cov-vs-trank boost
+  inversion. **Cleanly fixing it converges on reimplementing BM25 in SQL.**
+
+**Conclusion (operator):** this is positive evidence FOR adoption, not against — the native arm cannot
+cleanly reach BM25 without *becoming* BM25. The bypass was **reverted** (the shipped native baseline
+stays the Phase-1 title arm, recall@10 0.857); the migration to pg_search is on.
 
 ## Consequences
 
