@@ -12,7 +12,7 @@ defmodule Swarm.Core do
   """
 
   alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
-  alias Swarm.Graph.{Claims, Neighborhood, Retrieval}
+  alias Swarm.Graph.{Aggregation, Neighborhood, Retrieval}
 
   @default_scopes ["public"]
   @search_limit 10
@@ -414,10 +414,11 @@ defmodule Swarm.Core do
   end
 
   defp synthesize(query, hits, base_status, scopes, opts) do
-    # Claim-aware: surface enrichment claim-graph facts about the query's entities
-    # (scope-enforced) so a precise value answers directly, not only if a chunk lands.
-    facts = Claims.for_query(query, scopes)
-    grounding = build_grounding(facts, hits)
+    # Entity aggregation (STEP 2): gather the claim graph about the query's entities,
+    # grouped by canonical predicate + corroboration-ranked, scope-enforced — so a
+    # "what is X" answer synthesizes across the corpus, not just whatever chunk landed.
+    profile = Aggregation.entity_profile(query, scopes)
+    grounding = build_grounding(profile, hits)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -426,7 +427,7 @@ defmodule Swarm.Core do
         # single insert AFTER the LLM returned. "" when not retained.
         viewer = Keyword.get(opts, :viewer, "")
         ask_ref = Deliberation.maybe_persist(verdict, viewer, scopes)
-        calibrated_answer(query, verdict, hits, facts, base_status, ask_ref)
+        calibrated_answer(query, verdict, hits, profile, base_status, ask_ref)
 
       {:error, reason} ->
         # Fail-loud: a synthesis failure is an ERROR (distinct from not-found),
@@ -449,20 +450,26 @@ defmodule Swarm.Core do
           String.t(),
           Consilium.verdict(),
           [hit()],
-          [Claims.fact()],
+          Aggregation.profile(),
           status(),
           String.t()
         ) :: answer()
-  defp calibrated_answer(query, verdict, hits, facts, base_status, ask_ref) do
+  defp calibrated_answer(query, verdict, hits, profile, base_status, ask_ref) do
     if verdict.supported do
       %{
         answer: verdict.answer,
-        confidence: calibrate_confidence(verdict.confidence, verdict.disagreement, hits),
+        confidence:
+          calibrate_confidence(
+            verdict.confidence,
+            verdict.disagreement,
+            hits,
+            profile.claim_support
+          ),
         tier: "escalate",
         status: base_status,
         # Cite both the retrieved passages AND the claim facts that grounded the
         # answer — so a claim-only answer (no retrieval hits) is still explainable.
-        citations: Enum.map(hits, &cite/1) ++ Enum.map(facts, &fact_cite/1),
+        citations: Enum.map(hits, &cite/1) ++ Enum.map(profile.facts, &fact_cite/1),
         ask_ref: ask_ref
       }
     else
@@ -476,26 +483,36 @@ defmodule Swarm.Core do
     end
   end
 
-  # final = judge_confidence · agreement · retrieval_cap, clamped to [0,1].
-  @spec calibrate_confidence(float(), float(), [hit()]) :: float()
-  defp calibrate_confidence(judge_conf, disagreement, hits) do
+  # final = judge_confidence · agreement · evidence_cap, clamped to [0,1].
+  @spec calibrate_confidence(float(), float(), [hit()], float() | nil) :: float()
+  defp calibrate_confidence(judge_conf, disagreement, hits, claim_support) do
     agreement = 1.0 - 0.5 * disagreement
-    clamp01(judge_conf * agreement * retrieval_cap(hits))
+    clamp01(judge_conf * agreement * retrieval_cap(hits, claim_support))
   end
 
-  # Retrieval relevance as a ONE-SIDED cap, not a scalar (council): at/above the
+  # Evidence relevance as a ONE-SIDED cap, not a scalar (council): at/above the
   # "good in-scope" target it is 1.0 (a strong answer is NOT penalised → confidence ≈
   # judge·agreement); only marginal grounding (floor-band) caps it, and never below
-  # 0.6 so a vocabulary-mismatch / multi-source answer is not crushed. Uses the BEST
-  # supporting relevance; no dense signal (identity/lexical hits) ⇒ no cap.
-  # STEP-2 interface note: the entity-aggregation layer synthesises across many
-  # mid-relevance sources — it should pass a corroboration/aggregate signal here so
-  # the per-span max does not under-score a well-corroborated synthesis.
-  @spec retrieval_cap([hit()]) :: float()
-  defp retrieval_cap(hits) do
-    case Enum.flat_map(hits, fn h -> List.wrap(h[:relevance]) end) do
+  # 0.6 so a vocabulary-mismatch / multi-source answer is not crushed.
+  # STEP 2 (gemini's #1 fix): the signal is the BEST of chunk relevance AND the
+  # claim-profile support, so a claim-grounded "what is X" answer is not crushed by
+  # weak/absent chunk relevance. No evidence signal at all (identity/lexical key hits,
+  # no claims) ⇒ no cap (1.0) — those are exact-key answers, not penalised.
+  # The evidence signal is the BEST PRESENT of chunk relevance and claim support.
+  # `claim_support` is `nil` when there are NO claims (distinct from a present-but-
+  # weak 0.0 — code review): only when NEITHER signal is present (no chunks, no
+  # claims — an exact-key/identity answer) is there no cap.
+  @spec retrieval_cap([hit()], float() | nil) :: float()
+  defp retrieval_cap(hits, claim_support) do
+    chunk =
+      case Enum.flat_map(hits, fn h -> List.wrap(h[:relevance]) end) do
+        [] -> nil
+        rels -> Enum.max(rels)
+      end
+
+    case Enum.reject([chunk, claim_support], &is_nil/1) do
       [] -> 1.0
-      rels -> ramp(Enum.max(rels))
+      signals -> ramp(Enum.max(signals))
     end
   end
 
@@ -511,11 +528,11 @@ defmodule Swarm.Core do
   # segmenter's section-prefixed chunk text), not the bare title. A content hit
   # carries `spans`; a title/identity key hit has none → it contributes only its
   # identity line (still useful context, never a fabricated passage). Bounded.
-  @spec build_grounding([Claims.fact()], [hit()]) :: String.t()
-  defp build_grounding(facts, hits) do
+  @spec build_grounding(Aggregation.profile(), [hit()]) :: String.t()
+  defp build_grounding(profile, hits) do
     # Facts and passages are budgeted SEPARATELY: facts can't starve the passages
     # (code review), and the passages keep their full budget.
-    facts_block = facts |> Claims.to_grounding() |> String.slice(0, @facts_char_budget)
+    facts_block = profile |> Aggregation.to_grounding() |> String.slice(0, @facts_char_budget)
 
     passages =
       hits
@@ -574,7 +591,7 @@ defmodule Swarm.Core do
 
   # A claim-graph fact as a citation: source "claim", the S-P-O as the ref, the
   # edge reliability as confidence — so a fact-grounded answer is explainable.
-  @spec fact_cite(Claims.fact()) :: citation()
+  @spec fact_cite(Aggregation.fact()) :: citation()
   defp fact_cite(f) do
     %{source: "claim", ref: "#{f.subject} #{f.predicate} #{f.object}", confidence: f.reliability}
   end

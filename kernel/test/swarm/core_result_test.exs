@@ -301,7 +301,7 @@ defmodule Swarm.CoreResultTest do
 
   # C3 (claim-aware): a claim-graph fact about the query's entity is surfaced into
   # the consilium grounding directly (not only if a chunk lands).
-  test "escalate folds a scope-visible claim fact into the grounding" do
+  test "escalate folds a scope-visible claim fact into the grouped grounding (STEP 2)" do
     s = add_node!(%{type: "entity", key: "Nebula", scope: "public"})
     o = add_node!(%{type: "entity", key: "203.0.113.7", scope: "public"})
     {:ok, _} = Graph.add_edge(s, o, "public_ip", "p1", evidence_kind: "claim", scope: "public")
@@ -316,14 +316,17 @@ defmodule Swarm.CoreResultTest do
         else: {:ok, "203.0.113.7"}
     end
 
-    # real retriever (no override) → no ingested content; the claim path supplies the fact
+    # real retriever (no override) → no ingested content; the aggregation path supplies the fact
     a = Core.ask("what is the nebula public ip", escalate_opts(gen))
     assert_received {:grounding_prompt, prompt}
-    assert prompt =~ "Known facts"
-    assert prompt =~ "Nebula public_ip 203.0.113.7"
+    # grouped profile grounding: entity heading + the value under the canonical predicate
+    assert prompt =~ "## Nebula"
+    assert prompt =~ "203.0.113.7"
 
-    # a claim-only :found answer (no retrieval hits) is still CITED — explainable.
+    # a claim-only :found answer (no retrieval hits) is still CITED — explainable —
+    # and NOT crushed to 0 (claim_support feeds the calibration cap, gemini's #1 fix).
     assert a.status == :found
-    assert Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "Nebula public_ip"))
+    assert a.confidence > 0.0
+    assert Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "Nebula public ip"))
   end
 end
