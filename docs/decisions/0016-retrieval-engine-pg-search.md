@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed — gated by a feasibility spike (`board/todo/retrieval-pg-search-spike.md`);
-flips to Accepted only after the spike is green and a decorrelated council signs off.
+Proposed — the feasibility spike RAN (2026-06-30, `board/done/retrieval-pg-search-spike.md`)
+and is **green on its primary gates** (BM25 beats the native baseline on relevance; no-leak
+filter-before-rank holds; index stays fresh under writes), but the decorrelated council returned
+**GO-WITH-CONDITIONS** — so this stays **Proposed**, NOT Accepted, until the conditions below are
+met. Full rewrite now would be premature. See "## Spike result".
 
 ## Record Completeness
 
@@ -73,6 +76,50 @@ private fact leaks through a public node); Swarm's edges already carry origin +
 provenance + scope (workspace ADR-13). **Most important (codex):** scope filtering must
 hold inside the authoritative Postgres boundary on *every* path — rank, snippet, facet,
 count, traversal; if BM25 improves relevance but weakens no-leak, it is disqualified.
+
+## Spike result (2026-06-30, `board/done/retrieval-pg-search-spike.md`)
+
+Ran the relevance-first path (operator's call): prebuilt ParadeDB image (PG18/arm64, `pg_search`
+0.24.1 + `pgvector` 0.8.2) on an **isolated sandbox DB** seeded read-only with the full real corpus
+(1626 group nodes / 8728 chunks from staging `swarm_prod`). bm25 index over `chunk.text` +
+`node.key` (title field-boosted), `scope` a filter field. Compared the BM25 lexical arm against the
+just-shipped native lexical arm (Phase 1; for this gold set the dense arm adds nothing, so
+lexical-only is the complete A/B). 7-question labeled gold ("what is X", group scope, recall@10):
+
+| arm | recall@10 | MRR | leads | notes |
+|---|---|---|---|---|
+| native (ts_rank body + title-arm boost, tw=30) | 0.857 | 0.519 | 3/7 | Kubernetes page unreachable at any title weight |
+| BM25 body+title, boost=2 | **1.000** | **0.732** | **4/7** | recovers the Kubernetes title-only page (rank 8) |
+| BM25 boost=4 / 8 | 0.857 | 0.714 / 0.690 | 4/7 | MRR win robust across boost; recall@10=1.0 is boost-fragile |
+
+**Gate 3 (beats baseline): PASS** — BM25 beats on all three metrics; the MRR win (+33–41%) is robust
+across the boost sweep; the recall win (Kubernetes recovery) is real but boost-sensitive. **Gate 4
+(filter-before-rank / no-leak): PASS** — EXPLAIN shows the `scope:group` predicate executed INSIDE the
+Tantivy query (`must` clause) by the ParadeDB index scan; a cross-scope injection test (synthetic
+public doc + the group corpus) confirmed a public viewer sees 0 group rows via rank, score, or count.
+**Gate 1 (build + CREATE INDEX bm25): PASS** (prebuilt). **Gate 5 (freshness): PASS** —
+UPDATE/INSERT/DELETE reflect in the bm25 index immediately, no manual REINDEX (enrichment-loop safe).
+
+**Council (codex gpt-5.5 + llama3.3:70b, both GO-WITH-CONDITIONS, convergent):** the win is real but
+(a) the gold is small-N (7) and all title-lookups → structurally favours title-boosting; (b) boost=2
+was tuned on the eval set (overfit risk — only the MRR win is robust); (c) **the Kubernetes recovery is
+precisely the native title-bypass that Phase 1 DEFERRED** — so the honest comparison is BM25 vs a
+*repaired* native baseline (a title-floor/bypass arm, a swarm-only change, no new dependency). If the
+cheap native bypass recovers Kubernetes and performs near BM25, the extension is hard to justify.
+
+**Conditions before flipping to Accepted (all must pass):**
+1. **Repaired-native comparison first** — add the deferred native title-bypass arm and re-run; only if
+   BM25 still clearly beats *that* is the extension justified.
+2. Larger **frozen holdout** labeled set (diverse, not only title-lookups; near-dup titles; scope
+   collisions); freeze the boost/scoring recipe before the holdout; report per-query wins/losses.
+3. **PG16** production image built from source → local-registry (pinned, reproducible, air-gap
+   installable) — the spike used PG18.
+4. No-leak regression **suite** across rank, count, pagination, deletion, scope-mutation, dup-titles,
+   malformed queries.
+5. Sustained write/vacuum/index-growth test under enrichment-like load; backup/restore/REINDEX recovery
+   rehearsed; analyzer/tokenizer drift documented + accepted (Tantivy ≠ PG `simple`).
+6. Keep **RRF** (no raw BM25⊕vector score fusion); keep the native arm behind a feature flag until
+   production burn-in is clean.
 
 ## Consequences
 
