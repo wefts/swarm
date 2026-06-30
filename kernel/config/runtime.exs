@@ -57,6 +57,17 @@ if threshold = System.get_env("SWARM_ENRICH_THRESHOLD") do
   config :swarm, :enrichment, priority: [threshold: String.to_float(threshold)]
 end
 
+# Entity-resolution vector gate — the ADR-8 / CTC-5 finding-#3 tuning knob, calibrated
+# PER CORPUS and **UPWARD-only** (the entity_resolution_audit can justify raising the
+# gate, never lowering — below-gate merges are unobserved; `calibrate.exs`). The
+# config.exs default (0.85) over-proposes on a real corpus (wasted LLM confirms); a
+# deployment raises SWARM_ER_VEC_THRESHOLD to tighten the vector arm (prod ≈ 0.90,
+# derived 2026-06-30). Merges into :entity_resolution — lex_threshold/max_pairs are
+# preserved. Unset ⇒ the product default stands.
+if er_vec = System.get_env("SWARM_ER_VEC_THRESHOLD") do
+  config :swarm, :entity_resolution, vec_threshold: String.to_float(er_vec)
+end
+
 if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.
