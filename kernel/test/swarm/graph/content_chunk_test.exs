@@ -35,11 +35,16 @@ defmodule Swarm.Graph.ContentChunkTest do
     id
   end
 
-  test "neither content nor chunk carries a scope column (single source of truth on node)" do
+  test "content carries no scope; chunk carries a trigger-maintained scope MIRROR (bm25, ADR-0016)" do
+    # ADR-14 §1 kept scope off the side-store (single source of truth = node.scope).
+    # ADR-0016 refines this for `chunk` ONLY: the pg_search bm25 index can filter/boost
+    # only on its own columns, so `chunk.scope`/`chunk.title` are a MIRROR of node,
+    # kept in sync SYNCHRONOUSLY by triggers (no drift window). `node.scope` stays
+    # AUTHORITATIVE — retrieval still joins it as the outer belt. `content` is untouched.
     refute MapSet.member?(columns("content"), "scope")
-    refute MapSet.member?(columns("chunk"), "scope")
-    # scope is reachable only through the node
     assert MapSet.member?(columns("node"), "scope")
+    assert MapSet.member?(columns("chunk"), "scope")
+    assert MapSet.member?(columns("chunk"), "title")
   end
 
   test "deleting a node CASCADE-reaps its content and chunks (no orphan handle)" do

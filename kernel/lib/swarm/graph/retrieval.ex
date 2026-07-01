@@ -155,7 +155,106 @@ defmodule Swarm.Graph.Retrieval do
     |> Enum.join(" | ")
   end
 
-  defp fused_chunks(query, scopes, candidates, k, nil, lex_w, _dense_w) do
+  # Dispatch the lexical arm by the configured engine (ADR-0016). `:native` (default)
+  # is the hand-rolled `ts_rank` + title-arm; `:bm25` is pg_search/Tantivy (field-
+  # boosted body+title, scope filtered in-index). Both keep the dense arm + RRF fusion.
+  defp fused_chunks(query, scopes, candidates, k, qvec, lex_w, dense_w) do
+    case lexical_engine() do
+      :bm25 -> fused_bm25(query, scopes, candidates, k, qvec, lex_w, dense_w)
+      _ -> fused_native(query, scopes, candidates, k, qvec, lex_w, dense_w)
+    end
+  end
+
+  defp lexical_engine do
+    Application.get_env(:swarm, :retrieval, [])[:lexical_engine] || :native
+  end
+
+  # --- bm25 lexical arm (pg_search/Tantivy — ADR-0016) ----------------------
+  # One Tantivy arm over `chunk`: `paradedb.match` on the body ⊕ a title field-boost
+  # (so a title-only page surfaces without a separate `titled` CTE), scope filtered
+  # IN-index (filter-before-rank — the no-leak property). The `@@@` is a `boolean` with
+  # a `must` of TWO sub-queries: (1) a scope filter — a `term_set` of EXACT `term`s over
+  # the viewer's scopes (built from the `$2` array via `array_agg`, NOT string-built —
+  # so no query-syntax metachar or empty-`scope:()` hazard, and exact-match semantics
+  # not tokenized-text), and (2) a should-only boolean over body+boosted-title (Tantivy
+  # requires ≥1 should to match, so scope alone never matches). Belt-and-suspenders: the
+  # authoritative `node.scope` join stays as the outer belt, so even a stale mirror
+  # can't leak a RESULT. `title_rnk` is NULL (bm25 already scored the title).
+  # NB (council): a single shared bm25 index computes IDF over the WHOLE corpus, so
+  # bm25 SCORES/RANKS carry a corpus-global term-statistic — result rows are scope-safe
+  # (belt + in-index filter), but term-existence via score-probing is a residual tracked
+  # for the flip-to-Accepted gate (`board/todo/bm25-index-hardening`). Reversible via the flag.
+  @bm25_scope_filter "paradedb.term_set(terms => (SELECT array_agg(paradedb.term('scope', s)) FROM unnest($6::text[]) AS s))"
+  @bm25_query "paradedb.boolean(must => ARRAY[#{@bm25_scope_filter}, paradedb.boolean(should => ARRAY[paradedb.match('text', $1), paradedb.boost(factor => $7::real, query => paradedb.match('title', $1))])])"
+
+  defp fused_bm25(query, scopes, candidates, k, nil, lex_w, _dense_w) do
+    sql = """
+    WITH lexical AS (
+      SELECT chunk_id, node_id, ordinal, text,
+             row_number() OVER (ORDER BY score DESC) AS rnk, $5::float8 AS w
+      FROM (
+        SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text, paradedb.score(k.id) AS score
+        FROM chunk k JOIN node n ON n.id = k.node_id AND n.scope = ANY($2)
+        WHERE k.id @@@ #{@bm25_query}
+        ORDER BY score DESC
+        LIMIT $3
+      ) bs
+    ),
+    fused AS (
+      SELECT node_id, ordinal, text, chunk_id,
+             sum(w / ($4 + rnk))::float8 AS body_rrf,
+             NULL::float8 AS cos, true AS lex
+      FROM lexical GROUP BY chunk_id, node_id, ordinal, text
+    )
+    SELECT node_id, ordinal, text, body_rrf, cos, lex, NULL::bigint AS title_rnk
+    FROM fused ORDER BY body_rrf DESC
+    """
+
+    run_fused(sql, [query, scopes, candidates, k, lex_w, scopes, bm25_boost()])
+  end
+
+  defp fused_bm25(query, scopes, candidates, k, qvec, lex_w, dense_w) do
+    sql = """
+    WITH lexical AS (
+      SELECT chunk_id, node_id, ordinal, text,
+             row_number() OVER (ORDER BY score DESC) AS rnk,
+             NULL::float8 AS cos, true AS lex, $5::float8 AS w
+      FROM (
+        SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text, paradedb.score(k.id) AS score
+        FROM chunk k JOIN node n ON n.id = k.node_id AND n.scope = ANY($2)
+        WHERE k.id @@@ #{@bm25_query}
+        ORDER BY score DESC
+        LIMIT $3
+      ) bs
+    ),
+    dense AS (
+      SELECT k.id AS chunk_id, k.node_id, k.ordinal, k.text,
+             row_number() OVER (ORDER BY k.vec <=> $8) AS rnk,
+             (1.0 - (k.vec <=> $8))::float8 AS cos, false AS lex, $9::float8 AS w
+      FROM chunk k JOIN node n ON n.id = k.node_id
+      WHERE n.scope = ANY($2) AND k.vec IS NOT NULL
+      ORDER BY k.vec <=> $8
+      LIMIT $3
+    ),
+    fused AS (
+      SELECT node_id, ordinal, text, chunk_id,
+             sum(w / ($4 + rnk))::float8 AS body_rrf,
+             max(cos) AS cos, bool_or(lex) AS lex
+      FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
+      GROUP BY chunk_id, node_id, ordinal, text
+    )
+    SELECT node_id, ordinal, text, body_rrf, cos, lex, NULL::bigint AS title_rnk
+    FROM fused ORDER BY body_rrf DESC
+    """
+
+    run_fused(sql, [query, scopes, candidates, k, lex_w, scopes, bm25_boost(), qvec, dense_w])
+  end
+
+  defp bm25_boost do
+    Application.get_env(:swarm, :retrieval, [])[:bm25_title_boost] || 2.0
+  end
+
+  defp fused_native(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     # Lexical-only (no query vector): a body-keyword match is the only per-chunk
     # signal, so `cos` is unknown (nil). The **title arm** (ADR-0016) is the
     # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over `node.key` — LEFT
@@ -204,7 +303,7 @@ defmodule Swarm.Graph.Retrieval do
     run_fused(sql, [or_tsquery(query), scopes, candidates, k, lex_w])
   end
 
-  defp fused_chunks(query, scopes, candidates, k, qvec, lex_w, dense_w) do
+  defp fused_native(query, scopes, candidates, k, qvec, lex_w, dense_w) do
     # Body arms (lexical + dense) carry their rank (for weighted RRF) plus the dense
     # arm's ABSOLUTE cosine (`1 - distance`) and a lexical-hit flag; fused per chunk.
     # **Weighted RRF** (Card 7): the lexical term is scaled by `$6`, the dense term
