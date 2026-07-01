@@ -170,26 +170,48 @@ defmodule Swarm.Graph.Retrieval do
   end
 
   # --- bm25 lexical arm (pg_search/Tantivy — ADR-0016) ----------------------
-  # One Tantivy arm over `chunk`: `paradedb.match` on the body ⊕ a title field-boost
-  # (so a title-only page surfaces without a separate `titled` CTE), scope filtered
-  # IN-index (filter-before-rank — the no-leak property). The `@@@` is a `boolean` with
-  # a `must` of TWO sub-queries: (1) a scope filter — a `term_set` of EXACT `term`s over
-  # the viewer's scopes (built from the `$2` array via `array_agg`, NOT string-built —
-  # so no query-syntax metachar or empty-`scope:()` hazard, and exact-match semantics
-  # not tokenized-text), and (2) a should-only boolean over body+boosted-title (Tantivy
-  # requires ≥1 should to match, so scope alone never matches). Belt-and-suspenders: the
-  # authoritative `node.scope` join stays as the outer belt, so even a stale mirror
-  # can't leak a RESULT. `title_rnk` is NULL (bm25 already scored the title).
-  # NB (council): a single shared bm25 index computes IDF over the WHOLE corpus, so
-  # bm25 SCORES/RANKS carry a corpus-global term-statistic — result rows are scope-safe
-  # (belt + in-index filter), but term-existence via score-probing is a residual tracked
-  # for the flip-to-Accepted gate (`board/todo/bm25-index-hardening`). Reversible via the flag.
+  # A Tantivy arm over `chunk`: `paradedb.match` on the body ⊕ a title field-boost (so a
+  # title-only page enters the candidate pool), scope filtered IN-index (filter-before-
+  # rank — the no-leak property). The `@@@` is a `boolean` with a `must` of TWO
+  # sub-queries: (1) a scope filter — a `term_set` of EXACT `term`s over the viewer's
+  # scopes (built from `$6` via `array_agg`, NOT string-built — no query-syntax metachar
+  # or empty-`scope:()` hazard, exact not tokenized), and (2) a should-only boolean over
+  # body+boosted-title (Tantivy requires ≥1 should to match, so scope alone never matches).
+  # **Title-arm fusion (integration tuning, 2026-07-01):** bm25's in-score title-boost is
+  # compressed by score→rank→RRF, so on title-lookups it lost to native's dedicated
+  # per-node boost. Fix: bm25 replaces only the BODY-lexical ranking; the SAME native
+  # title arm (the `titled` CTE + the aggressive per-node `title_weight` boost applied in
+  # `group_by_node`) rides ON TOP — bm25 surfaces the title-only page's chunks, the title
+  # arm then floats them. So `title_rnk` is populated (not NULL) here too.
+  # Belt-and-suspenders: the authoritative `node.scope` join stays as the outer belt.
+  # NB (council): a shared bm25 index's IDF is corpus-global → bm25 SCORES carry a
+  # corpus-global term-statistic; RESULT rows are scope-safe (belt + in-index filter), but
+  # term-existence via score-probing is a residual for the flip gate (`bm25-index-hardening`).
   @bm25_scope_filter "paradedb.term_set(terms => (SELECT array_agg(paradedb.term('scope', s)) FROM unnest($6::text[]) AS s))"
   @bm25_query "paradedb.boolean(must => ARRAY[#{@bm25_scope_filter}, paradedb.boolean(should => ARRAY[paradedb.match('text', $1), paradedb.boost(factor => $7::real, query => paradedb.match('title', $1))])])"
 
+  # The native title arm CTE (ts_rank_cd over node.key, scope-filtered, ordered+LIMITed),
+  # reused verbatim in bm25 mode so title-lookups keep the aggressive per-node boost.
+  # `titled_q` is the tsvector query param index, `scope_p` the scopes[] param index.
+  defp titled_cte(titled_q, scope_p) do
+    """
+    titled AS (
+      SELECT node_id, row_number() OVER (ORDER BY trank DESC, node_id) AS rnk
+      FROM (
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), to_tsquery('simple', $#{titled_q})) AS trank
+        FROM node n
+        WHERE n.scope = ANY($#{scope_p}) AND to_tsvector('simple', n.key) @@ to_tsquery('simple', $#{titled_q})
+        ORDER BY trank DESC, n.id
+        LIMIT $3
+      ) tn
+    )
+    """
+  end
+
   defp fused_bm25(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     sql = """
-    WITH lexical AS (
+    WITH #{titled_cte(8, 2)},
+    lexical AS (
       SELECT chunk_id, node_id, ordinal, text,
              row_number() OVER (ORDER BY score DESC) AS rnk, $5::float8 AS w
       FROM (
@@ -206,16 +228,18 @@ defmodule Swarm.Graph.Retrieval do
              NULL::float8 AS cos, true AS lex
       FROM lexical GROUP BY chunk_id, node_id, ordinal, text
     )
-    SELECT node_id, ordinal, text, body_rrf, cos, lex, NULL::bigint AS title_rnk
-    FROM fused ORDER BY body_rrf DESC
+    SELECT f.node_id, f.ordinal, f.text, f.body_rrf, f.cos, f.lex, t.rnk AS title_rnk
+    FROM fused f LEFT JOIN titled t ON t.node_id = f.node_id
+    ORDER BY f.body_rrf DESC
     """
 
-    run_fused(sql, [query, scopes, candidates, k, lex_w, scopes, bm25_boost()])
+    run_fused(sql, [query, scopes, candidates, k, lex_w, scopes, bm25_boost(), or_tsquery(query)])
   end
 
   defp fused_bm25(query, scopes, candidates, k, qvec, lex_w, dense_w) do
     sql = """
-    WITH lexical AS (
+    WITH #{titled_cte(10, 2)},
+    lexical AS (
       SELECT chunk_id, node_id, ordinal, text,
              row_number() OVER (ORDER BY score DESC) AS rnk,
              NULL::float8 AS cos, true AS lex, $5::float8 AS w
@@ -243,11 +267,23 @@ defmodule Swarm.Graph.Retrieval do
       FROM (SELECT * FROM lexical UNION ALL SELECT * FROM dense) u
       GROUP BY chunk_id, node_id, ordinal, text
     )
-    SELECT node_id, ordinal, text, body_rrf, cos, lex, NULL::bigint AS title_rnk
-    FROM fused ORDER BY body_rrf DESC
+    SELECT f.node_id, f.ordinal, f.text, f.body_rrf, f.cos, f.lex, t.rnk AS title_rnk
+    FROM fused f LEFT JOIN titled t ON t.node_id = f.node_id
+    ORDER BY f.body_rrf DESC
     """
 
-    run_fused(sql, [query, scopes, candidates, k, lex_w, scopes, bm25_boost(), qvec, dense_w])
+    run_fused(sql, [
+      query,
+      scopes,
+      candidates,
+      k,
+      lex_w,
+      scopes,
+      bm25_boost(),
+      qvec,
+      dense_w,
+      or_tsquery(query)
+    ])
   end
 
   defp bm25_boost do

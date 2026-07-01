@@ -74,4 +74,33 @@ defmodule Swarm.Graph.RetrievalBm25Test do
     assert [%{ordinal: 0, text: text}] = m.spans
     assert text =~ "fourth planet"
   end
+
+  test "bm25: a title match outranks a body-heavy distractor (title-arm fusion)" do
+    # The tuning fix: bm25's in-score title-boost is diluted by rank→RRF, so the native
+    # per-node title boost must ride on top. A page whose TITLE is the query must lead a
+    # page that merely repeats the terms in its body.
+    ans = Store.upsert_node("article", "Public IP", scope: "group")
+    chunk!(ans, 0, "Nebula public IP reference")
+
+    distractor = Store.upsert_node("article", "Network Notes", scope: "group")
+    chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing egress")
+
+    %{memories: mems} = Retrieval.search("Nebula Public IP", ["group"], dense: false, expand: false)
+
+    assert hd(keys(mems)) == "Public IP"
+  end
+
+  test "bm25: a broad partial-title match does not flood over the real answer" do
+    # A page sharing only a COMMON token with the query (title "Public Holidays" vs
+    # "Public IP"), body irrelevant, must not outrank the real title+body match.
+    ans = Store.upsert_node("article", "Public IP", scope: "group")
+    chunk!(ans, 0, "the public IP value is assigned per environment")
+
+    flood = Store.upsert_node("article", "Public Holidays", scope: "group")
+    chunk!(flood, 0, "the office is closed on national days")
+
+    %{memories: mems} = Retrieval.search("Public IP", ["group"], dense: false, expand: false)
+
+    assert hd(keys(mems)) == "Public IP"
+  end
 end
