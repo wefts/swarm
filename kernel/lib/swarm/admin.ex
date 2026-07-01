@@ -91,6 +91,9 @@ defmodule Swarm.Admin do
   def delete_user(actor_id, target_id) do
     gate_cap(actor_id, "manage_users", "delete", target_id, fn ->
       Identity.delete_user(target_id)
+      # Detach the person-as-subject projection (ADR-16 step 7) so an orphaned owner
+      # never dangles; its learned facts persist (D11).
+      Swarm.Person.anonymize(target_id)
     end)
   end
 
