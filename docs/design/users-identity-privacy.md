@@ -30,6 +30,15 @@ may do*. This revisits ADR-7 for security-bearing paths (conversation reads, gra
 
 ## Data model (kernel-owned unless noted)
 
+> Physical table names dodge the Postgres reserved words `user`/`group` (also the
+> `USER`/`CURRENT_USER`/`GROUP` keywords — a bare `user` in raw SQL silently means
+> the DB role, a security-adjacent footgun here since the kernel writes raw SQL):
+> **`user` → `app_user`**, **`group` → `access_group`**. The join/map/grant names
+> are as written. Ids on `app_user`/`role_grant` are app-minted **UUIDv7** (RFC 9562,
+> ms-granular time ordering → index locality); child-row ids default to core
+> `gen_random_uuid()`. Tables are auxiliary (like `deliberation`) — no graph-schema
+> bump. (Step 1 landed: `Swarm.Identity` + migration `20260701140000_identity_store`.)
+
 - **user**(id `UUIDv7` PK, login unique [=IdP uid], first_name?, last_name?, nickname?,
   status `active|invited|disabled|deleted`, created_at, updated_at, last_login_at). No
   creds, no email column.
