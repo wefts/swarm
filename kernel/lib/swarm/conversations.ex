@@ -190,6 +190,97 @@ defmodule Swarm.Conversations do
     end)
   end
 
+  # ── admin break-glass (ADR-16 D6) ─────────────────────────────────────────
+
+  @doc """
+  Break-glass read of any user's conversation by a superadmin — NOT an all-rows
+  query. Takes the **verified** `actor_id` (from `Swarm.Actor.resolve/2`) and derives
+  its capabilities from the store here (never a caller-supplied caps list — council:
+  codex). The actor must hold `read_any_conversation`; the read then **impersonates
+  the owner** through the normal `get/2` with the *target's* owner id (same predicate
+  + RLS GUC), so it sees exactly what the owner sees. An immutable audit row is
+  committed **before** the data is returned upward; every outcome is audited.
+
+  Must NOT be called inside an enclosing transaction — otherwise an outer rollback
+  could discard the audit after the data was read (council: gemini). Returns the same
+  shape as `get/2`, or `:not_authorized` (no cap) / `:not_found`.
+  """
+  @spec admin_read(String.t(), String.t(), String.t() | nil) ::
+          {:ok, %{conversation: conversation(), messages: [message()]}}
+          | :not_authorized
+          | :not_found
+  def admin_read(actor_id, conversation_id, reason) when is_binary(actor_id) do
+    if Repo.in_transaction?() do
+      raise "Swarm.Conversations.admin_read/3 must not run inside a transaction (audit durability)"
+    end
+
+    caps = Swarm.Identity.caps_for(actor_id)
+    # Validate the client-supplied id up front; a malformed one is `nil` (audited, no
+    # cast-500). Denials still record the *validated* target for forensics (gemini).
+    cid = if is_binary(conversation_id) and valid_uuid?(conversation_id), do: conversation_id
+
+    cond do
+      "read_any_conversation" not in caps ->
+        audit(actor_id, "denied", cid, nil, reason, false)
+        :not_authorized
+
+      is_nil(cid) ->
+        audit(actor_id, "not_found", nil, nil, reason, false)
+        :not_found
+
+      true ->
+        case privileged_owner(cid) do
+          nil ->
+            audit(actor_id, "not_found", cid, nil, reason, false)
+            :not_found
+
+          owner ->
+            # Read via the owner's own predicate, THEN audit with the actual outcome
+            # (accurate data_returned, never a false negative), committed before the
+            # result is returned upward (council: codex, gemini).
+            result = get(owner, cid)
+            audit(actor_id, "allowed", cid, owner, reason, match?({:ok, _}, result))
+            result
+        end
+    end
+  end
+
+  # The one legitimately owner-unfiltered read (in this module only — the structural
+  # guard forbids it elsewhere): find the conversation's owner so we can impersonate
+  # them. NB once the non-superuser app role lands (board/todo/rls-app-role), this
+  # must become a SECURITY DEFINER helper to bypass RLS for the owner lookup.
+  @spec privileged_owner(String.t()) :: String.t() | nil
+  defp privileged_owner(conversation_id) do
+    case Repo.query!(
+           "SELECT owner_id FROM conversation WHERE id = $1 AND deleted_at IS NULL",
+           [dump(conversation_id)]
+         ) do
+      %{rows: [[owner_id]]} -> load(owner_id)
+      %{rows: []} -> nil
+    end
+  end
+
+  @spec audit(
+          String.t(),
+          String.t(),
+          String.t() | nil,
+          String.t() | nil,
+          String.t() | nil,
+          boolean()
+        ) ::
+          :ok
+  defp audit(actor_id, decision, conversation_id, owner_id, reason, data_returned) do
+    Swarm.Audit.record(%{
+      actor_id: actor_id,
+      action: "read_conversation",
+      target_conversation_id: conversation_id,
+      target_user_id: owner_id,
+      reason: reason,
+      decision: decision,
+      data_returned: data_returned
+    })
+  end
+
   # ── the choke point ──────────────────────────────────────────────────────
 
   # Open a transaction, bind the RLS GUC to the verified owner, run `fun`, then

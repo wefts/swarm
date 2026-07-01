@@ -25,9 +25,13 @@ defmodule Swarm.IdentityCase do
   @doc "Wipe the identity tables (CASCADE reaches the child + join tables)."
   @spec truncate_identity() :: :ok
   def truncate_identity do
-    # app_user CASCADE reaches user_email, identity_link, user_group, role_grant;
-    # access_group CASCADE reaches user_group, group_scope_map. Both roots listed.
-    Swarm.Repo.query!("TRUNCATE app_user, access_group RESTART IDENTITY CASCADE")
+    # app_user CASCADE reaches user_email, identity_link, user_group, role_grant,
+    # conversation, message; access_group CASCADE reaches user_group,
+    # group_scope_map. `admin_action_audit` has NO FK (it outlives its subjects) so
+    # the CASCADE doesn't reach it — truncate it explicitly.
+    Swarm.Repo.query!(
+      "TRUNCATE app_user, access_group, admin_action_audit RESTART IDENTITY CASCADE"
+    )
 
     :ok
   end
