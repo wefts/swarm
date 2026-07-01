@@ -43,7 +43,9 @@ opts = [
   bands: %Bands{handle: 0.5}
 ]
 
-IO.puts("== Core.ask answer-path probe (scopes=#{inspect(scopes)}#{if viewer != "", do: " viewer=#{viewer}"}) ==\n")
+IO.puts(
+  "== Core.ask answer-path probe (scopes=#{inspect(scopes)}#{if viewer != "", do: " viewer=#{viewer}"}) ==\n"
+)
 
 for q <- questions do
   a = Core.ask(q, opts)

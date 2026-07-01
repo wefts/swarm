@@ -406,7 +406,15 @@ defmodule Swarm.Graph.Retrieval do
     %{rows: rows} = Repo.query!(sql, params)
 
     Enum.map(rows, fn [node_id, ordinal, text, body_rrf, cos, lex, title_rnk] ->
-      %{node_id: node_id, ordinal: ordinal, text: text, rrf: body_rrf, cos: cos, lex: lex, title_rnk: title_rnk}
+      %{
+        node_id: node_id,
+        ordinal: ordinal,
+        text: text,
+        rrf: body_rrf,
+        cos: cos,
+        lex: lex,
+        title_rnk: title_rnk
+      }
     end)
   end
 

@@ -41,7 +41,9 @@ end
 
 IO.puts("== Live data slice (ingest + embed) ==")
 
-db_label = System.get_env("SWARM_DB_NAME") || "swarm_" <> (System.get_env("SWARM_ENV") || "(unset)")
+db_label =
+  System.get_env("SWARM_DB_NAME") || "swarm_" <> (System.get_env("SWARM_ENV") || "(unset)")
+
 IO.puts("db=#{db_label} ml=#{System.get_env("SWARM_ML_ADDRESS", "127.0.0.1:50051")}")
 
 IO.puts("fetch: gaplimit=#{gaplimit} max_pages=#{max_pages}; segmenter max_tokens=#{seg_max}")

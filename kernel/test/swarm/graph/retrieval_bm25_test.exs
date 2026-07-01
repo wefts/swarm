@@ -85,7 +85,8 @@ defmodule Swarm.Graph.RetrievalBm25Test do
     distractor = Store.upsert_node("article", "Network Notes", scope: "group")
     chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing egress")
 
-    %{memories: mems} = Retrieval.search("Nebula Public IP", ["group"], dense: false, expand: false)
+    %{memories: mems} =
+      Retrieval.search("Nebula Public IP", ["group"], dense: false, expand: false)
 
     assert hd(keys(mems)) == "Public IP"
   end

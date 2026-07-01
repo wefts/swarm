@@ -152,7 +152,8 @@ defmodule Swarm.Graph.RetrievalTest do
     chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing and egress", 1)
 
     # default config title_weight (5.0) — proves the SHIPPED default fixes the miss.
-    %{memories: mems} = Retrieval.search("Nebula Public IP", ["public"], dense: false, expand: false)
+    %{memories: mems} =
+      Retrieval.search("Nebula Public IP", ["public"], dense: false, expand: false)
 
     assert hd(keys(mems)) == "Public IP"
   end
@@ -168,7 +169,11 @@ defmodule Swarm.Graph.RetrievalTest do
     chunk!(distractor, 0, "public IP public IP public IP nebula nebula routing and egress", 1)
 
     %{memories: mems} =
-      Retrieval.search("Nebula Public IP", ["public"], dense: false, expand: false, title_weight: 0.0)
+      Retrieval.search("Nebula Public IP", ["public"],
+        dense: false,
+        expand: false,
+        title_weight: 0.0
+      )
 
     assert hd(keys(mems)) == "Network Notes"
   end

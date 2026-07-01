@@ -34,7 +34,10 @@ articles = count.("SELECT count(*) FROM node WHERE type='article'")
 chunks = count.("SELECT count(*) FROM chunk")
 edges = count.("SELECT count(*) FROM edge")
 vecs = count.("SELECT count(*) FROM node WHERE vec IS NOT NULL")
-IO.puts("graph: #{articles} article nodes, #{edges} edges, #{chunks} chunks, #{vecs} nodes w/ vec\n")
+
+IO.puts(
+  "graph: #{articles} article nodes, #{edges} edges, #{chunks} chunks, #{vecs} nodes w/ vec\n"
+)
 
 # Build a query workload from real chunk text (first 8 words of N sampled chunks).
 %{rows: rows} =
@@ -42,7 +45,9 @@ IO.puts("graph: #{articles} article nodes, #{edges} edges, #{chunks} chunks, #{v
 
 workload =
   rows
-  |> Enum.map(fn [t] -> t |> String.split(~r/\s+/, trim: true) |> Enum.take(8) |> Enum.join(" ") end)
+  |> Enum.map(fn [t] ->
+    t |> String.split(~r/\s+/, trim: true) |> Enum.take(8) |> Enum.join(" ")
+  end)
   |> Enum.uniq()
 
 IO.puts("-- latency over #{length(workload)} real queries (incl. real bge-m3 query embed) --")
@@ -56,8 +61,11 @@ time_queries = fn label, opts ->
     end)
 
   s = Enum.sort(times)
-  IO.puts("#{label}: p50 #{Float.round(pctl.(s, 0.5), 1)} ms | p95 #{Float.round(pctl.(s, 0.95), 1)} ms | " <>
-          "p99 #{Float.round(pctl.(s, 0.99), 1)} ms | max #{Float.round(Enum.max(s), 1)} ms")
+
+  IO.puts(
+    "#{label}: p50 #{Float.round(pctl.(s, 0.5), 1)} ms | p95 #{Float.round(pctl.(s, 0.95), 1)} ms | " <>
+      "p99 #{Float.round(pctl.(s, 0.99), 1)} ms | max #{Float.round(Enum.max(s), 1)} ms"
+  )
 end
 
 time_queries.("hybrid + traverse(d=2)", limit: 5, max_depth: 2)
@@ -65,13 +73,15 @@ time_queries.("hybrid, no expand    ", limit: 5, expand: false)
 time_queries.("lexical-only, no exp ", limit: 5, expand: false, dense: false)
 
 IO.puts("\n-- fragmentation probe (case-folded key collisions among article nodes) --")
+
 %{rows: frag} =
   Repo.query!("""
   SELECT lower(key), count(*) FROM node WHERE type='article'
   GROUP BY lower(key) HAVING count(*) > 1 ORDER BY count(*) DESC LIMIT 10
   """)
 
-if frag == [], do: IO.puts("0 collision groups (canonicalisation + alias table held)"),
+if frag == [],
+  do: IO.puts("0 collision groups (canonicalisation + alias table held)"),
   else: Enum.each(frag, fn [k, n] -> IO.puts("  #{k}: #{n}") end)
 
 IO.puts("\n-- merge under load (re-point + chunk-union + re-aggregate timing) --")
@@ -88,7 +98,10 @@ case pair do
     t = System.monotonic_time(:microsecond)
     {:ok, res} = Store.merge_nodes("article", a, b)
     ms = (System.monotonic_time(:microsecond) - t) / 1000.0
-    IO.puts("merged #{inspect(a)} -> #{inspect(b)}: #{res.result}, #{res.edges} edges, #{Float.round(ms, 1)} ms")
+
+    IO.puts(
+      "merged #{inspect(a)} -> #{inspect(b)}: #{res.result}, #{res.edges} edges, #{Float.round(ms, 1)} ms"
+    )
 
   _ ->
     IO.puts("not enough chunked nodes to time a merge")

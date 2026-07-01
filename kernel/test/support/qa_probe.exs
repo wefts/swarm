@@ -53,13 +53,18 @@ end
 trunc_span = fn text -> text |> String.slice(0, 140) |> String.replace(~r/\s+/, " ") end
 
 IO.puts("== QA probe (k=#{k}, scopes=#{inspect(scopes)}) ==")
-IO.puts("graph: #{Repo.query!("SELECT count(*) FROM node WHERE type='article'").rows |> hd |> hd} article nodes, " <>
-        "#{Repo.query!("SELECT count(*) FROM chunk").rows |> hd |> hd} chunks\n")
+
+IO.puts(
+  "graph: #{Repo.query!("SELECT count(*) FROM node WHERE type='article'").rows |> hd |> hd} article nodes, " <>
+    "#{Repo.query!("SELECT count(*) FROM chunk").rows |> hd |> hd} chunks\n"
+)
 
 {hit, miss, total} =
   Enum.reduce(questions, {0, 0, 0}, fn line, {hit, miss, total} ->
     {q, expected} = parse.(line)
-    %{status: status, memories: mems, expanded: exp} = Retrieval.search(q, scopes, limit: k, max_depth: 1)
+
+    %{status: status, memories: mems, expanded: exp} =
+      Retrieval.search(q, scopes, limit: k, max_depth: 1)
 
     # title-ILIKE baseline (the deployed Core.search) for contrast
     base = Core.search(q, scopes, limit: 3) |> Enum.map(& &1.key)
@@ -70,12 +75,18 @@ IO.puts("graph: #{Repo.query!("SELECT count(*) FROM node WHERE type='article'").
     mems
     |> Enum.with_index(1)
     |> Enum.each(fn {m, i} ->
-      span = m.spans |> List.first() |> case do
-        nil -> "(no span)"
-        s -> trunc_span.(s.text)
-      end
+      span =
+        m.spans
+        |> List.first()
+        |> case do
+          nil -> "(no span)"
+          s -> trunc_span.(s.text)
+        end
 
-      IO.puts("   #{i}. [rel #{m.relevance} | score #{Float.round(m.score, 4)} | conf #{m.confidence}] #{m.key}")
+      IO.puts(
+        "   #{i}. [rel #{m.relevance} | score #{Float.round(m.score, 4)} | conf #{m.confidence}] #{m.key}"
+      )
+
       IO.puts("        :: #{span}")
     end)
 

@@ -26,7 +26,9 @@ alias Swarm.Repo
 
 in_scope =
   rows
-  |> Enum.map(fn [key, text] -> {key, text |> String.split(~r/\s+/, trim: true) |> Enum.take(9) |> Enum.join(" ")} end)
+  |> Enum.map(fn [key, text] ->
+    {key, text |> String.split(~r/\s+/, trim: true) |> Enum.take(9) |> Enum.join(" ")}
+  end)
   |> Enum.uniq_by(fn {_k, q} -> q end)
 
 out_scope = [

@@ -40,15 +40,20 @@ cos = fn a, b -> dot.(a, b) / (norm.(a) * norm.(b) + 1.0e-12) end
 norms = Enum.map(chunks, &norm.(&1.v))
 IO.puts("== Hubness diagnostic ==")
 IO.puts("chunks: #{length(chunks)}")
-IO.puts("vec norms: min #{Float.round(Enum.min(norms), 4)} max #{Float.round(Enum.max(norms), 4)} " <>
-        "(≈1.0 ⇒ bge-m3 returns unit vectors)")
+
+IO.puts(
+  "vec norms: min #{Float.round(Enum.min(norms), 4)} max #{Float.round(Enum.max(norms), 4)} " <>
+    "(≈1.0 ⇒ bge-m3 returns unit vectors)"
+)
 
 # --- query set: in-scope (from real chunk text) + out-of-scope ---
 in_scope =
   chunks
   |> Enum.take_every(max(div(length(chunks), 8), 1))
   |> Enum.take(8)
-  |> Enum.map(fn c -> {c.text |> String.split(~r/\s+/, trim: true) |> Enum.take(8) |> Enum.join(" "), c.key} end)
+  |> Enum.map(fn c ->
+    {c.text |> String.split(~r/\s+/, trim: true) |> Enum.take(8) |> Enum.join(" "), c.key}
+  end)
 
 out_scope =
   [
@@ -69,7 +74,10 @@ qset = Enum.zip(queries, qvecs) |> Enum.map(fn {{q, exp}, v} -> %{q: q, exp: exp
 
 # --- global mean chunk vector (for centering) ---
 dim = length(hd(chunks).v)
-sum = Enum.reduce(chunks, List.duplicate(0.0, dim), fn c, acc -> Enum.zip_with(acc, c.v, &+/2) end)
+
+sum =
+  Enum.reduce(chunks, List.duplicate(0.0, dim), fn c, acc -> Enum.zip_with(acc, c.v, &+/2) end)
+
 mean = Enum.map(sum, &(&1 / length(chunks)))
 centered = Enum.map(chunks, fn c -> %{c | v: Enum.zip_with(c.v, mean, &-/2)} end)
 
@@ -107,9 +115,16 @@ report = fn label, scorer, cs, qmap ->
   IO.puts("\n-- #{label} --")
   IO.puts("rank-1 score  in-scope:  #{Enum.map(ins, &Float.round(&1, 3)) |> inspect}")
   IO.puts("rank-1 score  out-scope: #{Enum.map(outs, &Float.round(&1, 3)) |> inspect}")
-  IO.puts("mean in-scope #{mn.(ins)}  vs  mean out-scope #{mn.(outs)}  (gap #{Float.round(mn.(ins) - mn.(outs), 4)})")
+
+  IO.puts(
+    "mean in-scope #{mn.(ins)}  vs  mean out-scope #{mn.(outs)}  (gap #{Float.round(mn.(ins) - mn.(outs), 4)})"
+  )
+
   sep = Enum.min(ins) > Enum.max(outs)
-  IO.puts("SEPARABLE by a flat floor? #{sep}  (min in #{Float.round(Enum.min(ins),3)} vs max out #{Float.round(Enum.max(outs),3)})")
+
+  IO.puts(
+    "SEPARABLE by a flat floor? #{sep}  (min in #{Float.round(Enum.min(ins), 3)} vs max out #{Float.round(Enum.max(outs), 3)})"
+  )
 end
 
 report.("RAW cosine", raw, chunks, fn v -> v end)
@@ -119,7 +134,9 @@ report.("CSLS (2cos - r_S)", csls, chunks, fn v -> v end)
 # --- hub frequency: which chunks dominate top-3 across ALL queries (raw vs csls) ---
 hub_freq = fn scorer, cs, qmap ->
   qset
-  |> Enum.flat_map(fn q -> topk.(qmap.(q.v), cs, scorer, 3) |> Enum.map(fn {k, _, _} -> k end) end)
+  |> Enum.flat_map(fn q ->
+    topk.(qmap.(q.v), cs, scorer, 3) |> Enum.map(fn {k, _, _} -> k end)
+  end)
   |> Enum.frequencies()
   |> Enum.sort_by(fn {_, n} -> -n end)
   |> Enum.take(5)

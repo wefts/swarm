@@ -19,7 +19,8 @@ defmodule Swarm.Graph.ChunkScopeMirrorTest do
   end
 
   defp insert_chunk!(node_id),
-    do: Repo.query!("INSERT INTO chunk (node_id, ordinal, text) VALUES ($1, 0, 'body')", [node_id])
+    do:
+      Repo.query!("INSERT INTO chunk (node_id, ordinal, text) VALUES ($1, 0, 'body')", [node_id])
 
   test "a new chunk mirrors its node's scope and key on insert" do
     nid = Store.upsert_node("article", "Public IP", scope: "group")
