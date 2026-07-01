@@ -28,7 +28,8 @@ blank = fn
 end
 
 database =
-  case {config_env(), blank.(System.get_env("SWARM_DB_NAME")), blank.(System.get_env("SWARM_ENV"))} do
+  case {config_env(), blank.(System.get_env("SWARM_DB_NAME")),
+        blank.(System.get_env("SWARM_ENV"))} do
     {_, explicit, _} when is_binary(explicit) ->
       explicit
 
@@ -108,6 +109,13 @@ end
 # product default (`:bm25`) stands.
 if engine = System.get_env("SWARM_LEXICAL_ENGINE") do
   config :swarm, :retrieval, lexical_engine: String.to_atom(engine)
+end
+
+# Verified-actor shared secret (ADR-16 D9). The channel (hive) and kernel share it
+# (single box; `hive/secrets.env`, gitignored). Env-only — never committed. Absent ⇒
+# the kernel cannot verify an assertion and fails closed on security paths.
+if secret = System.get_env("SWARM_ACTOR_SECRET") do
+  config :swarm, :actor, secret: secret
 end
 
 if config_env() == :test do

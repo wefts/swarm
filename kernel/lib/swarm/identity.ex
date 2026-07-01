@@ -236,6 +236,17 @@ defmodule Swarm.Identity do
           """,
           [cast_to_uuid(id)]
         )
+
+        # A local account resolves via the SAME identity_link path as SSO (uniform
+        # resolution): provider "local", subject = login.
+        Repo.query!(
+          """
+          INSERT INTO identity_link (user_id, provider, subject, verified_at)
+          VALUES ($1, 'local', $2, now())
+          ON CONFLICT (provider, subject) DO NOTHING
+          """,
+          [cast_to_uuid(id), login]
+        )
       end)
 
     {:ok, get_user(id)}
@@ -325,6 +336,40 @@ defmodule Swarm.Identity do
       [cast_to_uuid(id)]
     ).rows
     |> List.flatten()
+  end
+
+  # Role → capability policy (ADR-16 D7). superadmin ⊃ admin, and alone holds the
+  # break-glass `read_any_conversation`.
+  @admin_caps ~w(manage_access invite_users manage_users)
+  @superadmin_caps @admin_caps ++ ~w(read_any_conversation)
+
+  @doc """
+  The capabilities a user holds, **derived** from their roles (default-deny — `[]`
+  when no role is granted). superadmin ⊃ admin + `read_any_conversation`.
+  """
+  @spec caps_for(String.t()) :: [String.t()]
+  def caps_for(id) do
+    id
+    |> roles_for()
+    |> Enum.flat_map(fn
+      "superadmin" -> @superadmin_caps
+      "admin" -> @admin_caps
+      _ -> []
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @doc "The user linked to a `(provider, subject)` pair, or `nil`. The resolve lookup."
+  @spec user_by_link(String.t(), String.t()) :: user() | nil
+  def user_by_link(provider, subject) do
+    case Repo.query!(
+           "SELECT user_id FROM identity_link WHERE provider = $1 AND subject = $2",
+           [provider, subject]
+         ) do
+      %{rows: [[user_id]]} -> get_user(cast_uuid(user_id))
+      %{rows: []} -> nil
+    end
   end
 
   @doc "Total user count."

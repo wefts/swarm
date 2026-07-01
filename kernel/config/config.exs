@@ -8,6 +8,15 @@ config :swarm, ecto_repos: [Swarm.Repo]
 # types module (see Swarm.PostgrexTypes).
 config :swarm, Swarm.Repo, types: Swarm.PostgrexTypes
 
+# Verified actor assertion (workspace ADR-16 D9 — the crux). The channel forwards
+# a signed assertion (HS256 JWT, shared secret, single box); the kernel VERIFIES it
+# and DERIVES {uuid, scopes, caps} from its own records — it never trusts a plaintext
+# viewer/scopes on security paths. The secret is env-only (runtime.exs reads
+# `SWARM_ACTOR_SECRET`); `nil` here so it is never committed and a misconfigured prod
+# fails closed (no secret ⇒ cannot verify ⇒ reject). `leeway_s` tolerates minor clock
+# skew on `exp` (single box → small).
+config :swarm, :actor, secret: nil, leeway_s: 30
+
 # Embedding dimensionality of the `node.vec` column (ADR-6). One model/space at
 # a time; changing it is a re-embed migration, not an in-place edit. 1024 =
 # bge-m3 (multilingual UA/FR/EN), the chosen embedding model (Task 03).
@@ -57,6 +66,10 @@ if config_env() == :test do
     title_weight: 30.0,
     lexical_engine: :native,
     bm25_title_boost: 2.0
+
+  # A fixed secret so `Swarm.Actor` sign/verify/resolve work without an explicit
+  # opt in tests that don't pass one. Adversarial cases pass `secret:` explicitly.
+  config :swarm, :actor, secret: "actor-test-secret-do-not-ship", leeway_s: 30
 end
 
 # Decay + saturation parameters (ADR-9). These belong to the tuning inventory
