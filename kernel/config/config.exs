@@ -17,6 +17,14 @@ config :swarm, Swarm.Repo, types: Swarm.PostgrexTypes
 # skew on `exp` (single box → small).
 config :swarm, :actor, secret: nil, leeway_s: 30
 
+# Core API auth mode (ADR-16 D9, step 6a). `:dual` (default) — the legacy RPCs
+# (Ask/KbSearch/…) accept BOTH a signed actor assertion and a plaintext `viewer`, so
+# the live channel keeps working during the 6b migration; a signed assertion is still
+# verified + derived when present. `:strict` — reject unsigned on the legacy RPCs too
+# (the post-6b hard cutover). `:legacy` — never verify. The NEW identity/privacy RPCs
+# (conversations/admin) are ALWAYS strict regardless of this flag.
+config :swarm, :core_api, auth_mode: :dual
+
 # Embedding dimensionality of the `node.vec` column (ADR-6). One model/space at
 # a time; changing it is a re-embed migration, not an in-place edit. 1024 =
 # bge-m3 (multilingual UA/FR/EN), the chosen embedding model (Task 03).

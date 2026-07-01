@@ -118,6 +118,20 @@ if secret = System.get_env("SWARM_ACTOR_SECRET") do
   config :swarm, :actor, secret: secret
 end
 
+# Core API auth mode (ADR-16 D9). `SWARM_AUTH_MODE=strict` flips the legacy RPCs to
+# reject unsigned identity — the post-6b hard cutover, done WITH the channel change.
+# Unset ⇒ the product default (`:dual`) stands. Merges into :core_api.
+case System.get_env("SWARM_AUTH_MODE") do
+  m when m in ["dual", "strict", "legacy"] ->
+    config :swarm, :core_api, auth_mode: String.to_existing_atom(m)
+
+  nil ->
+    :ok
+
+  other ->
+    raise "SWARM_AUTH_MODE=#{inspect(other)} invalid — expected dual | strict | legacy"
+end
+
 if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.
