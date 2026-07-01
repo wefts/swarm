@@ -28,21 +28,26 @@ config :swarm, :embedding, dim: 1024
 # weights; calibrated on the real-corpus qa probe (ADR-8 tuning inventory): a sweep
 # 5→15→30→60 put the title-matched value page at #1 from weight ~30 (recall@10 held,
 # MRR ~doubled, no regression vs baseline); 30 is the knee, higher gives marginal gain.
-# `lexical_engine` (ADR-0016) selects the lexical arm: `:native` (default — the
-# hand-rolled `ts_rank` + title arm above, no extra dependency) or `:bm25` (pg_search/
-# Tantivy: field-boosted body+title, scope filtered in-index). `:bm25` requires the
-# pg_search extension + the `chunk_bm25` index (migration-guarded); flipping the flag
-# is the reversible switch. `bm25_title_boost` is the title field-boost factor (frozen
-# from the spike = 2.0; not tuned to the holdout).
+# `lexical_engine` (ADR-0016, **Accepted** 2026-07-01) selects the lexical arm: `:bm25`
+# (pg_search/Tantivy: field-boosted body+title, scope filtered in-index — the DEFAULT
+# after the flip) or `:native` (the retained hand-rolled `ts_rank` + title-arm fallback,
+# no extra dependency). `:bm25` requires the pg_search extension + the `chunk_bm25` index
+# (migration-guarded) — where absent, set `:native`. Runtime-overridable via
+# `SWARM_LEXICAL_ENGINE` (runtime.exs) for a rebuild-free flip / rollback. `bm25_title_boost`
+# is the bm25 title field-boost (frozen from the spike = 2.0). NB the native title arm
+# rides on top of bm25 (the integration-tuning fix), so `title_weight` applies in both.
 config :swarm, :retrieval,
   floor: 0.45,
   dense: true,
   lex_weight: 3.0,
   dense_weight: 1.0,
   title_weight: 30.0,
-  lexical_engine: :native,
+  lexical_engine: :bm25,
   bm25_title_boost: 2.0
 
+# The test DB has no guaranteed pg_search + the native suite asserts native-arm behaviour
+# (the retained fallback), so test PINS `:native`; the bm25 suite overrides to `:bm25`
+# per-test (it self-skips where pg_search is absent).
 if config_env() == :test do
   config :swarm, :retrieval,
     floor: 0.45,

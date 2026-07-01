@@ -2,18 +2,34 @@
 
 ## Status
 
-**Proposed → MIGRATING** (operator decision 2026-06-30). The feasibility spike was green on its
-primary gates (BM25 beats the native baseline on relevance; no-leak filter-before-rank holds; index
-fresh under writes), council **GO-WITH-CONDITIONS**. Its #1 condition — *compare BM25 against a
-**repaired** native baseline (a title-floor bypass) first* — was then **explored and RESOLVED in
-favour of pg_search**: the native bypass recovers recall on the probe, but doing it cleanly (without
-generic common-word-title flooding) requires **idf-aware title scoring — i.e. reinventing BM25 in
-SQL** (council codex FLAWED + qwen3-coder SWC; see "## Native-bypass exploration"). So the operator
-**chose to migrate to pg_search**. This ADR stays **Proposed on paper** until the remaining
-production conditions pass (PG16 from-source image, larger holdout, no-leak suite, ops gates — see
-"## Spike result") and a final council flips it to **Accepted**; the migration is now an active epic
-(`board/doing/retrieval-pg-search-migration.md`). Full rewrite proceeds behind a feature flag with the
-native arm retained until production burn-in is clean.
+**Accepted** (2026-07-01). pg_search/ParadeDB BM25 is the **default** lexical arm
+(`config :swarm, :retrieval, lexical_engine: :bm25`); the native `ts_rank` arm is **retained** as a
+config fallback, runtime-selectable via `SWARM_LEXICAL_ENGINE` for a rebuild-free flip/rollback. The
+kernel-code default is flipped; the running production kernel changes only on an operator-gated,
+observability-gated redeploy.
+
+Path to Accepted: spike green (BM25 beats the native baseline; no-leak filter-before-rank verified
+in-index; index fresh under writes) → the council's #1 condition (compare vs a *repaired* native
+baseline) explored and resolved in favour of pg_search (cleanly matching BM25 natively needs idf =
+reinventing BM25 in SQL) → the BM25 arm built behind the flag (council FLAWED→fixed→SWC) → an **honest
+end-to-end A/B through the real kernel** on staging `swarm_prod`: after an integration-tuning fix (the
+native title arm rides on top of the bm25 body arm) BM25 is **non-regressive on 7-q title recall
+(0.857 == native) and wins the honest 12-q holdout on all three metrics** (recall 0.545 vs 0.455, MRR
+0.271 vs 0.206, leads 2 vs 1) → a final **decorrelated council (codex + llama3.3:70b) GO-WITH-CONDITIONS**.
+
+**Accepted-with-conditions** (council 2026-07-01, adopted):
+- **The kernel redeploy to `:bm25` in production must be observability-gated** (watch answerability /
+  latency / no-leak on the live stack); the `SWARM_LEXICAL_ENGINE=native` rollback stays documented +
+  the native path stays unit-tested.
+- **The shared-index IDF term-existence side channel is explicitly ACCEPTED** for this deployment (a
+  two-person trusted intranet, both group-scoped, no adversarial third party): RESULT rows are
+  scope-safe (in-index scope filter + the authoritative `node.scope` belt join), but bm25 SCORES carry
+  corpus-global IDF, so a determined viewer could in principle probe score deltas to infer that a
+  private term exists. **If the threat model broadens (more users / finer ACL), partition the bm25
+  index per visibility domain** before that — tracked in `board/todo/bm25-index-hardening`.
+- **Before broadening beyond the two-person cohort:** land the trigger-bypass drift guard + the
+  literal-tokenizer scope field (`board/todo/bm25-index-hardening`), and firm the relevance win on a
+  larger frozen holdout (the n=11 win is directional).
 
 ## Record Completeness
 

@@ -68,6 +68,16 @@ if er_vec = System.get_env("SWARM_ER_VEC_THRESHOLD") do
   config :swarm, :entity_resolution, vec_threshold: String.to_float(er_vec)
 end
 
+# Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
+# pg_search BM25 arm (`bm25`, the shipped default) and the retained native `ts_rank`
+# arm (`native`). Set `SWARM_LEXICAL_ENGINE=native` to roll back instantly at deploy
+# (e.g. if a pg_search issue appears), or on a Postgres without the extension. Merges
+# into :retrieval — the other keys (floor/weights/boost) are preserved. Unset ⇒ the
+# product default (`:bm25`) stands.
+if engine = System.get_env("SWARM_LEXICAL_ENGINE") do
+  config :swarm, :retrieval, lexical_engine: String.to_atom(engine)
+end
+
 if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.
