@@ -3,8 +3,8 @@
 # (`Swarm.Ingest.Content.embed/2`, the real bge-m3 boundary) so content + chunk +
 # node.vec are populated on live data — the structure-not-prose gap closed.
 #
-# Run against an ISOLATED DB (never conditional-prod swarm_dev), reaching the live
-# ML container directly:
+# Run against an ISOLATED sandbox DB (SWARM_DB_NAME below — never the live
+# staging DB), reaching the live ML container directly:
 #
 #   SWARM_DB_NAME=swarm_slice SWARM_ML_ADDRESS=172.19.0.5:50051 \
 #     MIX_ENV=dev mix run --no-start \
@@ -41,9 +41,8 @@ end
 
 IO.puts("== Live data slice (ingest + embed) ==")
 
-IO.puts(
-  "db=#{System.get_env("SWARM_DB_NAME", "swarm_dev")} ml=#{System.get_env("SWARM_ML_ADDRESS", "127.0.0.1:50051")}"
-)
+db_label = System.get_env("SWARM_DB_NAME") || "swarm_" <> (System.get_env("SWARM_ENV") || "(unset)")
+IO.puts("db=#{db_label} ml=#{System.get_env("SWARM_ML_ADDRESS", "127.0.0.1:50051")}")
 
 IO.puts("fetch: gaplimit=#{gaplimit} max_pages=#{max_pages}; segmenter max_tokens=#{seg_max}")
 

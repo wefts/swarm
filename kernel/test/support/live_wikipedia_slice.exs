@@ -2,10 +2,11 @@
 # the swarm ADR-5 connector contract into the live graph, then measure the
 # architect-consilium's predicted failure modes on real data.
 #
-# Run (against the same Postgres the hive kernel uses — swarm_dev), WITHOUT
-# starting a second kernel (no core_api port clash, no competing tailer/GC):
+# Run against an ISOLATED sandbox DB (set SWARM_DB_NAME — never the live staging
+# DB), WITHOUT starting a second kernel (no core_api port clash, no competing
+# tailer/GC):
 #
-#   MIX_ENV=dev mix run --no-start \
+#   SWARM_DB_NAME=swarm_slice MIX_ENV=dev mix run --no-start \
 #     -r test/support/wikipedia_connector.ex \
 #     test/support/live_wikipedia_slice.exs
 #

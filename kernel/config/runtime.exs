@@ -11,10 +11,42 @@ repo_opts = [
   pool_size: String.to_integer(System.get_env("SWARM_DB_POOL_SIZE", "10"))
 ]
 
+# ADR-0015: SWARM_ENV ∈ {test, staging, prod} derives the database name
+# (`swarm_#{SWARM_ENV}`) — no hardcoded fallback. An explicit SWARM_DB_NAME
+# always wins outright (sandbox clones — swarm_slice, swarm_shadow, ad hoc
+# restores — name themselves and never derive). Outside :test, an unset
+# SWARM_ENV (and no explicit override) is a hard boot error: there is no more
+# silent "swarm_dev" target, which is what retires the "conditional-prod" guard.
+#
+# Council finding (codex): System.get_env/1 returns "" for an explicitly-set-
+# but-blank var, which `is_binary` would treat as a real value — blank(_/1)
+# below normalizes "" to nil so it can never silently win or derive "swarm_".
+blank = fn
+  nil -> nil
+  "" -> nil
+  s -> s
+end
+
 database =
-  case config_env() do
-    :test -> System.get_env("SWARM_DB_NAME", "swarm_test")
-    _ -> System.get_env("SWARM_DB_NAME", "swarm_dev")
+  case {config_env(), blank.(System.get_env("SWARM_DB_NAME")), blank.(System.get_env("SWARM_ENV"))} do
+    {_, explicit, _} when is_binary(explicit) ->
+      explicit
+
+    # :test is hermetic by construction (wiped every run, ADR-14 "test" role) —
+    # ALWAYS swarm_test, ignoring SWARM_ENV entirely (council finding: a stray
+    # SWARM_ENV=staging in the shell must never leak into a "hermetic" test run).
+    {:test, nil, _} ->
+      "swarm_test"
+
+    {_, nil, env} when is_binary(env) ->
+      "swarm_#{env}"
+
+    {_, nil, nil} ->
+      raise """
+      SWARM_ENV is not set. Refusing to guess a database (ADR-14: test | \
+      staging | prod). Set SWARM_ENV, or set SWARM_DB_NAME directly for a \
+      sandbox clone.
+      """
   end
 
 # The concurrent-claim test runs many parallel writers (no SQL sandbox); give

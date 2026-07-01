@@ -1,7 +1,10 @@
 # Dev/test substrate for the Swarm kernel — NOT deployment. Deployment is
-# orchestrated in Hive, which includes this file; this fragment only provides
-# the one stateful dependency the kernel needs to develop and test locally.
-# The app runs on the host (mix / uv); only Postgres+pgvector is containerized.
+# orchestrated in Hive (ADR-0015: hive/docker-compose.yml owns the deployed
+# postgres service directly — a from-source ParadeDB image, not this one — so
+# a bare recreate never reverts the pg_search extension); this fragment only
+# provides the one stateful dependency the kernel needs to develop and test
+# locally, standalone. The app runs on the host (mix / uv); only
+# Postgres+pgvector is containerized.
 # Storage was decided by the spike:
 # Postgres + pgvector (docs/storage_engine_spike.md). No Memgraph.
 #
@@ -16,7 +19,9 @@ services:
     environment:
       POSTGRES_USER: ${SWARM_DB_USER:-swarm}
       POSTGRES_PASSWORD: ${SWARM_DB_PASSWORD:-swarm}
-      POSTGRES_DB: ${SWARM_DB_NAME:-swarm_dev}
+      # Standalone local dev/test helper only (never deployment) — swarm_test is
+      # an intentional literal default here, not the swarm_dev footgun (ADR-0015).
+      POSTGRES_DB: ${SWARM_DB_NAME:-swarm_test}
     ports:
       - "${SWARM_DB_PORT:-5432}:5432"
     healthcheck:
