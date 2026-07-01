@@ -252,6 +252,139 @@ defmodule Swarm.Identity do
     {:ok, get_user(id)}
   end
 
+  # ── Mutations (the audited, cap-gated callers live in Swarm.Admin) ─────
+
+  @doc "Grant a role (idempotent). `source` ∈ direct|group|sso_group."
+  @spec grant_role(String.t(), String.t(), String.t(), String.t() | nil) :: :ok
+  def grant_role(user_id, role, source, granted_by \\ nil) do
+    Repo.query!(
+      """
+      INSERT INTO role_grant (user_id, role, source, granted_by)
+      VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, role, source) DO NOTHING
+      """,
+      [cast_to_uuid(user_id), role, source, opt_uuid(granted_by)]
+    )
+
+    :ok
+  end
+
+  @doc "Revoke a role (all sources)."
+  @spec revoke_role(String.t(), String.t()) :: :ok
+  def revoke_role(user_id, role) do
+    Repo.query!("DELETE FROM role_grant WHERE user_id = $1 AND role = $2", [
+      cast_to_uuid(user_id),
+      role
+    ])
+
+    :ok
+  end
+
+  @doc "Add a user to a group (idempotent; ensures the group exists)."
+  @spec add_to_group(String.t(), String.t()) :: :ok
+  def add_to_group(user_id, group_id) do
+    Repo.query!(
+      "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
+      [group_id]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'local')
+      ON CONFLICT (user_id, group_id) DO NOTHING
+      """,
+      [cast_to_uuid(user_id), group_id]
+    )
+
+    :ok
+  end
+
+  @doc "Remove a user from a group."
+  @spec remove_from_group(String.t(), String.t()) :: :ok
+  def remove_from_group(user_id, group_id) do
+    Repo.query!("DELETE FROM user_group WHERE user_id = $1 AND group_id = $2", [
+      cast_to_uuid(user_id),
+      group_id
+    ])
+
+    :ok
+  end
+
+  @doc """
+  Create an invited local user (no credential — the channel sets the password) with
+  a local `identity_link` so local login resolves. `attrs`: `:login` (required),
+  `:first_name`, `:last_name`, `:nickname`.
+  """
+  @spec invite_user(map()) :: {:ok, user()}
+  def invite_user(attrs) do
+    id = uuid7()
+    login = Map.fetch!(attrs, :login)
+
+    {:ok, _} =
+      Repo.transaction(fn ->
+        Repo.query!(
+          """
+          INSERT INTO app_user (id, login, first_name, last_name, nickname, status)
+          VALUES ($1, $2, $3, $4, $5, 'invited')
+          """,
+          [
+            cast_to_uuid(id),
+            login,
+            Map.get(attrs, :first_name),
+            Map.get(attrs, :last_name),
+            Map.get(attrs, :nickname)
+          ]
+        )
+
+        Repo.query!(
+          "INSERT INTO identity_link (user_id, provider, subject) VALUES ($1, 'local', $2)",
+          [cast_to_uuid(id), login]
+        )
+      end)
+
+    {:ok, get_user(id)}
+  end
+
+  @doc """
+  Deactivate an account: `status = disabled` + strip role grants (privilege dies).
+  Login is blocked (`Swarm.Actor.resolve` rejects non-active). Group memberships and
+  learned content are retained (reversible; D11).
+  """
+  @spec deactivate_user(String.t()) :: :ok
+  def deactivate_user(user_id) do
+    Repo.transaction(fn ->
+      Repo.query!(
+        "UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = $1",
+        [cast_to_uuid(user_id)]
+      )
+
+      Repo.query!("DELETE FROM role_grant WHERE user_id = $1", [cast_to_uuid(user_id)])
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Delete an account: `status = deleted` + every login path removed (role grants, group
+  memberships, identity links; credential is channel-side). The `app_user` row PERSISTS
+  (FK + audit integrity) and learned/derived content persists — this is a self-hosted
+  instance, not a right-to-erasure (D11; raw-conversation purge is the deferred policy).
+  """
+  @spec delete_user(String.t()) :: :ok
+  def delete_user(user_id) do
+    Repo.transaction(fn ->
+      Repo.query!(
+        "UPDATE app_user SET status = 'deleted', updated_at = now() WHERE id = $1",
+        [cast_to_uuid(user_id)]
+      )
+
+      Repo.query!("DELETE FROM role_grant WHERE user_id = $1", [cast_to_uuid(user_id)])
+      Repo.query!("DELETE FROM user_group WHERE user_id = $1", [cast_to_uuid(user_id)])
+      Repo.query!("DELETE FROM identity_link WHERE user_id = $1", [cast_to_uuid(user_id)])
+    end)
+
+    :ok
+  end
+
   # ── Reads (derivation happens here, never from a channel field) ────────
 
   @doc "Fetch a user by uuid, or `nil`."
@@ -415,6 +548,10 @@ defmodule Swarm.Identity do
     {:ok, bin} = Ecto.UUID.dump(str)
     bin
   end
+
+  @spec opt_uuid(String.t() | nil) :: binary() | nil
+  defp opt_uuid(nil), do: nil
+  defp opt_uuid(str), do: cast_to_uuid(str)
 
   @spec to_user([term()]) :: user()
   defp to_user([
