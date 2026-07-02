@@ -58,17 +58,40 @@ defmodule Swarm.Core.Auth do
         {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes)}}
 
       :dual ->
-        if assertion_shaped?(viewer) do
-          Logger.warning(
-            "core.auth: an assertion-shaped viewer failed verification; refusing to treat it " <>
-              "as a plaintext id (dual mode) — falling back to anonymous public"
-          )
-
-          {:ok, %{viewer: "", scopes: ["public"]}}
-        else
-          {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes)}}
-        end
+        dual_fallback(viewer, wire_scopes)
     end
+  end
+
+  @spec dual_fallback(String.t(), [String.t()]) :: {:ok, context()}
+  defp dual_fallback(viewer, wire_scopes) do
+    if assertion_shaped?(viewer) do
+      Logger.warning(
+        "core.auth: an assertion-shaped viewer failed verification; refusing to treat it " <>
+          "as a plaintext id (dual mode) — falling back to anonymous public"
+      )
+
+      {:ok, %{viewer: "", scopes: ["public"]}}
+    else
+      log_plaintext_viewer(viewer)
+      {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes)}}
+    end
+  end
+
+  # Shadow-log every NON-EMPTY plaintext viewer actually trusted (council:
+  # gemini-3.1-pro, 6b.7 cutover readiness) — an empty viewer is the ordinary
+  # anonymous/pre-auth path and not worth flagging. Once :strict lands, any
+  # caller still showing up here would silently degrade to anonymous public
+  # rather than erroring (Server.ctx/2) — this log is the only way to notice a
+  # not-yet-migrated identity BEFORE that happens, not after.
+  @spec log_plaintext_viewer(String.t()) :: :ok
+  defp log_plaintext_viewer(""), do: :ok
+
+  defp log_plaintext_viewer(viewer) do
+    Logger.warning(
+      "core.auth: plaintext viewer=#{viewer} accepted in :dual mode (not a signed " <>
+        "assertion) — will degrade to anonymous public once :strict is enabled; verify " <>
+        "this identity is migrated (ADR-16 step 6b.6) before the cutover"
+    )
   end
 
   # A compact JWT is exactly three non-empty dot-separated segments; a plaintext
