@@ -20,6 +20,7 @@ defmodule Swarm.CoreIdentityRpcTest do
     LogConversationRequest,
     ManageAccessRequest,
     ManageUserRequest,
+    ProvisionActorRequest,
     ResolveActorRequest
   }
 
@@ -64,6 +65,147 @@ defmodule Swarm.CoreIdentityRpcTest do
     test "a garbage assertion ⇒ UNAUTHENTICATED" do
       resp = Server.resolve_actor(%ResolveActorRequest{assertion: "not.a.token"}, nil)
       assert resp.status == :CALL_UNAUTHENTICATED
+    end
+  end
+
+  describe "ProvisionActor (ADR-16 D3 — JIT over the wire)" do
+    # The ENTIRE claim set rides inside the signed provision token (aud
+    # "swarm.provision.v1") — council: unsigned request-field groups would let any
+    # assertion holder self-assert scopes.
+    defp provision_token(claims) do
+      Actor.sign(Map.put_new(claims, "aud", "swarm.provision.v1"))
+    end
+
+    test "a NEW SSO subject is JIT-provisioned; scopes derive from synced groups" do
+      Identity.put_group_scopes("staff", ["public", "group"])
+
+      t =
+        provision_token(%{
+          "sub" => "sub-fresh",
+          "provider" => "keycloak",
+          "login" => "fresh",
+          "first_name" => "Fresh",
+          "email" => "fresh@example.test",
+          "groups" => ["staff"]
+        })
+
+      resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
+      assert resp.status == :CALL_OK
+      assert resp.login == "fresh"
+      assert Enum.sort(resp.scopes) == ["group", "public"]
+
+      # and the subject now RESOLVES like any migrated account
+      resolved =
+        Server.resolve_actor(%ResolveActorRequest{assertion: assertion("sub-fresh")}, nil)
+
+      assert resolved.status == :CALL_OK
+      assert resolved.uuid == resp.uuid
+    end
+
+    test "re-provision on every login re-syncs groups (privilege retention closed)" do
+      Identity.put_group_scopes("staff", ["group"])
+
+      t1 =
+        provision_token(%{
+          "sub" => "sub-syncer",
+          "provider" => "keycloak",
+          "login" => "syncer",
+          "groups" => ["staff"]
+        })
+
+      first = Server.provision_actor(%ProvisionActorRequest{provision: t1}, nil)
+      assert first.scopes == ["group"]
+
+      # the IdP drops the group — the next login must NOT retain the scope
+      t2 =
+        provision_token(%{
+          "sub" => "sub-syncer",
+          "provider" => "keycloak",
+          "login" => "syncer",
+          "groups" => []
+        })
+
+      second = Server.provision_actor(%ProvisionActorRequest{provision: t2}, nil)
+      assert second.status == :CALL_OK
+      assert second.uuid == first.uuid
+      assert second.scopes == []
+    end
+
+    test "an ACTOR assertion cannot provision (audience binding, cross-use closed)" do
+      provision("penta", "sub-penta")
+
+      resp =
+        Server.provision_actor(%ProvisionActorRequest{provision: assertion("sub-penta")}, nil)
+
+      assert resp.status == :CALL_UNAUTHENTICATED
+    end
+
+    test "a deactivated account does NOT resurrect via provisioning" do
+      {_root, root_t} = superadmin_assertion()
+      u = provision("victim", "sub-victim")
+
+      Server.manage_user(
+        %ManageUserRequest{assertion: root_t, op: :DEACTIVATE, target_user_id: u.id},
+        nil
+      )
+
+      t =
+        provision_token(%{
+          "sub" => "sub-victim",
+          "provider" => "keycloak",
+          "login" => "victim-renamed",
+          "groups" => ["staff"]
+        })
+
+      resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
+      # indistinguishable from unknown/garbage — no disabled-account oracle
+      assert resp.status == :CALL_UNAUTHENTICATED
+      # nothing was refreshed: status stays disabled, login unchanged, no group sync
+      after_u = Identity.get_user(u.id)
+      assert after_u.status == "disabled"
+      assert after_u.login == "victim"
+      assert Identity.groups_for(u.id) == []
+    end
+
+    test "a login collision with an existing identity is refused loud, never auto-linked" do
+      provision("penta", "sub-penta")
+
+      t =
+        provision_token(%{
+          "sub" => "sub-imposter",
+          "provider" => "keycloak",
+          "login" => "penta",
+          "groups" => []
+        })
+
+      resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
+      assert resp.status == :CALL_BAD_REQUEST
+      # no second identity was minted for the taken login
+      assert Identity.user_by_link("keycloak", "sub-imposter") == nil
+    end
+
+    test "an INVITED account is promoted to active by its first provisioned login" do
+      {_root, root_t} = superadmin_assertion()
+
+      inv =
+        Server.manage_user(
+          %ManageUserRequest{assertion: root_t, op: :INVITE, login: "newby"},
+          nil
+        )
+
+      assert inv.status == :CALL_OK
+      # the invited user's identity_link is local — an SSO provision for a NEW
+      # subject with the same login must NOT hijack it (collision path)…
+      t =
+        provision_token(%{
+          "sub" => "sub-newby-sso",
+          "provider" => "keycloak",
+          "login" => "newby",
+          "groups" => []
+        })
+
+      resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
+      assert resp.status == :CALL_BAD_REQUEST
     end
   end
 

@@ -33,7 +33,7 @@ defmodule Swarm.ActorTest do
 
   describe "sign/verify (HS256, strict)" do
     test "round-trips the claims" do
-      t = token(%{"sub" => "s1", "provider" => "keycloak", "sid" => "sess1"}, exp_in: 3600)
+      t = token(%{"sub" => "s1", "provider" => "keycloak", "sid" => "sess1"}, exp_in: 300)
       assert {:ok, claims} = Actor.verify(t, secret: @secret)
       assert claims["sub"] == "s1"
       assert claims["provider"] == "keycloak"
@@ -41,7 +41,7 @@ defmodule Swarm.ActorTest do
     end
 
     test "rejects a tampered payload (signature mismatch)" do
-      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 3600)
+      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 300)
       [h, _p, s] = String.split(t, ".")
 
       forged_payload =
@@ -52,12 +52,12 @@ defmodule Swarm.ActorTest do
     end
 
     test "rejects a token signed with a different secret" do
-      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 3600, secret: "other-secret")
+      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 300, secret: "other-secret")
       assert {:error, :bad_signature} = Actor.verify(t, secret: @secret)
     end
 
     test "rejects an expired token (past the clock-skew leeway)" do
-      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: -3600)
+      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: -300)
       assert {:error, :expired} = Actor.verify(t, secret: @secret)
     end
 
@@ -109,7 +109,7 @@ defmodule Swarm.ActorTest do
       u = provision_penta(["staff", "nebula"])
 
       t =
-        token(%{"sub" => "sub-penta-0001", "provider" => "keycloak", "sid" => "x"}, exp_in: 3600)
+        token(%{"sub" => "sub-penta-0001", "provider" => "keycloak", "sid" => "x"}, exp_in: 300)
 
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)
       assert actor.uuid == u.id
@@ -123,7 +123,7 @@ defmodule Swarm.ActorTest do
     test "scopes are DERIVED — a token cannot widen them (it carries no scopes)" do
       Identity.put_group_scopes("staff", ["public"])
       provision_penta(["staff"])
-      t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: 3600)
+      t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: 300)
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)
       assert actor.scopes == ["public"]
     end
@@ -133,7 +133,7 @@ defmodule Swarm.ActorTest do
       {:ok, u} = Identity.seed_superadmin(%{id: vanity, login: "rootuser"})
       # a local superadmin logs in with provider "local"; seed_superadmin created the
       # matching local identity_link (subject = login) so resolve finds them uniformly.
-      t = token(%{"sub" => "rootuser", "provider" => "local"}, exp_in: 3600)
+      t = token(%{"sub" => "rootuser", "provider" => "local"}, exp_in: 300)
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)
       assert actor.uuid == u.id
       assert "read_any_conversation" in actor.caps
@@ -142,7 +142,7 @@ defmodule Swarm.ActorTest do
     end
 
     test "an unknown (provider, subject) ⇒ :unknown_actor (not provisioned)" do
-      t = token(%{"sub" => "ghost", "provider" => "keycloak"}, exp_in: 3600)
+      t = token(%{"sub" => "ghost", "provider" => "keycloak"}, exp_in: 300)
       assert {:error, :unknown_actor} = Actor.resolve(t, secret: @secret)
     end
 
@@ -151,7 +151,7 @@ defmodule Swarm.ActorTest do
 
       t =
         token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"},
-          exp_in: 3600,
+          exp_in: 300,
           secret: "wrong"
         )
 
@@ -160,8 +160,82 @@ defmodule Swarm.ActorTest do
 
     test "an expired assertion ⇒ :expired (even for a real user)" do
       provision_penta()
-      t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: -3600)
+      t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: -300)
       assert {:error, :expired} = Actor.resolve(t, secret: @secret)
+    end
+  end
+
+  describe "TTL sanity + audience binding (jit-provision hardening, council codex)" do
+    test "a token whose lifetime exceeds the 300s wire contract is rejected" do
+      t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 3600)
+      assert {:error, :invalid_claims} = Actor.verify(t, secret: @secret)
+    end
+
+    test "a token with iat in the future is rejected" do
+      now = System.system_time(:second)
+
+      t =
+        token(%{"sub" => "s1", "provider" => "keycloak", "iat" => now + 600},
+          exp: now + 700
+        )
+
+      assert {:error, :invalid_claims} = Actor.verify(t, secret: @secret)
+    end
+
+    test "verify/2 binds the audience — an actor token is not a provision token" do
+      actor_t = token(%{"sub" => "s1", "provider" => "keycloak"}, exp_in: 300)
+
+      assert {:error, :bad_audience} =
+               Actor.verify(actor_t, secret: @secret, audience: "swarm.provision.v1")
+
+      prov_t =
+        token(
+          %{"aud" => "swarm.provision.v1", "sub" => "s1", "provider" => "keycloak"},
+          exp_in: 300
+        )
+
+      # the provision token is NOT a valid actor assertion (default audience)
+      assert {:error, :bad_audience} = Actor.verify(prov_t, secret: @secret)
+
+      assert {:ok, _} =
+               Actor.verify(prov_t, secret: @secret, audience: "swarm.provision.v1")
+    end
+  end
+
+  describe "verify_provision/2 — the ADR-16 D3 JIT wire contract" do
+    test "extracts the full bound claim set from a valid provision token" do
+      t =
+        token(
+          %{
+            "aud" => "swarm.provision.v1",
+            "sub" => "sub-newbie",
+            "provider" => "keycloak",
+            "login" => "newbie",
+            "first_name" => "New",
+            "email" => "new@example.test",
+            "groups" => ["staff", 42, ""]
+          },
+          exp_in: 300
+        )
+
+      assert {:ok, claims} = Actor.verify_provision(t, secret: @secret)
+      assert claims.provider == "keycloak"
+      assert claims.subject == "sub-newbie"
+      assert claims.login == "newbie"
+      assert claims.first_name == "New"
+      # non-string / blank group entries are dropped, never crash
+      assert claims.groups == ["staff"]
+      assert [%{email: "new@example.test", verified: true, primary: true}] = claims.emails
+    end
+
+    test "a provision token without a login is invalid (fail-closed)" do
+      t =
+        token(
+          %{"aud" => "swarm.provision.v1", "sub" => "s", "provider" => "keycloak"},
+          exp_in: 300
+        )
+
+      assert {:error, :invalid_claims} = Actor.verify_provision(t, secret: @secret)
     end
   end
 end

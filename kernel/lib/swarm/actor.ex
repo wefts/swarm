@@ -104,7 +104,14 @@ defmodule Swarm.Actor do
 
   @doc """
   Verify a signed assertion's signature + expiry and return its claims. Does NOT
-  touch the store — pure crypto + time. `opts`: `:secret`, `:leeway_s`.
+  touch the store — pure crypto + time. `opts`: `:secret`, `:leeway_s`,
+  `:audience` (default the actor audience — pass the provision audience to
+  verify a provision token; the binding prevents cross-use).
+
+  TTL sanity (council codex, jit-provision-rpc): `iat` must be present, not in
+  the future beyond leeway, and `exp - iat` may not exceed the 300s wire
+  contract (`config :swarm, :actor, max_ttl_s`) — a signer bug or replayed
+  long-lived token fails closed regardless of `exp` itself.
   """
   @spec verify(String.t(), keyword()) :: {:ok, map()} | {:error, reason()}
   def verify(token, opts \\ []) when is_binary(token) do
@@ -113,22 +120,61 @@ defmodule Swarm.Actor do
          :ok <- check_alg(h_b64),
          :ok <- check_sig(h_b64 <> "." <> p_b64, sig_b64, secret),
          {:ok, claims} <- decode_json(p_b64),
-         :ok <- check_audience(claims),
+         :ok <- check_audience(claims, Keyword.get(opts, :audience, @audience)),
          :ok <- check_exp(claims, leeway(opts)) do
-      {:ok, claims}
+      check_ttl(claims, leeway(opts))
+    end
+  end
+
+  @provision_audience "swarm.provision.v1"
+
+  @doc "The provision-token audience (ADR-16 D3 wire contract)."
+  @spec provision_audience() :: String.t()
+  def provision_audience, do: @provision_audience
+
+  @doc """
+  Verify a **provision token** (aud `swarm.provision.v1`) and return the bound,
+  normalized claim set for `Swarm.Identity.provision_from_claims/1`. The WHOLE
+  claim set (login/names/email/groups) lives inside the signed payload — nothing
+  authority-bearing arrives as a plain request field (council: unsigned groups
+  would be self-asserted scopes). Non-string/blank group entries are dropped;
+  a missing/blank `login` fails closed (`:invalid_claims`).
+  """
+  @spec verify_provision(String.t(), keyword()) ::
+          {:ok, Swarm.Identity.claims()} | {:error, reason()}
+  def verify_provision(token, opts \\ []) when is_binary(token) do
+    with {:ok, claims} <- verify(token, Keyword.put(opts, :audience, @provision_audience)),
+         {:ok, provider, subject} <- identity_claims(claims),
+         {:ok, login} <- non_blank(claims["login"]) do
+      {:ok,
+       %{
+         provider: provider,
+         subject: subject,
+         login: login,
+         first_name: str_or_nil(claims["first_name"]),
+         last_name: str_or_nil(claims["last_name"]),
+         nickname: str_or_nil(claims["nickname"]),
+         emails: provision_emails(claims["email"]),
+         groups:
+           claims["groups"]
+           |> List.wrap()
+           |> Enum.filter(&(is_binary(&1) and &1 != ""))
+       }}
     end
   end
 
   @doc """
   Sign an assertion (HS256). For tests + as the reference the channel mirrors;
   production signing is the channel's job (hive, step 6). `opts`: `:secret`,
-  `:exp_in` (seconds from now, default 3600), `:exp` (absolute unix s, wins).
+  `:exp_in` (seconds from now, default 300 — the wire contract's ceiling),
+  `:exp` (absolute unix s, wins). Pass `"aud" => provision_audience()` in the
+  payload to sign a provision token.
   """
   @spec sign(map(), keyword()) :: String.t()
   def sign(payload, opts \\ []) when is_map(payload) do
     {:ok, secret} = secret(opts)
     now = System.system_time(:second)
-    exp = Keyword.get(opts, :exp, now + Keyword.get(opts, :exp_in, 3600))
+    exp = Keyword.get(opts, :exp, now + Keyword.get(opts, :exp_in, 300))
 
     payload =
       payload
@@ -184,9 +230,47 @@ defmodule Swarm.Actor do
     end
   end
 
-  @spec check_audience(map()) :: :ok | {:error, :bad_audience}
-  defp check_audience(%{"aud" => @audience}), do: :ok
-  defp check_audience(_), do: {:error, :bad_audience}
+  @spec check_audience(map(), String.t()) :: :ok | {:error, :bad_audience}
+  defp check_audience(%{"aud" => aud}, expected) when aud == expected, do: :ok
+  defp check_audience(_, _), do: {:error, :bad_audience}
+
+  # TTL sanity: iat present + not-future (beyond leeway) + lifetime within the
+  # wire contract's ceiling. See verify/2 doc.
+  @spec check_ttl(map(), non_neg_integer()) :: {:ok, map()} | {:error, :invalid_claims}
+  defp check_ttl(claims, leeway) do
+    max_ttl = Application.get_env(:swarm, :actor, [])[:max_ttl_s] || 300
+    now = System.system_time(:second)
+
+    case {claims["iat"], claims["exp"]} do
+      {iat, exp} when is_integer(iat) and is_integer(exp) ->
+        if iat <= now + leeway and exp - iat <= max_ttl + leeway do
+          {:ok, claims}
+        else
+          {:error, :invalid_claims}
+        end
+
+      _ ->
+        {:error, :invalid_claims}
+    end
+  end
+
+  @spec non_blank(term()) :: {:ok, String.t()} | {:error, :invalid_claims}
+  defp non_blank(v) when is_binary(v) do
+    if String.trim(v) == "", do: {:error, :invalid_claims}, else: {:ok, v}
+  end
+
+  defp non_blank(_), do: {:error, :invalid_claims}
+
+  @spec str_or_nil(term()) :: String.t() | nil
+  defp str_or_nil(v) when is_binary(v) and v != "", do: v
+  defp str_or_nil(_), do: nil
+
+  # The channel relays the IdP's (verified) primary email, one per token.
+  @spec provision_emails(term()) :: [map()]
+  defp provision_emails(email) when is_binary(email) and email != "",
+    do: [%{email: email, verified: true, primary: true}]
+
+  defp provision_emails(_), do: []
 
   @spec check_exp(map(), non_neg_integer()) :: :ok | {:error, :expired | :invalid_claims}
   defp check_exp(claims, leeway) do

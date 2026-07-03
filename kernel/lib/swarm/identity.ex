@@ -94,6 +94,82 @@ defmodule Swarm.Identity do
     {:ok, get_user(id)}
   end
 
+  @doc """
+  The guarded wire-facing JIT path (ADR-16 D3, `ProvisionActor`) — NOT a raw
+  `upsert_from_claims/1` (council codex+gemini):
+
+    * **Resurrect guard**: a `disabled`/`deleted` account is never reactivated,
+      refreshed, or group-synced by a login — `{:error, :inactive}` (the RPC
+      collapses it to UNAUTHENTICATED; no disabled-account oracle). An `invited`
+      account IS promoted by its first authenticated login (the invite flow).
+    * **Collision guard**: a NEW `(provider, subject)` whose login is already
+      taken by a different identity is refused loud (`{:error, :login_taken}`)
+      — never auto-linked (login-string linking is the account-takeover shape;
+      the 6b.6 groot lockout was exactly a silent collision-skip). Linking two
+      providers to one uuid stays an explicit admin action.
+    * **Race-safe create** (`ON CONFLICT (login) DO NOTHING`): a concurrent
+      double-provision of the SAME identity converges on the winner's row; a
+      lost race against a DIFFERENT identity is a collision, never a 500.
+  """
+  @spec provision_from_claims(claims()) :: {:ok, user()} | {:error, :inactive | :login_taken}
+  def provision_from_claims(claims) do
+    case user_by_link(claims.provider, claims.subject) do
+      %{status: s} when s in ["disabled", "deleted"] -> {:error, :inactive}
+      %{} -> upsert_from_claims(claims)
+      nil -> provision_new(claims)
+    end
+  end
+
+  @spec provision_new(claims()) :: {:ok, user()} | {:error, :login_taken}
+  defp provision_new(claims) do
+    case insert_if_login_free(claims) do
+      :created ->
+        upsert_from_claims(claims)
+
+      :conflict ->
+        # Either a concurrent twin of the SAME identity won the race (proceed —
+        # idempotent), or the login belongs to a different identity (refuse).
+        case user_by_link(claims.provider, claims.subject) do
+          %{} -> upsert_from_claims(claims)
+          nil -> {:error, :login_taken}
+        end
+    end
+  end
+
+  @spec insert_if_login_free(claims()) :: :created | :conflict
+  defp insert_if_login_free(claims) do
+    {:ok, outcome} =
+      Repo.transaction(fn ->
+        id = uuid7()
+
+        res =
+          Repo.query!(
+            """
+            INSERT INTO app_user (id, login, status, last_login_at)
+            VALUES ($1, $2, 'active', now())
+            ON CONFLICT (login) DO NOTHING
+            """,
+            [cast_to_uuid(id), claims.login]
+          )
+
+        if res.num_rows == 1 do
+          Repo.query!(
+            """
+            INSERT INTO identity_link (user_id, provider, subject, verified_at)
+            VALUES ($1, $2, $3, now())
+            """,
+            [cast_to_uuid(id), claims.provider, claims.subject]
+          )
+
+          :created
+        else
+          :conflict
+        end
+      end)
+
+    outcome
+  end
+
   @spec find_or_create_user(claims()) :: String.t()
   defp find_or_create_user(claims) do
     case Repo.query!(

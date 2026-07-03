@@ -225,6 +225,28 @@ defmodule Swarm.Core.Server do
     end
   end
 
+  @spec provision_actor(Swarm.Core.V1.ProvisionActorRequest.t(), GRPC.Server.Stream.t()) ::
+          ResolveActorResponse.t()
+  def provision_actor(req, _stream) do
+    # ADR-16 D3 over the wire: the whole claim set is INSIDE the signed provision
+    # token (aud swarm.provision.v1) — verify, then run the guarded JIT path.
+    # :inactive (resurrect attempt) collapses to UNAUTHENTICATED like every other
+    # actor failure (no disabled-account oracle); a taken login is a caller error.
+    with {:ok, claims} <- Swarm.Actor.verify_provision(req.provision),
+         {:ok, user} <- Swarm.Identity.provision_from_claims(claims) do
+      %ResolveActorResponse{
+        status: :CALL_OK,
+        uuid: user.id,
+        login: user.login,
+        scopes: Swarm.Identity.scopes_for(user.id),
+        caps: Swarm.Identity.caps_for(user.id)
+      }
+    else
+      {:error, :login_taken} -> %ResolveActorResponse{status: :CALL_BAD_REQUEST}
+      {:error, _} -> %ResolveActorResponse{status: :CALL_UNAUTHENTICATED}
+    end
+  end
+
   @spec log_conversation(Swarm.Core.V1.LogConversationRequest.t(), GRPC.Server.Stream.t()) ::
           LogConversationResponse.t()
   def log_conversation(req, _stream) do
