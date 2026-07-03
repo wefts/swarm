@@ -13,6 +13,7 @@ defmodule Swarm.NoLeakShipGateTest do
   alias Swarm.{Actor, Audit, Conversations, Core, Identity, Person, Repo}
 
   alias Swarm.Core.{Auth, Server}
+  alias Swarm.Graph.Store
 
   alias Swarm.Core.V1.{
     ActivityFeedRequest,
@@ -21,7 +22,8 @@ defmodule Swarm.NoLeakShipGateTest do
     GetConversationRequest,
     ListConversationsRequest,
     LogConversationRequest,
-    NeighborhoodRequest
+    NeighborhoodRequest,
+    SearchRequest
   }
 
   defp verdict do
@@ -261,18 +263,35 @@ defmodule Swarm.NoLeakShipGateTest do
       {:ok, _} =
         Conversations.add_message(alice.id, c.id, %{role: "user", body: "NEEDLEHAYSTACK body"})
 
+      # POSITIVE CONTROL (de-vacuous, architect review): the same needle seeded as a
+      # graph node IS findable — so an empty result below is exclusion, not a dead
+      # search path returning [] by construction.
+      Store.upsert_node("concept", "NEEDLEHAYSTACK corpus page", scope: "group")
+      control = Core.search("NEEDLEHAYSTACK", ["group"], limit: 20)
+      assert Enum.map(control, & &1.key) == ["NEEDLEHAYSTACK corpus page"]
+
+      # the conversation title/body itself never surfaces at any scope — every hit
+      # is the control node, never conversation-derived
       for scope <- [["public"], ["group"], ["private"], ["public", "group", "private"]] do
-        assert Core.search("NEEDLEHAYSTACK", scope, limit: 20) == []
+        keys = Core.search("NEEDLEHAYSTACK", scope, limit: 20) |> Enum.map(& &1.key)
+        assert keys -- ["NEEDLEHAYSTACK corpus page"] == []
       end
     end
   end
 
   describe "person chat-derived facts respect the leak rule (service/enrichment identity)" do
-    test "a chat-derived person fact is invisible to a scoped corpus reader" do
+    test "a chat-derived person fact is invisible where the same fact via corpus is visible" do
       alice = user("alice")
       :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "QwertyChatSecret")
-      # a group/public corpus reader (the shape a service/enrichment read uses) sees nothing
-      assert Core.search("QwertyChatSecret", ["public", "group"], limit: 20) == []
+
+      # POSITIVE CONTROL: an equivalent fact arriving through the ORDINARY corpus
+      # path at group scope IS found — proving the exclusion below is the private
+      # pin doing its job, not the query missing both.
+      Store.upsert_node("concept", "QwertyChatSecret corpus twin", scope: "group")
+
+      keys = Core.search("QwertyChatSecret", ["public", "group"], limit: 20) |> Enum.map(& &1.key)
+      assert "QwertyChatSecret corpus twin" in keys
+      refute "QwertyChatSecret" in keys
     end
   end
 
@@ -320,6 +339,21 @@ defmodule Swarm.NoLeakShipGateTest do
   end
 
   describe "Deliberation (ADR-15 retained panel) is owner-private too" do
+    test "the owner CAN read their own deliberation (positive control)" do
+      alice = group_user("alice")
+      ref = Swarm.Deliberation.maybe_persist(verdict(), alice.id, ["group"])
+      assert ref != ""
+
+      own =
+        Server.deliberation(
+          %DeliberationRequest{ask_ref: ref, viewer: assertion("alice"), scopes: ["group"]},
+          nil
+        )
+
+      assert own.status == :FOUND
+      assert own.answer == "the answer"
+    end
+
     test "B cannot read A's deliberation; :strict closes the plaintext-viewer path" do
       alice = user("alice")
       user("bob")
@@ -371,8 +405,17 @@ defmodule Swarm.NoLeakShipGateTest do
       assert resp.status == :NOT_FOUND
     end
 
-    test "a real group ActivityFeed never carries a private chat-derived subject" do
+    test "a real group ActivityFeed carries the group event but never the private one" do
       alice = group_user("alice")
+
+      # POSITIVE CONTROL first (de-vacuous, architect review): a GROUP-scoped edge
+      # write emits an outbox event that IS delivered to a group viewer — so the
+      # exclusion below is scope-filtering, not an empty/unwired feed.
+      a = Store.upsert_node("article", "act-a", scope: "group")
+      b = Store.upsert_node("concept", "act-b", scope: "group")
+      {:ok, _} = Store.add_edge(a, b, "mentions", "act-ev-1", scope: "group")
+
+      # the private chat-derived fact also writes an edge (private) — must be dropped
       :ok = Person.record_chat_fact(alice.id, "works_on", "concept", "ActSecret")
 
       resp =
@@ -381,7 +424,50 @@ defmodule Swarm.NoLeakShipGateTest do
           nil
         )
 
-      refute Enum.any?(resp.events, &(&1.subject_type == "concept"))
+      # falsifiable: the feed is non-empty and contains EXACTLY the one group edge
+      # event; a leak of the private chat edge would make it two.
+      assert resp.status == :FOUND
+      reinforced = Enum.filter(resp.events, &(&1.kind == "edge_reinforced"))
+      assert length(reinforced) == 1
+    end
+  end
+
+  describe "KbSearch through the gRPC wire (dual-accept scope derivation)" do
+    test "a signed assertion's DERIVED scopes replace the wire scopes entirely" do
+      alice = group_user("alice")
+      user("bob")
+      Store.upsert_node("concept", "WireGroupFact", scope: "group")
+      :ok = Person.record_chat_fact(alice.id, "works_on", "concept", "WirePrivFact")
+
+      # alice signs; her wire scopes CLAIM public-only — but derivation wins and her
+      # real group grant surfaces the group fact (proves the wire scopes are ignored)
+      hits =
+        Server.kb_search(
+          %SearchRequest{
+            query: "WireGroupFact",
+            assertion: assertion("alice"),
+            scopes: ["public"]
+          },
+          nil
+        ).hits
+
+      assert Enum.map(hits, & &1.key) == ["WireGroupFact"]
+
+      # bob (no groups) signs and CLAIMS group+private on the wire — derivation
+      # yields [] and the spoof sees neither the group fact nor the private one
+      for q <- ["WireGroupFact", "WirePrivFact"] do
+        spoof =
+          Server.kb_search(
+            %SearchRequest{
+              query: q,
+              assertion: assertion("bob"),
+              scopes: ["group", "private"]
+            },
+            nil
+          )
+
+        assert spoof.hits == []
+      end
     end
   end
 
@@ -464,6 +550,50 @@ defmodule Swarm.NoLeakShipGateTest do
     end
   end
 
+  describe "audit-BEFORE-return ordering (D6) is structural, not incidental" do
+    test "admin_read refuses to run inside a caller transaction (audit durability guard)" do
+      alice = user("alice")
+      root = superadmin()
+      {:ok, c} = Conversations.create(alice.id, %{title: "a"})
+
+      # A caller transaction could roll the audit row back AFTER the data was read —
+      # exactly the hole D6 forbids. The guard makes that shape impossible.
+      assert_raise RuntimeError, ~r/must not run inside a transaction/, fn ->
+        Repo.transaction(fn ->
+          Conversations.admin_read(root.id, c.id, "peek")
+        end)
+      end
+    end
+
+    test "the audit row is durably committed before the data returns (separate connection)" do
+      alice = user("alice")
+      root = superadmin()
+      {:ok, c} = Conversations.create(alice.id, %{title: "a"})
+      {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "hush"})
+
+      assert {:ok, _} = Conversations.admin_read(root.id, c.id, "incident-42")
+
+      # Visible from a COMPLETELY separate Postgres connection ⇒ the audit commit is
+      # its own durable transaction, not pending state a caller could still discard.
+      {:ok, conn} = Postgrex.start_link(Swarm.Repo.config())
+
+      %{rows: [[n]]} =
+        Postgrex.query!(
+          conn,
+          "SELECT count(*) FROM admin_action_audit WHERE reason = 'incident-42' AND decision = 'allowed' AND data_returned",
+          []
+        )
+
+      GenServer.stop(conn)
+      assert n == 1
+    end
+  end
+
+  # HONEST SCOPE (architect review): this describe proves (a) our choke-point's GUC
+  # hygiene on a live connection and (b) that the RLS POLICY bites under a
+  # purpose-made NOSUPERUSER role. It does NOT prove the shipped posture — the
+  # deployed kernel still connects as a superuser role where RLS is dormant; making
+  # the belt live on the real connection is `board/todo/rls-app-role`.
   describe "RLS belt holds under connection-pool reuse (no GUC bleed)" do
     test "the REAL Conversations choke-point leaves no app.current_user on the connection" do
       # Council (gemini): test OUR code, not Postgres. Call the real Conversations
