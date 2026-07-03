@@ -38,16 +38,6 @@ defmodule Swarm.NoLeakShipGateTest do
 
   setup do
     Swarm.GraphCase.truncate_graph()
-
-    Repo.query!("""
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'swarm_rls_test') THEN
-        CREATE ROLE swarm_rls_test NOSUPERUSER NOBYPASSRLS;
-      END IF;
-    END $$
-    """)
-
-    Repo.query!("GRANT SELECT ON conversation, message TO swarm_rls_test")
     :ok
   end
 
@@ -620,12 +610,13 @@ defmodule Swarm.NoLeakShipGateTest do
       {:ok, _} = Conversations.create(bob.id, %{title: "b"})
 
       # After the choke-point ops committed and connections returned to the pool, a
-      # fresh non-superuser transaction with GUC=alice sees ONLY alice; with no GUC
-      # (a leaked/forgotten context) sees NOTHING — the transaction-local GUC never
+      # fresh transaction under the REAL runtime app role (rls-app-role migration:
+      # NOSUPERUSER NOBYPASSRLS) with GUC=alice sees ONLY alice; with no GUC (a
+      # leaked/forgotten context) sees NOTHING — the transaction-local GUC never
       # bleeds across pooled checkouts.
       {:ok, alice_rows} =
         Repo.transaction(fn ->
-          Repo.query!("SET LOCAL ROLE swarm_rls_test")
+          Repo.query!("SET LOCAL ROLE swarm_app")
           Repo.query!("SELECT set_config('app.current_user', $1, true)", [alice.id])
           Repo.query!("SELECT owner_id FROM conversation").rows
         end)
@@ -636,11 +627,91 @@ defmodule Swarm.NoLeakShipGateTest do
 
       {:ok, no_ctx_rows} =
         Repo.transaction(fn ->
-          Repo.query!("SET LOCAL ROLE swarm_rls_test")
+          Repo.query!("SET LOCAL ROLE swarm_app")
           Repo.query!("SELECT owner_id FROM conversation").rows
         end)
 
       assert no_ctx_rows == []
+    end
+  end
+
+  describe "the swarm_app runtime role posture (rls-app-role)" do
+    test "the role is NOSUPERUSER NOBYPASSRLS and the audit table is append-only for it" do
+      %{rows: [[super?, bypass?]]} =
+        Repo.query!("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'swarm_app'")
+
+      refute super?
+      refute bypass?
+
+      alice = user("alice")
+      root = superadmin()
+      {:ok, c} = Conversations.create(alice.id, %{title: "a"})
+      {:ok, _} = Conversations.admin_read(root.id, c.id, "audit-belt-probe")
+
+      # UPDATE / DELETE / TRUNCATE on the audit trail are DENIED at the DB for the
+      # runtime role — tampering with break-glass evidence needs the privileged role.
+      for sql <- [
+            "UPDATE admin_action_audit SET decision = 'denied'",
+            "DELETE FROM admin_action_audit",
+            "TRUNCATE admin_action_audit"
+          ] do
+        {:error, _} =
+          Repo.transaction(fn ->
+            Repo.query!("SET LOCAL ROLE swarm_app")
+
+            case Repo.query(sql) do
+              {:error, %Postgrex.Error{postgres: %{code: :insufficient_privilege}}} ->
+                Repo.rollback(:denied_as_expected)
+
+              other ->
+                flunk("audit mutation was not denied: #{inspect(other)}")
+            end
+          end)
+      end
+    end
+
+    test "the SECURITY DEFINER owner lookup works under the app role where a raw read dies" do
+      alice = user("alice")
+      {:ok, c} = Conversations.create(alice.id, %{title: "a"})
+
+      {:ok, {raw_rows, looked_up}} =
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL ROLE swarm_app")
+          # no app.current_user GUC set: RLS filters the raw read to nothing…
+          raw =
+            Repo.query!("SELECT owner_id FROM conversation WHERE id = $1", [Ecto.UUID.dump!(c.id)]).rows
+
+          # …but the hardened SECURITY DEFINER lookup (the break-glass bootstrap)
+          # still finds the owner — impersonation stays possible under live RLS.
+          %{rows: [[owner]]} =
+            Repo.query!("SELECT public.conversation_owner_lookup($1)", [Ecto.UUID.dump!(c.id)])
+
+          {raw, owner}
+        end)
+
+      assert raw_rows == []
+      assert Ecto.UUID.load!(looked_up) == alice.id
+    end
+
+    test "representative kernel DML works under the app role (missing-grant detector)" do
+      alice = user("alice")
+
+      {:ok, :ok} =
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL ROLE swarm_app")
+          # graph write path (node + edge + outbox + provenance)
+          a = Store.upsert_node("article", "app-role-a", scope: "group")
+          b = Store.upsert_node("concept", "app-role-b", scope: "group")
+          {:ok, _} = Store.add_edge(a, b, "mentions", "app-role-ev", scope: "group")
+          # conversation choke-point path (RLS live for this role)
+          {:ok, c} = Conversations.create(alice.id, %{title: "app-role"})
+          {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "x"})
+          {:ok, got} = Conversations.get(alice.id, c.id)
+          assert got.conversation.id == c.id
+          # identity read path
+          assert Identity.scopes_for(alice.id) == []
+          :ok
+        end)
     end
   end
 

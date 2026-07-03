@@ -247,16 +247,20 @@ defmodule Swarm.Conversations do
 
   # The one legitimately owner-unfiltered read (in this module only — the structural
   # guard forbids it elsewhere): find the conversation's owner so we can impersonate
-  # them. NB once the non-superuser app role lands (board/todo/rls-app-role), this
-  # must become a SECURITY DEFINER helper to bypass RLS for the owner lookup.
+  # them. Routed through the hardened SECURITY DEFINER `conversation_owner_lookup`
+  # (rls-app-role migration: STABLE, search_path pinned, owned by the privileged
+  # role, EXECUTE only for swarm_app) — under the non-superuser runtime role a raw
+  # owner-unfiltered SELECT is RLS-filtered to nothing and break-glass would
+  # silently die. The caller (`admin_read/3`) has already enforced the
+  # `read_any_conversation` cap before this runs.
   @spec privileged_owner(String.t()) :: String.t() | nil
   defp privileged_owner(conversation_id) do
     case Repo.query!(
-           "SELECT owner_id FROM conversation WHERE id = $1 AND deleted_at IS NULL",
+           "SELECT public.conversation_owner_lookup($1)",
            [dump(conversation_id)]
          ) do
+      %{rows: [[nil]]} -> nil
       %{rows: [[owner_id]]} -> load(owner_id)
-      %{rows: []} -> nil
     end
   end
 
