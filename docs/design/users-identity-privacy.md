@@ -27,6 +27,7 @@ The kernel does **not** trust a plaintext `{viewer, scopes}`. Each request carri
 The kernel then **derives** `{uuid, scopes, caps}` itself from its own records (role_grant,
 group_scope_map) — the channel supplies *who authenticated*, the kernel decides *what they
 may do*. This revisits ADR-7 for security-bearing paths (conversation reads, grants).
+Scope derivation carries the **authenticated baseline `public`** (any active, resolved actor reads public knowledge — mirrors the channel boundary and the anonymous/legacy `norm_scopes` default); default-deny applies to everything above it (groups → group_scope_map; `private` ungrantable). Added 2026-07-03 after the staging KB-dead regression (an unseeded group_scope_map made every signed actor derive `[]`).
 
 ## Data model (kernel-owned unless noted)
 

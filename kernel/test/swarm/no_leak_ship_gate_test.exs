@@ -381,7 +381,8 @@ defmodule Swarm.NoLeakShipGateTest do
       # alice genuinely holds `group` (derived from her group) — so this proves the
       # PRIVATE center is excluded from a real group read, not the empty-scope case.
       alice = group_user("alice")
-      assert {:ok, %{scopes: ["group"]}} = Auth.legacy_context(assertion("alice"), [])
+      assert {:ok, %{scopes: scopes}} = Auth.legacy_context(assertion("alice"), [])
+      assert "group" in scopes
       :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "NborSecret")
       person_id = Person.node_id(alice.id)
 
@@ -709,7 +710,7 @@ defmodule Swarm.NoLeakShipGateTest do
           {:ok, got} = Conversations.get(alice.id, c.id)
           assert got.conversation.id == c.id
           # identity read path
-          assert Identity.scopes_for(alice.id) == []
+          assert Identity.scopes_for(alice.id) == ["public"]
           :ok
         end)
     end

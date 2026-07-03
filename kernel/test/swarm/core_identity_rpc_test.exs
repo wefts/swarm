@@ -114,7 +114,7 @@ defmodule Swarm.CoreIdentityRpcTest do
         })
 
       first = Server.provision_actor(%ProvisionActorRequest{provision: t1}, nil)
-      assert first.scopes == ["group"]
+      assert Enum.sort(first.scopes) == ["group", "public"]
 
       # the IdP drops the group — the next login must NOT retain the scope
       t2 =
@@ -128,7 +128,8 @@ defmodule Swarm.CoreIdentityRpcTest do
       second = Server.provision_actor(%ProvisionActorRequest{provision: t2}, nil)
       assert second.status == :CALL_OK
       assert second.uuid == first.uuid
-      assert second.scopes == []
+      # the group scope is gone; the authenticated public baseline remains
+      assert second.scopes == ["public"]
     end
 
     test "an ACTOR assertion cannot provision (audience binding, cross-use closed)" do

@@ -68,7 +68,7 @@ defmodule Swarm.AdminTest do
       assert :ok = Admin.grant_group(admin.id, u.id, "nebula")
       assert Enum.sort(Identity.scopes_for(u.id)) == ["group", "public"]
       assert :ok = Admin.revoke_group(admin.id, u.id, "nebula")
-      assert Identity.scopes_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
     end
 
     test "a user without manage_access cannot change access — :not_authorized" do
@@ -86,7 +86,7 @@ defmodule Swarm.AdminTest do
       assert Admin.set_group_scopes(admin.id, "nebula", ["group", "private"]) ==
                {:error, :ungrantable_scope}
 
-      assert Identity.scopes_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
       assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
     end
   end

@@ -109,9 +109,12 @@ defmodule Swarm.IdentityTest do
   end
 
   describe "scope resolution (group → group_scope_map, default-deny)" do
-    test "no group_scope_map ⇒ no scopes (default-deny)" do
+    test "no group_scope_map ⇒ only the authenticated public baseline" do
+      # default-deny holds ABOVE public: an unmapped group confers nothing, but any
+      # active authenticated actor reads public knowledge (the channel's documented
+      # boundary semantic, restored kernel-side after the staging KB-dead regression).
       {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff"]}))
-      assert Identity.scopes_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
     end
 
     test "a group's mapped scopes are conferred, unioned across groups, deduped" do
@@ -130,9 +133,9 @@ defmodule Swarm.IdentityTest do
       assert Identity.put_group_scopes("nebula", ["public", "private"]) ==
                {:error, :ungrantable_scope}
 
-      # nothing was written — a member of the group still derives no scopes
+      # nothing was written — a member of the group derives only the baseline
       {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["nebula"]}))
-      assert Identity.scopes_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
     end
 
     test "put_group_scopes rejects out-of-vocabulary scopes (Contract check)" do

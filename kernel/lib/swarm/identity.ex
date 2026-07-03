@@ -521,8 +521,18 @@ defmodule Swarm.Identity do
   end
 
   @doc """
-  The scopes a user is granted, **derived** from their groups via
-  `group_scope_map` (unioned, deduped). Default-deny: unmapped groups add nothing.
+  The scopes a user is granted: the **authenticated baseline `public`** plus the
+  scopes **derived** from their groups via `group_scope_map` (unioned, deduped).
+  Default-deny holds for everything ABOVE public: unmapped groups add nothing.
+
+  The baseline restores the channel's documented, council-reviewed semantic
+  ("ALWAYS includes public; groups add more" — `web_channel/auth.scopes_for`)
+  that the D9 kernel-derivation move silently dropped: with an unseeded
+  `group_scope_map`, every signed actor derived `[]` and the ENTIRE knowledge
+  base was invisible (found live on staging, 2026-07-03). `public` is public
+  knowledge — any authenticated, active actor may read it; this also matches
+  the anonymous/legacy path (`norm_scopes([]) ⇒ ["public"]`). A JIT-provisioned
+  subject with no groups therefore lands exactly at public.
 
   `private` is clamped out even if present in the map (the belt behind the
   `put_group_scopes/2` grant boundary — a legacy/raw-SQL row can never confer
@@ -530,17 +540,20 @@ defmodule Swarm.Identity do
   """
   @spec scopes_for(String.t()) :: [String.t()]
   def scopes_for(id) do
-    Repo.query!(
-      """
-      SELECT DISTINCT unnest(m.scopes) AS scope
-        FROM user_group ug
-        JOIN group_scope_map m ON m.group_id = ug.group_id
-       WHERE ug.user_id = $1
-      """,
-      [cast_to_uuid(id)]
-    ).rows
-    |> List.flatten()
-    |> Enum.reject(&(&1 == "private"))
+    derived =
+      Repo.query!(
+        """
+        SELECT DISTINCT unnest(m.scopes) AS scope
+          FROM user_group ug
+          JOIN group_scope_map m ON m.group_id = ug.group_id
+         WHERE ug.user_id = $1
+        """,
+        [cast_to_uuid(id)]
+      ).rows
+      |> List.flatten()
+      |> Enum.reject(&(&1 == "private"))
+
+    Enum.uniq(["public" | derived])
   end
 
   @doc "The roles a user holds (default-deny — `[]` when none granted)."
