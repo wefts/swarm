@@ -122,6 +122,40 @@ defmodule Swarm.IdentityTest do
     end
   end
 
+  describe "grant-boundary scope validation (person-scope-leak-guard)" do
+    # `private` is the default-deny floor AND the chat-privacy mechanism — conferring
+    # it to any group would expose every user's private facts. Hard-denied here,
+    # the deepest grant boundary (Admin + the RPC route through this).
+    test "put_group_scopes hard-denies private as a grantable scope, writing nothing" do
+      assert Identity.put_group_scopes("nebula", ["public", "private"]) ==
+               {:error, :ungrantable_scope}
+
+      # nothing was written — a member of the group still derives no scopes
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["nebula"]}))
+      assert Identity.scopes_for(u.id) == []
+    end
+
+    test "put_group_scopes rejects out-of-vocabulary scopes (Contract check)" do
+      assert Identity.put_group_scopes("nebula", ["group", "secret"]) ==
+               {:error, :ungrantable_scope}
+
+      assert Identity.grantable_scopes() == ["group", "public"]
+    end
+
+    test "scopes_for never derives private even from a corrupted scope map (belt)" do
+      # Simulate legacy/raw-SQL corruption that bypassed the grant boundary.
+      Identity.put_group_scopes("staff", ["public"])
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff"]}))
+
+      Swarm.Repo.query!(
+        "UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1",
+        ["staff", ["public", "private"]]
+      )
+
+      assert Identity.scopes_for(u.id) == ["public"]
+    end
+  end
+
   describe "seed_superadmin/1 — the root/uid-0 mechanism" do
     test "creates a local active user with a superadmin role_grant, idempotently" do
       vanity = "01920000-0000-7000-8000-00000000da7a"

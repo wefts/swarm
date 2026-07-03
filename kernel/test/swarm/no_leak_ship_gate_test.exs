@@ -276,6 +276,49 @@ defmodule Swarm.NoLeakShipGateTest do
     end
   end
 
+  describe "private is not grantable — the person-scope leak-guard" do
+    test "a private grant is rejected at every boundary and reads stay excluded" do
+      alice = user("alice")
+      :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "XkcdChatSecret")
+
+      # the grant boundary refuses private (Identity + Admin + the wire all route here)
+      assert Identity.put_group_scopes("staff", ["group", "private"]) ==
+               {:error, :ungrantable_scope}
+
+      # even if the scope map is CORRUPTED under the boundary (raw SQL), the derived
+      # scopes clamp private out — the belt behind the boundary
+      Identity.put_group_scopes("staff", ["group"])
+
+      {:ok, eve} =
+        Identity.upsert_from_claims(%{
+          provider: "keycloak",
+          subject: "sub-eve",
+          login: "eve",
+          groups: ["staff"]
+        })
+
+      Repo.query!("UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1", [
+        "staff",
+        ["group", "private"]
+      ])
+
+      derived = Identity.scopes_for(eve.id)
+      refute "private" in derived
+      # and a read with exactly those derived scopes cannot see the chat fact
+      assert Core.search("XkcdChatSecret", derived, limit: 20) == []
+    end
+
+    test "a plaintext dual-mode caller cannot REQUEST private via wire scopes" do
+      # Under :dual a legacy plaintext viewer is trusted — but the wire scopes are
+      # clamped (council codex): asking for private yields a context without it.
+      assert {:ok, ctx} = Auth.legacy_context("mallory", ["group", "private"])
+      refute "private" in ctx.scopes
+
+      # private-only collapses to [] — fail-closed, sees nothing
+      assert {:ok, %{scopes: []}} = Auth.legacy_context("mallory", ["private"])
+    end
+  end
+
   describe "Deliberation (ADR-15 retained panel) is owner-private too" do
     test "B cannot read A's deliberation; :strict closes the plaintext-viewer path" do
       alice = user("alice")

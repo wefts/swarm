@@ -259,6 +259,37 @@ defmodule Swarm.CoreIdentityRpcTest do
       assert denied.status == :CALL_NOT_AUTHORIZED
     end
 
+    test "SET_GROUP_SCOPES with private is BAD_REQUEST — the leak-guard at the wire" do
+      {_root, root_t} = superadmin_assertion()
+
+      rejected =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: root_t,
+            op: :SET_GROUP_SCOPES,
+            group_id: "nebula",
+            scopes: ["group", "private"]
+          },
+          nil
+        )
+
+      assert rejected.status == :CALL_BAD_REQUEST
+
+      # the vocabulary check rides the same boundary
+      unknown =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: root_t,
+            op: :SET_GROUP_SCOPES,
+            group_id: "nebula",
+            scopes: ["secret"]
+          },
+          nil
+        )
+
+      assert unknown.status == :CALL_BAD_REQUEST
+    end
+
     test "an admin invites a user via ManageUser; a malformed target is fail-closed" do
       # make penta an admin (via superadmin), then penta invites
       {_root, root_t} = superadmin_assertion()

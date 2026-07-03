@@ -22,6 +22,7 @@ defmodule Swarm.Identity do
   opaque IdP `sub`, not a secret; password hashes stay channel-side.
   """
 
+  alias Swarm.Graph.Contract
   alias Swarm.Repo
 
   @type claims :: %{
@@ -446,6 +447,10 @@ defmodule Swarm.Identity do
   @doc """
   The scopes a user is granted, **derived** from their groups via
   `group_scope_map` (unioned, deduped). Default-deny: unmapped groups add nothing.
+
+  `private` is clamped out even if present in the map (the belt behind the
+  `put_group_scopes/2` grant boundary — a legacy/raw-SQL row can never confer
+  the per-user privacy scope).
   """
   @spec scopes_for(String.t()) :: [String.t()]
   def scopes_for(id) do
@@ -459,6 +464,7 @@ defmodule Swarm.Identity do
       [cast_to_uuid(id)]
     ).rows
     |> List.flatten()
+    |> Enum.reject(&(&1 == "private"))
   end
 
   @doc "The roles a user holds (default-deny — `[]` when none granted)."
@@ -513,25 +519,44 @@ defmodule Swarm.Identity do
   end
 
   @doc """
+  The scopes a group grant may confer: the Contract vocabulary MINUS `private`.
+  `private` is the default-deny floor AND the per-user chat-privacy mechanism
+  (person-scope-leak-guard) — conferring it to any group would expose every
+  user's private facts, so it can never be granted.
+  """
+  @spec grantable_scopes() :: [String.t()]
+  def grantable_scopes, do: Contract.scopes() -- ["private"]
+
+  @doc """
   Ensure a group exists and set its conferred scopes (the config-seeding
   primitive; the audited admin-mutable path is ADR-16 step 5). Idempotent.
+
+  Validates at this — the deepest — grant boundary: every scope must be in
+  `grantable_scopes/0` (Contract vocabulary, `private` hard-denied); on
+  violation nothing is written. Seeding callers must pattern-match `:ok =` so
+  a rejected seed fails loud rather than leaving the group scopeless (council
+  gemini).
   """
-  @spec put_group_scopes(String.t(), [String.t()]) :: :ok
+  @spec put_group_scopes(String.t(), [String.t()]) :: :ok | {:error, :ungrantable_scope}
   def put_group_scopes(group_id, scopes) do
-    Repo.query!(
-      "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
-      [group_id]
-    )
+    if Enum.all?(scopes, &(&1 in grantable_scopes())) do
+      Repo.query!(
+        "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
+        [group_id]
+      )
 
-    Repo.query!(
-      """
-      INSERT INTO group_scope_map (group_id, scopes) VALUES ($1, $2)
-      ON CONFLICT (group_id) DO UPDATE SET scopes = EXCLUDED.scopes
-      """,
-      [group_id, scopes]
-    )
+      Repo.query!(
+        """
+        INSERT INTO group_scope_map (group_id, scopes) VALUES ($1, $2)
+        ON CONFLICT (group_id) DO UPDATE SET scopes = EXCLUDED.scopes
+        """,
+        [group_id, scopes]
+      )
 
-    :ok
+      :ok
+    else
+      {:error, :ungrantable_scope}
+    end
   end
 
   # ── helpers ────────────────────────────────────────────────────────────

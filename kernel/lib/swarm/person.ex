@@ -15,16 +15,26 @@ defmodule Swarm.Person do
   Facts **derived from a user's private chat** must never surface to a scoped corpus
   read. Since the graph carries only a topic `scope` (private < group < public), not an
   owner axis, chat-derived facts are written at **`private`** scope — the narrowest —
-  which a corpus reader (public/group scopes) is never granted, so the existing
-  scope filter on retrieval/search excludes them. `record_chat_fact/4` enforces this in
-  code (the scope is not caller-overridable). Human- or corpus-derived facts may be
-  wider and are added through the ordinary graph path.
+  which a corpus reader (public/group scopes) is never granted (`private` is not a
+  grantable scope, `Swarm.Identity.grantable_scopes/0`), so the existing scope filter
+  on retrieval/search excludes them.
+
+  The rule is enforced at the **data boundary**, not here: `Swarm.Graph.Contract`
+  pins every `user`-typed node to `private` scope (person-scope-leak-guard), so no
+  writer — this module, an enricher, a connector — can surface a person subject at a
+  wider scope. Widening a person (or letting the owner read their own chat facts,
+  which today they cannot — the derived scopes never include `private`, so the
+  projection is write-only) requires an owner axis / per-user scope: an item-3
+  design, deliberately NOT bolted on here.
 
   ## Orphaned owner (account deletion)
 
-  Deleting an account (`Swarm.Admin.delete_user/2`) calls `anonymize/1`: the person node
-  is **re-scoped to private** (detached — no longer discoverable) but kept, and its
-  learned facts persist (D11 — self-hosted, not a right-to-erasure). It never dangles.
+  Deleting an account (`Swarm.Admin.delete_user/2`) calls `anonymize/1`: a repair
+  belt that re-pins the person node `private` (a no-op unless a legacy row predates
+  the contract pin) and keeps it — its learned facts persist (D11 — self-hosted, not
+  a right-to-erasure). It never dangles. Because person nodes are pinned private at
+  write time, every edge touching one is already `private` (ADR-5 edge ≤ endpoints),
+  so no wider edge can survive an anonymize.
   """
 
   alias Swarm.Graph.Store
@@ -36,12 +46,12 @@ defmodule Swarm.Person do
 
   @doc """
   Project (idempotently) the user `uuid` as a graph `user` node and return its integer
-  node id. `opts[:scope]` sets the person-as-subject visibility (default `private` —
-  undiscoverable until deliberately widened). Never writes credentials/sub.
+  node id. Person nodes are **pinned `private`** (enforced by the graph contract) —
+  undiscoverable by any scoped corpus read. Never writes credentials/sub.
   """
-  @spec project(String.t(), keyword()) :: integer()
-  def project(uuid, opts \\ []) when is_binary(uuid) do
-    Store.upsert_node(@person_type, uuid, scope: Keyword.get(opts, :scope, "private"))
+  @spec project(String.t()) :: integer()
+  def project(uuid) when is_binary(uuid) do
+    Store.upsert_node(@person_type, uuid, scope: @chat_scope)
   end
 
   @doc "The person node id for `uuid`, or `nil` if not yet projected."
@@ -62,7 +72,7 @@ defmodule Swarm.Person do
   @spec record_chat_fact(String.t(), String.t(), String.t(), String.t()) :: :ok
   def record_chat_fact(uuid, predicate, object_type, object_key)
       when is_binary(predicate) and is_binary(object_type) and is_binary(object_key) do
-    person_id = project(uuid, scope: @chat_scope)
+    person_id = project(uuid)
     object_id = Store.upsert_node(object_type, object_key, scope: @chat_scope)
     origin = "chat:" <> uuid
 
@@ -77,9 +87,9 @@ defmodule Swarm.Person do
   end
 
   @doc """
-  Detach an orphaned person node on account deletion: re-scope to `private` (no longer
-  discoverable) but keep it and its facts (D11). No-op if the person was never
-  projected. Idempotent.
+  Repair belt on account deletion: re-pin the person node `private` (a no-op unless
+  a legacy row predates the contract pin) but keep it and its facts (D11). No-op if
+  the person was never projected. Idempotent.
   """
   @spec anonymize(String.t()) :: :ok
   def anonymize(uuid) when is_binary(uuid) do

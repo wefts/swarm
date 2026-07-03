@@ -77,6 +77,18 @@ defmodule Swarm.AdminTest do
       assert Admin.grant_group(mallory.id, u.id, "nebula") == :not_authorized
       assert Admin.set_group_scopes(mallory.id, "nebula", ["group"]) == :not_authorized
     end
+
+    test "even an admin cannot grant private — rejected, audited, nothing conferred" do
+      admin = admin_user("adm")
+      u = user("penta")
+      :ok = Admin.grant_group(admin.id, u.id, "nebula")
+
+      assert Admin.set_group_scopes(admin.id, "nebula", ["group", "private"]) ==
+               {:error, :ungrantable_scope}
+
+      assert Identity.scopes_for(u.id) == []
+      assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
+    end
   end
 
   describe "invite_users" do

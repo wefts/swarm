@@ -41,6 +41,11 @@ defmodule Swarm.Graph.Contract do
   # any other type is rejected at the boundary (fail-loud). This is NOT the
   # relation vocabulary (edge types are validated for format only). Grows only by
   # a versioned bump, never silent drift.
+  #
+  # `user` is RESERVED for the person-as-data projection (`Swarm.Person`, ADR-16)
+  # and is pinned to `private` scope (person-scope-leak-guard). Connectors and
+  # enrichers map corpus-mentioned people to `entity` (or `agent` for actors),
+  # never `user` — a wider `user` write fails loud.
   @types ~w(self agent user source article concept entity event file dir task ticket anchor)
   # Graph zones / tuple-classes (T12). `observation` = external evidence;
   # `claim` = LLM-generated (NEVER independent corroboration, ADR-3); the rest are
@@ -81,11 +86,21 @@ defmodule Swarm.Graph.Contract do
   @doc """
   Validate a node's contract fields. `:ok` or `{:error, reason}`. Absent `scope`
   defaults to `private`; absent `reliability` defers to the schema default.
+
+  Person pin (ADR-16 person-scope-leak-guard): a `user`-typed node is a person
+  subject and is admissible **only at `private` scope** — the graph has no owner
+  axis, so `private` IS the per-user privacy mechanism; a wider person node would
+  surface chat-derived facts to scoped corpus reads. Enforced here at the data
+  boundary, not by callers (widening a person is an item-3 owner-axis design,
+  not a write anyone may perform today).
   """
   @spec validate_node(map()) :: :ok | {:error, atom()}
   def validate_node(attrs) do
+    scope = get(attrs, :scope) || "private"
+
     with :ok <- check_node_type(get(attrs, :type)),
-         :ok <- check_scope(get(attrs, :scope) || "private") do
+         :ok <- check_scope(scope),
+         :ok <- check_person_scope(get(attrs, :type), scope) do
       check_reliability(get(attrs, :reliability))
     end
   end
@@ -156,6 +171,12 @@ defmodule Swarm.Graph.Contract do
   end
 
   defp check_scope(_), do: {:error, :unknown_scope}
+
+  # The person pin: `user`-typed nodes only at `private` (see validate_node/1 doc).
+  defp check_person_scope("user", scope) when scope != "private",
+    do: {:error, :person_scope_not_private}
+
+  defp check_person_scope(_, _), do: :ok
 
   defp check_reliability(nil), do: :ok
 

@@ -166,6 +166,44 @@ defmodule Swarm.Graph.ContractTest do
     end
   end
 
+  describe "person-typed nodes are pinned private (person-scope-leak-guard)" do
+    # ADR-16 step-7 review: the per-user chat-privacy leak rule rides the `private`
+    # scope with no owner axis, so a `user` node written at any wider scope is a
+    # leak path (a future enricher pointed at a person subject would surface their
+    # facts at the source scope). The contract — not the caller — pins them.
+    test "validate_node rejects a user node at any scope but private" do
+      assert Contract.validate_node(%{type: "user", scope: "group"}) ==
+               {:error, :person_scope_not_private}
+
+      assert Contract.validate_node(%{type: "user", scope: "public"}) ==
+               {:error, :person_scope_not_private}
+
+      assert Contract.validate_node(%{type: "user", scope: "private"}) == :ok
+      # absent scope defaults to private — still admissible
+      assert Contract.validate_node(%{type: "user"}) == :ok
+    end
+
+    test "upsert_node fails loud on a non-private user node" do
+      assert_raise Swarm.Graph.ContractError, ~r/graph contract/, fn ->
+        Store.upsert_node("user", "3f6c1b1e-0000-7000-8000-000000000001", scope: "group")
+      end
+    end
+
+    test "add_node rejects a non-private user node (changeset)" do
+      assert {:error, cs} = Graph.add_node(%{type: "user", scope: "public"})
+      refute cs.valid?
+      assert {"person nodes are pinned private" <> _, _} = cs.errors[:scope]
+    end
+
+    test "a private user node writes fine, and non-user types keep wider scopes" do
+      assert is_integer(
+               Store.upsert_node("user", "3f6c1b1e-0000-7000-8000-000000000002", scope: "private")
+             )
+
+      assert is_integer(Store.upsert_node("article", "Wide Page", scope: "public"))
+    end
+  end
+
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()

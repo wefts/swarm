@@ -29,7 +29,7 @@ defmodule Swarm.PersonTest do
     u
   end
 
-  describe "project/2" do
+  describe "project/1" do
     test "projects a user node keyed by the uuid, idempotently" do
       u = user("penta")
       id = Person.project(u.id)
@@ -40,10 +40,15 @@ defmodule Swarm.PersonTest do
       assert Person.project(u.id) == id
     end
 
-    test "defaults to private scope (the person-as-subject is undiscoverable until widened)" do
+    test "person nodes are pinned private — the contract refuses any wider write" do
       u = user("penta")
       Person.project(u.id)
       assert person_scope(u.id) == "private"
+
+      # no path — Person or raw Store — can mint/widen a person node beyond private
+      assert_raise Swarm.Graph.ContractError, fn ->
+        Store.upsert_node("user", u.id, scope: "group")
+      end
     end
   end
 
@@ -71,22 +76,27 @@ defmodule Swarm.PersonTest do
     end
   end
 
-  describe "anonymize/1 (orphaned owner on delete)" do
-    test "deleting the account detaches the person node to private but keeps it + its facts" do
+  describe "anonymize/1 (orphaned owner on delete — now a repair belt)" do
+    test "deleting the account keeps the person node private and keeps its facts" do
       root = seed_superadmin()
       target = user("penta")
-      Person.project(target.id, scope: "group")
+      Person.project(target.id)
       :ok = Person.record_chat_fact(target.id, "based_in", "concept", "Kyiv-secret")
 
-      # before deletion the person-as-subject is discoverable at group
-      assert person_scope(target.id) == "group"
+      # a wide person node is impossible even via raw SQL — the DB CHECK belt
+      assert_raise Postgrex.Error, ~r/node_person_scope_private/, fn ->
+        Swarm.Repo.query!(
+          "UPDATE node SET scope='group' WHERE type='user' AND key=$1",
+          [target.id]
+        )
+      end
 
       # an admin (holds manage_users) deletes the target account
       mgr = user("mgr")
       :ok = Admin.grant_role(root, mgr.id, "admin")
       assert :ok = Admin.delete_user(mgr.id, target.id)
 
-      # person node persists but is now private (detached — no longer discoverable)
+      # person node persists, still private (never discoverable)
       assert Person.node_id(target.id) != nil
       assert person_scope(target.id) == "private"
       # the learned fact persists (D11)

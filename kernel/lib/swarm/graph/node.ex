@@ -51,5 +51,16 @@ defmodule Swarm.Graph.Node do
     # swarm ADR-14 §3.1: node `type` is a closed kernel vocabulary, not merely a
     # well-formed string (edge/relation types stay an open, connector-defined set).
     |> validate_inclusion(:type, Contract.types())
+    |> validate_person_scope()
+  end
+
+  # The person pin (ADR-16 person-scope-leak-guard, mirrors Contract.validate_node):
+  # a `user`-typed node is a person subject, admissible only at `private` scope.
+  defp validate_person_scope(changeset) do
+    if get_field(changeset, :type) == "user" and get_field(changeset, :scope) != "private" do
+      add_error(changeset, :scope, "person nodes are pinned private (no owner axis)")
+    else
+      changeset
+    end
   end
 end

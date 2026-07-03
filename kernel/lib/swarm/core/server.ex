@@ -444,9 +444,15 @@ defmodule Swarm.Core.Server do
 
   defp conversation_response(:not_found), do: %GetConversationResponse{status: :CALL_NOT_FOUND}
 
-  @spec action_response(:ok | :not_authorized) :: AdminActionResponse.t()
+  @spec action_response(:ok | :not_authorized | {:error, :ungrantable_scope}) ::
+          AdminActionResponse.t()
   defp action_response(:ok), do: %AdminActionResponse{status: :CALL_OK}
   defp action_response(:not_authorized), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+
+  # A grant of an ungrantable scope (private / out-of-vocabulary) is a caller
+  # error, not an authz outcome (person-scope-leak-guard).
+  defp action_response({:error, :ungrantable_scope}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   @spec conv_view(map()) :: ConversationView.t()
   defp conv_view(c) do

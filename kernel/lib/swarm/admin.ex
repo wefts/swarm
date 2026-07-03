@@ -18,6 +18,7 @@ defmodule Swarm.Admin do
   alias Swarm.{Audit, Identity}
 
   @type result :: :ok | :not_authorized
+  @type scopes_result :: result() | {:error, :ungrantable_scope}
 
   # ── role grants (superadmin-only) ──────────────────────────────────────
 
@@ -55,12 +56,27 @@ defmodule Swarm.Admin do
     end)
   end
 
-  @doc "Set a group's conferred scopes (`manage_access`)."
-  @spec set_group_scopes(String.t(), String.t(), [String.t()]) :: result()
+  @doc """
+  Set a group's conferred scopes (`manage_access`). Scopes are validated at the
+  grant boundary (person-scope-leak-guard): Contract vocabulary only, `private`
+  hard-denied — a rejected grant writes nothing and is audited as denied.
+  """
+  @spec set_group_scopes(String.t(), String.t(), [String.t()]) :: scopes_result()
   def set_group_scopes(actor_id, group_id, scopes) do
-    gate_cap(actor_id, "manage_access", "grant", nil, fn ->
-      Identity.put_group_scopes(group_id, scopes)
-    end)
+    if "manage_access" in Identity.caps_for(actor_id) do
+      case Identity.put_group_scopes(group_id, scopes) do
+        :ok ->
+          audit(actor_id, "grant", "allowed")
+          :ok
+
+        {:error, :ungrantable_scope} = err ->
+          audit(actor_id, "grant", "denied")
+          err
+      end
+    else
+      audit(actor_id, "grant", "denied")
+      :not_authorized
+    end
   end
 
   # ── invite_users / manage_users ────────────────────────────────────────

@@ -108,10 +108,18 @@ defmodule Swarm.Core.Auth do
   @spec actor(String.t()) :: {:ok, Actor.actor()} | {:error, Actor.reason()}
   def actor(assertion), do: Actor.resolve(assertion)
 
-  @doc "Normalize an empty wire scope list to public-only (default-deny baseline)."
+  @doc """
+  Normalize an empty wire scope list to public-only (default-deny baseline).
+
+  `private` is clamped out of any WIRE scope list (person-scope-leak-guard,
+  council codex): it is the per-user chat-privacy scope and is never derivable
+  from a grant, so a plaintext caller in `:dual`/`:legacy` must not be able to
+  request it either. A caller asking for private-only ends up with `[]` —
+  fail-closed, sees nothing.
+  """
   @spec norm_scopes([String.t()]) :: [String.t()]
   def norm_scopes([]), do: ["public"]
-  def norm_scopes(scopes), do: scopes
+  def norm_scopes(scopes), do: Enum.reject(scopes, &(&1 == "private"))
 
   # Only attempt cryptographic verification in modes that trust signatures; in
   # :legacy we never verify. A plaintext viewer simply fails to parse and falls back.
