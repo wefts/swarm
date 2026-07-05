@@ -457,7 +457,7 @@ defmodule Swarm.Core do
   # Never let the gate make an ask SLOWER than pure escalation (spec §3, gemini's
   # sink-risk): the gate runs under a hard time budget; a timeout or crash escalates,
   # so the worst case is (budget + consilium), capped — never an unbounded double-pay.
-  @gate_breaker_ms 1500
+  @gate_breaker_ms 3000
 
   @spec try_structured_gate(String.t(), [String.t()], [hit()], Aggregation.profile(), keyword()) ::
           {:serve, answer()} | :escalate
