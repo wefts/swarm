@@ -86,10 +86,17 @@ false-serve must be a *structural* miss, not only a Stage-2 catch).
 **Freshness (Fork D):** nothing is cached. The view runs on every read over **current**
 edges. A step whose source node's `content_watermark` has moved since the edge was written
 is marked **stale** and excluded from the "supported" set (the gate then likely escalates).
-**Ghost-procedure hazard:** when a source node is deleted or merged, the GC/merge path
-(`Swarm.Graph.GC` / `merge_nodes`) **must purge its derived `has_step`/`requires_tool`
-edges** — an orphaned step-edge pointing at a dead source would otherwise stitch a phantom
-step. Add this to the GC contract + a regression test. **Generation-collision belt (gemini,
+**Ghost-procedure hazard — CLOSED 2026-07-05** (council `board/research/gc-ghost-purge-blackboard.md`):
+when a source node is deleted or merged, its derived edges are **purged** (not re-pointed —
+extraction is a re-derivable derivative of source text; re-attributing to the survivor would
+fabricate provenance and let ER duplicates corroborate). Mechanism: a structural
+`edge_provenance.source_node_id` (schema v7, NO FK — explicit purge, not cascade);
+`Store.merge_nodes` purges `WHERE source_node_id = alias` synchronously in its transaction
+(delete only the alias's provenance, then only edges with no remaining provenance, recompute
+`seen_count`); a race guard (`add_edge` pins the source `FOR SHARE`, fails if gone) makes it
+impossible for an in-flight enrichment write to leave a ghost after the purge; and
+`Swarm.Graph.GC.reap_orphaned_sources/0` is the periodic defensive backstop for legacy/orphaned
+rows. The re-enrichment path was already covered by the worker's synchronous `reconcile/2`. **Generation-collision belt (gemini,
 2026-07-05):** beyond deferring to GC, `Procedure.steps/3` **itself** computes
 `has_generation_collision?` (old+new `has_step` edges under one origin from a re-ingest) and
 the descriptor treats any true value as a **hard blocker ⇒ escalate** — so a delayed GC can

@@ -166,4 +166,82 @@ defmodule Swarm.Graph.MergeTest do
 
     assert Repo.query!("SELECT count(*) FROM content").rows == [[1]]
   end
+
+  describe "source-node ghost-purge (ADR-17 §2 / ADR-13, blackboard gc-ghost-purge)" do
+    defp derived_edge(src_key, dst_key, source_node_id, prov) do
+      subj = Store.upsert_node("entity", src_key, scope: "public")
+      obj = Store.upsert_node("entity", dst_key, scope: "public")
+
+      {:ok, res} =
+        Store.add_edge(subj, obj, "mentions", prov,
+          scope: "public",
+          origin: "enrich:origin:node:#{source_node_id}",
+          evidence_kind: "claim",
+          source_node_id: source_node_id
+        )
+
+      res.id
+    end
+
+    test "merging a SOURCE node purges the edges DERIVED from it (never a phantom step)" do
+      src = nid("doc-source")
+      nid("doc-canonical")
+      eid = derived_edge("Alpha", "Beta", src, "enrich:node:#{src}")
+
+      assert Repo.query!("SELECT id FROM edge WHERE id = $1", [eid]).rows == [[eid]]
+
+      {:ok, %{result: :merged}} = Store.merge_nodes("article", "doc-source", "doc-canonical")
+
+      # the derived edge is gone with its dead source; no orphan provenance remains
+      assert Repo.query!("SELECT id FROM edge WHERE id = $1", [eid]).rows == []
+
+      assert Repo.query!("SELECT edge_id FROM edge_provenance WHERE source_node_id = $1", [src]).rows ==
+               []
+    end
+
+    test "a derived edge ALSO attested by another source survives (seen_count drops, not deleted)" do
+      src = nid("doc-a")
+      src2 = nid("doc-b")
+      nid("doc-canonical")
+      # the SAME claim from two sources → one edge, two origins, seen_count 2
+      eid = derived_edge("Gamma", "Delta", src, "enrich:node:#{src}")
+      ^eid = derived_edge("Gamma", "Delta", src2, "enrich:node:#{src2}")
+      assert Repo.query!("SELECT seen_count FROM edge WHERE id = $1", [eid]).rows == [[2]]
+
+      {:ok, %{result: :merged}} = Store.merge_nodes("article", "doc-a", "doc-canonical")
+
+      # edge survives (still attested by doc-b), corroboration drops by one, doc-a purged
+      assert Repo.query!("SELECT seen_count FROM edge WHERE id = $1", [eid]).rows == [[1]]
+
+      assert Repo.query!("SELECT edge_id FROM edge_provenance WHERE source_node_id = $1", [src]).rows ==
+               []
+
+      assert Repo.query!("SELECT edge_id FROM edge_provenance WHERE source_node_id = $1", [src2]).rows !=
+               []
+    end
+
+    test "a derived write whose source node is already gone is REFUSED (no ghost)" do
+      # The race guard (codex review): a merge could delete the source while an
+      # enrichment write is in flight. Deterministic form — source already gone ⇒ the
+      # write fails closed rather than leaving a ghost the purge already ran past.
+      gone = nid("gone-source")
+      Repo.query!("DELETE FROM node WHERE id = $1", [gone])
+      a = Store.upsert_node("entity", "Eps", scope: "public")
+      b = Store.upsert_node("entity", "Zeta", scope: "public")
+
+      assert {:error, {:source_gone, ^gone}} =
+               Store.add_edge(a, b, "mentions", "prov-gone",
+                 scope: "public",
+                 origin: "enrich:origin:node:#{gone}",
+                 evidence_kind: "claim",
+                 source_node_id: gone
+               )
+
+      # nothing written — no edge, no provenance
+      assert Repo.query!("SELECT id FROM edge WHERE src = $1 AND dst = $2", [a, b]).rows == []
+
+      assert Repo.query!("SELECT edge_id FROM edge_provenance WHERE source_node_id = $1", [gone]).rows ==
+               []
+    end
+  end
 end

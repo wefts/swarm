@@ -62,6 +62,64 @@ defmodule Swarm.Graph.GC do
     n
   end
 
+  @doc """
+  Defensive ghost-purge (workspace ADR-17 §2 / ADR-13, blackboard gc-ghost-purge):
+  reap `edge_provenance` rows whose structural `source_node_id` references a node that
+  no longer exists, then delete edges left with no remaining provenance and recompute
+  the survivors' distinct-origin `seen_count`. The PRIMARY purge is synchronous inside
+  `Store.merge_nodes` (a ghost must not stitch a phantom step for even a millisecond);
+  this sweep is the belt-and-suspenders backstop for legacy rows, a failed migration,
+  or an old bug — it is NOT the source of read correctness. Returns the count reaped.
+  """
+  @spec reap_orphaned_sources() :: non_neg_integer()
+  def reap_orphaned_sources do
+    Repo.transaction(fn ->
+      %{rows: rows} =
+        Repo.query!("""
+        SELECT DISTINCT ep.edge_id
+          FROM edge_provenance ep
+         WHERE ep.source_node_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM node n WHERE n.id = ep.source_node_id)
+         ORDER BY ep.edge_id
+        """)
+
+      edge_ids = Enum.map(rows, fn [id] -> id end)
+
+      if edge_ids == [] do
+        0
+      else
+        Repo.query!("SELECT id FROM edge WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE", [
+          edge_ids
+        ])
+
+        %{num_rows: n} =
+          Repo.query!("""
+          DELETE FROM edge_provenance ep
+           WHERE ep.source_node_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM node n WHERE n.id = ep.source_node_id)
+          """)
+
+        Repo.query!(
+          "DELETE FROM edge e WHERE e.id = ANY($1::bigint[]) " <>
+            "AND NOT EXISTS (SELECT 1 FROM edge_provenance ep WHERE ep.edge_id = e.id)",
+          [edge_ids]
+        )
+
+        Repo.query!(
+          "UPDATE edge e SET seen_count = " <>
+            "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+            "WHERE e.id = ANY($1::bigint[])",
+          [edge_ids]
+        )
+
+        n
+      end
+    end)
+    |> case do
+      {:ok, n} -> n
+    end
+  end
+
   @doc "Working-set size — the saturation metric (edges + nodes). Cheap counts."
   @spec saturation() :: %{edges: non_neg_integer(), nodes: non_neg_integer()}
   def saturation do
@@ -86,8 +144,14 @@ defmodule Swarm.Graph.GC do
   @impl GenServer
   def handle_info(:reap, state) do
     reaped = reap(floor: state.floor)
+    orphaned = reap_orphaned_sources()
     sat = saturation()
     Logger.info("graph GC: reaped #{reaped} evaporated edge(s); working set #{sat.edges} edges")
+
+    if orphaned > 0 do
+      Logger.info("graph GC: reaped #{orphaned} orphaned-source provenance row(s) (ghost-purge)")
+    end
+
     # Piggyback the ADR-15 deliberation-retention reap on this pass — no new timer
     # (the spec's "GC'd on the existing trace-GC pass"). Bounded by config TTL+cap.
     if Swarm.Deliberation.enabled?() do

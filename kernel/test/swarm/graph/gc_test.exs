@@ -70,4 +70,46 @@ defmodule Swarm.Graph.GCTest do
     assert Strength.saturation(1_000_000) < 1.0
     assert Strength.strength(1_000_000, 0) < 1.0
   end
+
+  describe "reap_orphaned_sources (defensive ghost-purge, ADR-17 §2 / ADR-13)" do
+    test "purges provenance whose structural source node is gone; keeps live-source edges" do
+      alias Swarm.Graph.Store
+
+      ghost_src = add_node!(%{type: "article", scope: "public"})
+      live_src = add_node!(%{type: "article", scope: "public"})
+      p = Store.upsert_node("entity", "P", scope: "public")
+      q = Store.upsert_node("entity", "Q", scope: "public")
+
+      {:ok, %{id: ghost_edge}} =
+        Store.add_edge(p, q, "mentions", "prov-ghost",
+          scope: "public",
+          origin: "o-ghost",
+          evidence_kind: "claim",
+          source_node_id: ghost_src
+        )
+
+      r = Store.upsert_node("entity", "R", scope: "public")
+
+      {:ok, %{id: live_edge}} =
+        Store.add_edge(p, r, "mentions", "prov-live",
+          scope: "public",
+          origin: "o-live",
+          evidence_kind: "claim",
+          source_node_id: live_src
+        )
+
+      # Simulate a legacy/leaked orphan: the source node vanished WITHOUT the
+      # synchronous merge purge having run (the sweep is the backstop for exactly this).
+      Repo.query!("DELETE FROM node WHERE id = $1", [ghost_src])
+
+      assert GC.reap_orphaned_sources() >= 1
+
+      # the ghost edge is gone; the live-source edge is untouched
+      assert Repo.query!("SELECT id FROM edge WHERE id = $1", [ghost_edge]).rows == []
+      assert Repo.query!("SELECT id FROM edge WHERE id = $1", [live_edge]).rows == [[live_edge]]
+
+      # idempotent — a second sweep reaps nothing
+      assert GC.reap_orphaned_sources() == 0
+    end
+  end
 end

@@ -195,7 +195,10 @@ defmodule Swarm.Enrichment.Worker do
                scope: node.scope,
                origin: origin,
                evidence_kind: "claim",
-               reliability: reliability
+               reliability: reliability,
+               # Structural source ref (ADR-13/ADR-17 ghost-purge): when THIS source node
+               # is later merged/deleted, merge_nodes/GC purge the edges it derived.
+               source_node_id: node.id
              ) do
           {:ok, %{id: edge_id}} -> {:ok, edge_id}
           # A well-formed claim that failed to PERSIST → abort (not a silent drop).
@@ -227,7 +230,12 @@ defmodule Swarm.Enrichment.Worker do
         # serialise against a concurrent writer touching the same edges, so the
         # prune → orphan-delete → recompute sequence sees a stable set. (Enrichment
         # is single-threaded per the scheduler, so this is belt-and-suspenders.)
-        Repo.query!("SELECT id FROM edge WHERE id = ANY($1::bigint[]) FOR UPDATE", [stale])
+        # ORDER BY id: acquire edge locks in the SAME ascending order as
+        # Store.purge_source_edges/reap_orphaned_sources, so a concurrent merge/GC
+        # ghost-purge touching an overlapping edge set cannot deadlock (codex review).
+        Repo.query!("SELECT id FROM edge WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE", [
+          stale
+        ])
 
         Repo.query!(
           "DELETE FROM edge_provenance WHERE provenance = $1 AND edge_id = ANY($2::bigint[])",

@@ -118,8 +118,15 @@ defmodule Swarm.Graph.Store do
     # edge — enforced here at the write boundary, not just by convention). Set only
     # on first insert, like weight/reliability.
     step_ordinal = if type == "has_step", do: Keyword.get(opts, :step_ordinal), else: nil
+    # ADR-13/ADR-17 ghost-purge: the structural id of the SOURCE node this evidence was
+    # derived from (nil for non-derived edges). Lets `merge_nodes`/GC purge an edge whose
+    # source is gone WITHOUT parsing the worker's `origin` string convention.
+    source_node_id = Keyword.get(opts, :source_node_id)
 
     Repo.transaction(fn ->
+      # Ghost-purge race guard (ADR-13/ADR-17, codex review) — see guard_source!/1.
+      guard_source!(source_node_id)
+
       # swarm ADR-4: enforce the contract at the write boundary — type/scope
       # vocabulary, reliability range, and the ADR-5 visibility invariant (edge
       # scope no wider than the narrowest endpoint). Reject fail-loud; do NOT
@@ -143,7 +150,7 @@ defmodule Swarm.Graph.Store do
       edge_id =
         upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind, step_ordinal)
 
-      case record_event(edge_id, provenance, origin) do
+      case record_event(edge_id, provenance, origin, source_node_id) do
         :new_origin ->
           # A new distinct origin adds exactly 1 to count(DISTINCT origin).
           seen = bump_seen(edge_id)
@@ -249,6 +256,7 @@ defmodule Swarm.Graph.Store do
           n = repoint_edges(alias_id, into_id)
           union_chunks(alias_id, into_id)
           survive_content(alias_id, into_id)
+          purge_source_edges(alias_id)
           Repo.query!("DELETE FROM node WHERE id = $1", [alias_id])
           reaggregate_vec(into_id)
           record_alias(type, alias_key, into_key)
@@ -379,6 +387,74 @@ defmodule Swarm.Graph.Store do
     end
   end
 
+  # Ghost-purge (workspace ADR-17 §2 / ADR-13, blackboard gc-ghost-purge). When a
+  # SOURCE node is merged/deleted, the evidence DERIVED from it (edges whose
+  # `edge_provenance.source_node_id` = that node) must go — else a `has_step`/claim edge
+  # lingers with an origin pointing at a dead source and can stitch a phantom step.
+  # Council (codex + gemini, unanimous): PURGE not re-point (extraction is a re-derivable
+  # derivative of source text; re-attributing to the survivor fabricates provenance and
+  # ER duplicates must not corroborate independently). Delete only the alias's provenance
+  # rows, then only edges with NO remaining provenance (an edge still attested by another
+  # source survives, its distinct-origin seen_count recomputed) — mirroring the
+  # enrichment `reconcile`. Runs synchronously inside the merge transaction, before the
+  # alias node row is deleted. Deadlock-safe (gemini): lock the affected edge rows
+  # `FOR UPDATE ORDER BY id` first — the same ascending-id order the enrichment reconcile
+  # uses — so concurrent merge/ingest can never acquire edge locks in a conflicting order.
+  # Ghost-purge race guard: if this edge is derived from a source node, pin that node
+  # FOR SHARE for the txn and FAIL (rollback) if it is already gone. A concurrent
+  # `merge_nodes` locks the source FOR UPDATE, deletes it, then purges its derived
+  # edges — without this, a write in flight during that merge could land AFTER the
+  # purge and leave a ghost (or an edge whose only provenance the purge already
+  # removed). Called BEFORE the edge upsert lock, so the node→edge acquisition order
+  # matches merge's and cannot deadlock. No-op for a non-derived edge (nil source).
+  @spec guard_source!(integer() | nil) :: :ok
+  defp guard_source!(nil), do: :ok
+
+  defp guard_source!(source_node_id) do
+    if Repo.query!("SELECT id FROM node WHERE id = $1 FOR SHARE", [source_node_id]).num_rows == 1 do
+      :ok
+    else
+      Repo.rollback({:source_gone, source_node_id})
+    end
+  end
+
+  @spec purge_source_edges(integer()) :: :ok
+  defp purge_source_edges(alias_id) do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT DISTINCT edge_id FROM edge_provenance WHERE source_node_id = $1 ORDER BY edge_id",
+        [alias_id]
+      )
+
+    edge_ids = Enum.map(rows, fn [id] -> id end)
+
+    if edge_ids != [] do
+      # Ordered lock (deadlock-safety); the ids are already ascending from the query.
+      Repo.query!("SELECT id FROM edge WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE", [
+        edge_ids
+      ])
+
+      Repo.query!("DELETE FROM edge_provenance WHERE source_node_id = $1", [alias_id])
+
+      # Edges left with no provenance are orphaned → delete; survivors lost one source,
+      # so recompute their distinct-origin seen_count (ADR-13).
+      Repo.query!(
+        "DELETE FROM edge e WHERE e.id = ANY($1::bigint[]) " <>
+          "AND NOT EXISTS (SELECT 1 FROM edge_provenance ep WHERE ep.edge_id = e.id)",
+        [edge_ids]
+      )
+
+      Repo.query!(
+        "UPDATE edge e SET seen_count = " <>
+          "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+          "WHERE e.id = ANY($1::bigint[])",
+        [edge_ids]
+      )
+    end
+
+    :ok
+  end
+
   # Re-point every edge touching `alias_id` onto `into_id`, merging on natural-key
   # collisions and dropping self-loops. Returns the number of alias edges handled.
   @spec repoint_edges(integer(), integer()) :: non_neg_integer()
@@ -413,8 +489,8 @@ defmodule Swarm.Graph.Store do
         # ADR-13 — a merge counts distinct evidential origins, so folding two
         # spellings of one source cannot over-corroborate), then drop the alias edge.
         Repo.query!(
-          "INSERT INTO edge_provenance (edge_id, provenance, origin) " <>
-            "SELECT $1, provenance, origin FROM edge_provenance WHERE edge_id = $2 " <>
+          "INSERT INTO edge_provenance (edge_id, provenance, origin, source_node_id) " <>
+            "SELECT $1, provenance, origin, source_node_id FROM edge_provenance WHERE edge_id = $2 " <>
             "ON CONFLICT (edge_id, provenance) DO NOTHING",
           [target, eid]
         )
@@ -499,17 +575,17 @@ defmodule Swarm.Graph.Store do
   #   :duplicate       — the same emission instance, already recorded (no-op);
   #   :existing_origin — a new event, but its origin is already counted (audit only);
   #   :new_origin      — a new event introducing an origin the edge had not seen.
-  @spec record_event(integer(), String.t(), String.t()) ::
+  @spec record_event(integer(), String.t(), String.t(), integer() | nil) ::
           :duplicate | :existing_origin | :new_origin
-  defp record_event(edge_id, provenance, origin) do
+  defp record_event(edge_id, provenance, origin, source_node_id) do
     sql = """
-    INSERT INTO edge_provenance (edge_id, provenance, origin)
-    VALUES ($1, $2, $3)
+    INSERT INTO edge_provenance (edge_id, provenance, origin, source_node_id)
+    VALUES ($1, $2, $3, $4)
     ON CONFLICT (edge_id, provenance) DO NOTHING
     RETURNING edge_id
     """
 
-    if Repo.query!(sql, [edge_id, provenance, origin]).num_rows == 1 do
+    if Repo.query!(sql, [edge_id, provenance, origin, source_node_id]).num_rows == 1 do
       # New event recorded. Is this the FIRST row carrying this origin (the row we
       # just inserted included)? If so it is a new distinct origin → reinforces.
       #
