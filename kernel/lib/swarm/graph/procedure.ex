@@ -20,6 +20,16 @@ defmodule Swarm.Graph.Procedure do
   the same ordinal) until GC — each variant carries `has_generation_collision?` so the
   tier-gate escalates rather than serve a spliced procedure even if GC is delayed.
 
+  **Shared-step ordinal stance (residual #3, ACCEPTED 2026-07-05):** `step_ordinal` lives
+  on the `has_step` EDGE, whose natural key is `(src, type, dst, scope)` — `origin` is
+  provenance-level (`edge_provenance`), NOT part of the key. So if the SAME step node is
+  referenced by two procedures/origins at different positions, the first-written ordinal
+  wins (upsert reinforces, no-op) and the step shows under both with that one ordinal.
+  Accepted, not fixed: entity-resolution rarely merges specific step-text nodes, so a true
+  cross-origin shared step at divergent ordinals is a corner case. If it ever bites, the
+  fix is to move the ordinal to provenance-level (per-origin) — a schema change deferred
+  until there is evidence it occurs.
+
   Not here yet (follow-ups, ADR-17 §2/§3): the freshness/watermark staleness marking,
   the GC ghost-step purge itself, and the coverage descriptor for the tier-routing gate.
   """

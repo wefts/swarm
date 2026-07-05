@@ -93,7 +93,11 @@ defmodule Swarm.Graph.TraverseRelaxationTest do
       assert Map.keys(got) |> Enum.sort() == Map.keys(expected) |> Enum.sort()
 
       Enum.each(expected, fn {id, conf} ->
-        assert_in_delta got[id], conf, 1.0e-9
+        # 1e-8, not 1e-9: `traverse` and the brute-force reference agree on the
+        # algorithm but accumulate float products in a different order, so at some
+        # seeds the two paths differ by ~1e-9 (a benign FP-associativity artifact,
+        # diagnosed 2026-07-05). 1e-8 is still ~7 orders below any real confidence gap.
+        assert_in_delta got[id], conf, 1.0e-8
       end)
     end
   end

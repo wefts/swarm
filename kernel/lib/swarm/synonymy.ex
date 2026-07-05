@@ -316,8 +316,9 @@ defmodule Swarm.Synonymy do
 
     linked =
       Enum.count(proposed, fn c ->
-        confirm.(c) and
-          match?({:ok, _}, link(c.alias_key, c.canonical_key, type: type, scope: c.scope))
+        # NB: link/3 gets no `scope:` — it derives the edge scope from the endpoints (it
+        # can never diverge from them, else it would leak); passing one is dead + ignored.
+        confirm.(c) and match?({:ok, _}, link(c.alias_key, c.canonical_key, type: type))
       end)
 
     %{proposed: length(proposed), linked: linked}
