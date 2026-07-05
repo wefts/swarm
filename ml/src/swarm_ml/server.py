@@ -31,13 +31,16 @@ class OllamaGenerateError(Exception):
     """Ollama was unreachable or returned an unusable generation response."""
 
 
-def _call_ollama(base_url: str, model: str, texts: list[str]) -> list[list[float]]:
+def _call_ollama(
+    base_url: str, model: str, texts: list[str], keep_alive: str = "-1"
+) -> list[list[float]]:
     """POST the whole batch to Ollama `/api/embed`; return the raw vectors.
 
     One request per batch (not per text). Raises `OllamaEmbedError` on any
-    transport or shape problem — the caller decides the gRPC status.
+    transport or shape problem — the caller decides the gRPC status. `keep_alive`
+    pins the embedder resident (no cold-load tax on the retrieval/disagreement path).
     """
-    payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
+    payload = json.dumps({"model": model, "input": texts, "keep_alive": keep_alive}).encode("utf-8")
     req = urllib.request.Request(
         f"{base_url}/api/embed",
         data=payload,
@@ -62,14 +65,32 @@ def _call_ollama(base_url: str, model: str, texts: list[str]) -> list[list[float
 
 
 def _call_ollama_generate(
-    base_url: str, model: str, prompt: str, system: str, json_mode: bool
+    base_url: str,
+    model: str,
+    prompt: str,
+    system: str,
+    json_mode: bool,
+    keep_alive: str = "-1",
+    num_predict: int = 0,
 ) -> str:
-    """POST to Ollama `/api/generate`; return the response text. Fail loud."""
-    body: dict[str, object] = {"model": model, "prompt": prompt, "stream": False}
+    """POST to Ollama `/api/generate`; return the response text. Fail loud.
+
+    `keep_alive` pins the fleet model resident (kills the interactive cold-load tax);
+    `num_predict` (>0) hard-caps output tokens (panel/judge are intermediate processors,
+    not chatbots — an uncapped generation is pure latency). ADR-17 #1.
+    """
+    body: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": keep_alive,
+    }
     if system:
         body["system"] = system
     if json_mode:
         body["format"] = "json"
+    if num_predict > 0:
+        body["options"] = {"num_predict": num_predict}
 
     req = urllib.request.Request(
         f"{base_url}/api/generate",
@@ -97,17 +118,24 @@ def _call_ollama_generate(
 class GeneratorService(embed_pb2_grpc.GeneratorServicer):
     """Text generation on the local fleet (consilium panel + judge)."""
 
-    def __init__(self, *, ollama_base_url: str) -> None:
-        self._base = ollama_base_url
+    def __init__(self, *, config: ServerConfig) -> None:
+        self._config = config
 
     def Generate(  # method name fixed by the generated gRPC servicer
         self,
         request: embed_pb2.GenerateRequest,
         context: grpc.ServicerContext,
     ) -> embed_pb2.GenerateResponse:
+        cfg = self._config
         try:
             text = _call_ollama_generate(
-                self._base, request.model, request.prompt, request.system, request.json
+                cfg.ollama_base_url,
+                request.model,
+                request.prompt,
+                request.system,
+                request.json,
+                keep_alive=cfg.ollama_keep_alive,
+                num_predict=cfg.ollama_num_predict,
             )
         except OllamaGenerateError as exc:
             _LOG.error("generate failed: %s", exc)
@@ -135,7 +163,9 @@ class EmbedderService(embed_pb2_grpc.EmbedderServicer):
             return embed_pb2.EmbedResponse(vectors=[], namespace=cfg.embed_model, dim=cfg.embed_dim)
 
         try:
-            raw = _call_ollama(cfg.ollama_base_url, cfg.embed_model, texts)
+            raw = _call_ollama(
+                cfg.ollama_base_url, cfg.embed_model, texts, keep_alive=cfg.ollama_keep_alive
+            )
         except OllamaEmbedError as exc:
             _LOG.error("embed failed: %s", exc)
             context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
@@ -178,9 +208,7 @@ def build_server(config: ServerConfig) -> tuple[grpc.Server, int]:
         options=keepalive_options,
     )
     embed_pb2_grpc.add_EmbedderServicer_to_server(EmbedderService(config=config), server)
-    embed_pb2_grpc.add_GeneratorServicer_to_server(
-        GeneratorService(ollama_base_url=config.ollama_base_url), server
-    )
+    embed_pb2_grpc.add_GeneratorServicer_to_server(GeneratorService(config=config), server)
     port = server.add_insecure_port(config.bind)
     return server, port
 

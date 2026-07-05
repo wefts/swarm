@@ -3,6 +3,7 @@ hits real Ollama on Spark (run with `pytest -m integration`)."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import grpc
@@ -10,7 +11,7 @@ import pytest
 
 from swarm_ml import server as server_mod
 from swarm_ml._gen import embed_pb2, embed_pb2_grpc
-from swarm_ml.config import ServerConfig
+from swarm_ml.config import ServerConfig, load_config
 from swarm_ml.server import OllamaEmbedError, build_server
 
 _DIM = 1024
@@ -24,6 +25,8 @@ def _config() -> ServerConfig:
         namespace="bge-m3",
         embed_model="bge-m3",
         ollama_base_url="http://localhost:11434",
+        ollama_keep_alive="-1",
+        ollama_num_predict=512,
     )
 
 
@@ -112,6 +115,73 @@ def test_generate_failure_aborts_unavailable(channel, monkeypatch) -> None:
     err = excinfo.value
     assert isinstance(err, grpc.Call)
     assert err.code() == grpc.StatusCode.UNAVAILABLE
+
+
+class _FakeResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def test_generate_body_pins_residency_and_caps_output(monkeypatch) -> None:
+    # ADR-17 #1: the generate body must carry keep_alive (residency) + options.num_predict
+    # (output cap) so an interactive ask never cold-loads and never runs away.
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp({"response": "ok"})
+
+    monkeypatch.setattr(server_mod.urllib.request, "urlopen", fake_urlopen)
+    out = server_mod._call_ollama_generate(
+        "http://x", "m", "p", "", False, keep_alive="-1", num_predict=256
+    )
+    assert out == "ok"
+    assert captured["body"]["keep_alive"] == "-1"
+    assert captured["body"]["options"] == {"num_predict": 256}
+
+
+def test_generate_no_options_when_num_predict_zero(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp({"response": "ok"})
+
+    monkeypatch.setattr(server_mod.urllib.request, "urlopen", fake_urlopen)
+    server_mod._call_ollama_generate(
+        "http://x", "m", "p", "", False, keep_alive="5m", num_predict=0
+    )
+    assert captured["body"]["keep_alive"] == "5m"
+    assert "options" not in captured["body"]
+
+
+def test_embed_body_pins_residency(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp({"embeddings": [[0.0] * _DIM]})
+
+    monkeypatch.setattr(server_mod.urllib.request, "urlopen", fake_urlopen)
+    server_mod._call_ollama("http://x", "bge-m3", ["hi"], keep_alive="-1")
+    assert captured["body"]["keep_alive"] == "-1"
+
+
+def test_config_defaults_pin_residency_and_cap(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
+    cfg = load_config()
+    assert cfg.ollama_keep_alive == "-1"
+    assert cfg.ollama_num_predict == 512
 
 
 @pytest.mark.integration

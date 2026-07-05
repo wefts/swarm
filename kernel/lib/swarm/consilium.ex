@@ -57,26 +57,95 @@ defmodule Swarm.Consilium do
     panel_prompt = panel_prompt(query, grounding)
 
     with :ok <- budget(panel_prompt, ceiling),
-         [_ | _] = takes <- run_panel(fleet.panel, panel_prompt, generator),
-         judge_prompt = judge_prompt(query, grounding, takes),
-         :ok <- budget(judge_prompt, ceiling),
+         [_ | _] = takes <- run_panel(fleet.panel, panel_prompt, generator) do
+      # Disagreement depends ONLY on the panel answers, not the judge — so embed it
+      # CONCURRENTLY with the judge instead of serially after (ADR-17 #1, consilium-latency
+      # council). The task body is rescue-guarded (never abnormally exits → linking is
+      # safe); every exit path yields-or-shuts-it-down (no orphan, no mailbox pollution, no
+      # crash on a slow embed — codex review).
+      dis_task = Task.async(fn -> safe_disagreement(takes, embedder) end)
+
+      judge_and_assemble(
+        query,
+        grounding,
+        takes,
+        fleet,
+        generator,
+        ceiling,
+        panel_prompt,
+        dis_task
+      )
+    else
+      {:error, {:over_budget, est, ceil}} -> over_budget(est, ceil)
+      [] -> {:error, :panel_empty}
+    end
+  end
+
+  # The judge stage + final assembly. Owns the disagreement task's lifecycle: shut it down
+  # on any judge-path error, harvest it (yield-or-kill, fall back to 0.0) on success.
+  @spec judge_and_assemble(
+          String.t(),
+          String.t(),
+          [take()],
+          map(),
+          fun(),
+          pos_integer(),
+          String.t(),
+          Task.t()
+        ) :: {:ok, verdict()} | {:error, term()}
+  defp judge_and_assemble(
+         query,
+         grounding,
+         takes,
+         fleet,
+         generator,
+         ceiling,
+         panel_prompt,
+         dis_task
+       ) do
+    judge_prompt = judge_prompt(query, grounding, takes)
+
+    with :ok <- budget(judge_prompt, ceiling),
          {:ok, v} <- judge(fleet.judge, judge_prompt, generator) do
       account_escalation(fleet.panel, panel_prompt, takes, judge_prompt, v.answer)
-      disagreement = measure_disagreement(takes, embedder)
+      disagreement = harvest_disagreement(dis_task)
       {:ok, Map.merge(v, %{disagreement: disagreement, panel: takes, judge: fleet.judge})}
     else
       {:error, {:over_budget, est, ceil}} ->
-        Logger.warning("consilium: escalation refused — over budget (#{est} > #{ceil} tokens)")
-        Budget.account(est, 0, %{outcome: :over_budget})
-        {:error, {:over_budget, est, ceil}}
-
-      [] ->
-        {:error, :panel_empty}
+        Task.shutdown(dis_task, :brutal_kill)
+        over_budget(est, ceil)
 
       {:error, reason} ->
+        Task.shutdown(dis_task, :brutal_kill)
         Logger.error("consilium judge failed: #{inspect(reason)}; quarantining (low confidence)")
         {:error, {:judge_failed, reason}}
     end
+  end
+
+  @spec over_budget(non_neg_integer(), pos_integer()) :: {:error, Budget.over_budget()}
+  defp over_budget(est, ceil) do
+    Logger.warning("consilium: escalation refused — over budget (#{est} > #{ceil} tokens)")
+    Budget.account(est, 0, %{outcome: :over_budget})
+    {:error, {:over_budget, est, ceil}}
+  end
+
+  # Disagreement is a best-effort signal — a slow/failed embed must never crash the escalation
+  # after the judge already succeeded. Yield within the budget, else kill and degrade to 0.0.
+  @spec harvest_disagreement(Task.t()) :: float()
+  defp harvest_disagreement(task) do
+    case Task.yield(task, @panel_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, disagreement} -> disagreement
+      _ -> 0.0
+    end
+  end
+
+  # measure_disagreement is already error-safe on embed failures; this belt guarantees the
+  # concurrent TASK never abnormally exits (so the linked caller can't be taken down).
+  @spec safe_disagreement([take()], fun()) :: float()
+  defp safe_disagreement(takes, embedder) do
+    measure_disagreement(takes, embedder)
+  rescue
+    _ -> 0.0
   end
 
   @spec budget(String.t(), pos_integer()) :: :ok | {:error, Budget.over_budget()}

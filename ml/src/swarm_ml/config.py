@@ -17,6 +17,13 @@ _DEFAULT_MAX_WORKERS = 8
 _DEFAULT_NAMESPACE = "bge-m3"
 _DEFAULT_EMBED_MODEL = "bge-m3"
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+# ADR-17 #1 (consilium latency, blackboard consilium-latency): keep the fleet + embedder
+# RESIDENT so an interactive ask never pays the 20-40s cold-load tax (the models fit in the
+# 128GB unified memory). "-1" = pin indefinitely (Ollama semantics). Overridable per deploy.
+_DEFAULT_OLLAMA_KEEP_ALIVE = "-1"
+# Hard output cap: panel/judge are intermediate processors, not chatbots — an uncapped
+# generation is pure latency. 0 disables the cap (Ollama default). Tunable per deploy.
+_DEFAULT_OLLAMA_NUM_PREDICT = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +36,8 @@ class ServerConfig:
     namespace: str
     embed_model: str
     ollama_base_url: str
+    ollama_keep_alive: str
+    ollama_num_predict: int
 
 
 def load_config() -> ServerConfig:
@@ -40,6 +49,8 @@ def load_config() -> ServerConfig:
         namespace=os.environ.get("SWARM_ML_NAMESPACE", _DEFAULT_NAMESPACE),
         embed_model=os.environ.get("SWARM_EMBED_MODEL", _DEFAULT_EMBED_MODEL),
         ollama_base_url=os.environ.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
+        ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", _DEFAULT_OLLAMA_KEEP_ALIVE),
+        ollama_num_predict=_env_int("OLLAMA_NUM_PREDICT", _DEFAULT_OLLAMA_NUM_PREDICT),
     )
 
 
