@@ -31,8 +31,13 @@ record: `board/research/world-map-blackboard.md`. Epic: `board/doing/world-map-p
 A **procedure is not a new node type.** It is an existing `entity` node (e.g. the concept
 "password reset") with **ordered claim-edges** hanging off it:
 
-- `has_step` — edge to a step's content node; carries an integer **`step_index`** property
-  (in the edge's existing property map, not a new column) for ordering.
+- `has_step` — edge to a step's content node; carries an integer **`step_ordinal`** for
+  ordering. (Reconciled 2026-07-05: the `edge` table has NO generic property/JSONB map —
+  the spec's "property map" was wrong. The ordinal is a dedicated **nullable
+  `step_ordinal smallint` column on `edge`** (NULL for every non-step edge) — a versioned
+  schema bump, minimal, no join on the read path, reversible. A JSONB `props` was the
+  more general alternative but YAGNI on the hot edge table; generalize if a second
+  consumer appears.)
 - `requires_tool` — edge to the tool/system a step uses.
 - `applies_to` — edge to the situation/scope the procedure covers.
 
