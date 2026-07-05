@@ -463,10 +463,11 @@ defmodule Swarm.Core do
           {:serve, answer()} | :escalate
   defp try_structured_gate(query, scopes, hits, profile, opts) do
     if tier_gate_enabled?(opts) do
-      # Candidate keys = the retrieval hits' keys UNION procedure-shaped entities the query
-      # names directly (`Procedure.candidates` — a key-only procedure entity ranks poorly in
-      # content retrieval, so the gate would otherwise never see it; ADR-17 #2).
-      candidate_keys = Enum.uniq(hit_keys(hits) ++ Procedure.candidates(query, scopes))
+      # Candidate keys: the query's procedure-shaped entities FIRST (overlap-ranked — a
+      # key-only procedure entity ranks poorly in content retrieval, so the gate would
+      # otherwise never see it; ADR-17 #2), then the retrieval hits as fallback. Order matters:
+      # the gate picks the best-matching procedure, so the targeted candidates lead.
+      candidate_keys = Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits))
 
       descriptor =
         WorldMap.Coverage.describe(query, scopes,

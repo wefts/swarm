@@ -88,6 +88,26 @@ defmodule Swarm.WorldMap.CoverageTest do
       assert {:error, [:ambiguous_variants]} = Coverage.validate(d)
     end
 
+    test "distinct candidate procedures ⇒ picks the FIRST (ranked), serves — NOT ambiguous" do
+      # two DIFFERENT procedure entities (candidate_keys ranked best-first); the gate must
+      # serve the top match, not treat the second distinct procedure as an ambiguous variant.
+      keyed = fn
+        "proc-a", _s, _o -> [variant([step(1, "a1"), step(2, "a2")], origin: "wiki:a")]
+        "proc-b", _s, _o -> [variant([step(1, "b1")], origin: "wiki:b")]
+      end
+
+      d =
+        Coverage.describe("how do I do proc a", ["group"],
+          candidate_keys: ["proc-a", "proc-b"],
+          procedure_fun: keyed,
+          profile: profile([])
+        )
+
+      assert %Descriptor{intent: :procedure, blockers: []} = d
+      assert {:ok, %Validated{atoms: steps}} = Coverage.validate(d)
+      assert Enum.map(steps, & &1.key) == ["a1", "a2"]
+    end
+
     test "a procedure cue with NO clean variant ESCALATES (never a phantom serve)" do
       d =
         Coverage.describe("how do I reset the password", ["group"],

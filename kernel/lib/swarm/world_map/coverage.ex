@@ -108,10 +108,11 @@ defmodule Swarm.WorldMap.Coverage do
 
     cue? = Regex.match?(@procedure_cue, query)
 
-    variants =
-      if cue?,
-        do: Enum.flat_map(candidate_keys, fn key -> procedure_fun.(key, scopes, []) end),
-        else: []
+    # Pick the BEST-matching procedure ENTITY (candidate_keys are overlap-RANKED, best first),
+    # not the union of all — different candidate entities are DIFFERENT procedures, so unioning
+    # them would spuriously look "ambiguous". Ambiguity means multiple ORIGINS of the ONE
+    # chosen procedure (handled in procedure_descriptor), never multiple distinct procedures.
+    variants = if cue?, do: first_procedure(candidate_keys, scopes, procedure_fun), else: []
 
     cond do
       variants != [] ->
@@ -165,6 +166,18 @@ defmodule Swarm.WorldMap.Coverage do
   end
 
   # --- descriptor builders (deterministic) -----------------------------------
+
+  # The variants of the FIRST candidate entity (in ranked order) that has any ordered-step
+  # variants — i.e. the best-matching procedure. Distinct later candidates are distinct
+  # procedures, not extra variants of this one, so they are not mixed in.
+  defp first_procedure([], _scopes, _procedure_fun), do: []
+
+  defp first_procedure([key | rest], scopes, procedure_fun) do
+    case procedure_fun.(key, scopes, []) do
+      [] -> first_procedure(rest, scopes, procedure_fun)
+      variants -> variants
+    end
+  end
 
   defp procedure_descriptor(query, variants) do
     labelled = Enum.map(Enum.with_index(variants, 1), &label_variant/1)
