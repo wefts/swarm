@@ -117,4 +117,51 @@ defmodule Swarm.Graph.ProcedureTest do
       assert ord == nil
     end
   end
+
+  describe "has_generation_collision? (ADR-17 §2 Correction 3 — two-generation belt)" do
+    test "a clean single-generation variant is NOT flagged" do
+      p = ent("password reset", "group")
+      s1 = step_node("open the portal", "group")
+      s2 = step_node("enter your login", "group")
+      has_step(p, s1, 1, "wiki:reset", "group")
+      has_step(p, s2, 2, "wiki:reset", "group")
+
+      [variant] = Procedure.steps("password reset", ["group"])
+      assert variant.has_generation_collision? == false
+    end
+
+    test "a re-ingested page (two distinct steps share an ordinal within one origin) IS flagged" do
+      # Residual #2 / gemini Correction 3: a re-ingest leaves OLD+NEW has_step edges
+      # under the SAME origin until GC. Distinct step TEXT at the same ordinal ⇒ the
+      # ordering would splice generations (1,1,2,2). The view must flag it so the gate
+      # escalates — never serve a spliced procedure even if GC is delayed.
+      p = ent("password reset", "group")
+      # generation 1 (original page)
+      has_step(p, step_node("old: open portal", "group"), 1, "wiki:reset", "group")
+      has_step(p, step_node("old: enter login", "group"), 2, "wiki:reset", "group")
+      # generation 2 (re-ingested, changed page — new step text, same ordinals/origin)
+      has_step(p, step_node("new: open portal v2", "group"), 1, "wiki:reset", "group")
+      has_step(p, step_node("new: enter login v2", "group"), 2, "wiki:reset", "group")
+
+      [variant] = Procedure.steps("password reset", ["group"])
+      assert variant.origin == "wiki:reset"
+      assert variant.has_generation_collision? == true
+    end
+
+    test "collision is per-origin — a clean origin is not tainted by a collided sibling" do
+      p = ent("password reset", "group")
+      # clean origin
+      has_step(p, step_node("A step one", "group"), 1, "wiki:a", "group")
+      has_step(p, step_node("A step two", "group"), 2, "wiki:a", "group")
+      # collided origin (two texts at ordinal 1)
+      has_step(p, step_node("B step one", "group"), 1, "wiki:b", "group")
+      has_step(p, step_node("B step one v2", "group"), 1, "wiki:b", "group")
+
+      variants = Procedure.steps("password reset", ["group"])
+      a = Enum.find(variants, &(&1.origin == "wiki:a"))
+      b = Enum.find(variants, &(&1.origin == "wiki:b"))
+      assert a.has_generation_collision? == false
+      assert b.has_generation_collision? == true
+    end
+  end
 end

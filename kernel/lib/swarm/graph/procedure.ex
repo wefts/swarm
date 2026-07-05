@@ -15,14 +15,23 @@ defmodule Swarm.Graph.Procedure do
   Scope-enforced on the entity, the `has_step` edge, AND each step node (no-leak);
   refuted edges (`reward < 0`) excluded, matching every other read path.
 
+  **Generation-collision belt (ADR-17 §2/§3, tier-gate council Correction 3):** a
+  re-ingest can leave old+new `has_step` edges under one origin (distinct step text at
+  the same ordinal) until GC — each variant carries `has_generation_collision?` so the
+  tier-gate escalates rather than serve a spliced procedure even if GC is delayed.
+
   Not here yet (follow-ups, ADR-17 §2/§3): the freshness/watermark staleness marking,
-  the GC ghost-step purge, and the coverage descriptor for the tier-routing gate.
+  the GC ghost-step purge itself, and the coverage descriptor for the tier-routing gate.
   """
 
   alias Swarm.Repo
 
   @typedoc "One source's ordered account of a procedure."
-  @type variant :: %{origin: String.t(), steps: [%{ordinal: integer(), key: String.t()}]}
+  @type variant :: %{
+          origin: String.t(),
+          steps: [%{ordinal: integer(), key: String.t()}],
+          has_generation_collision?: boolean()
+        }
 
   @doc """
   The procedure `entity_key` describes, as per-origin ordered step variants (empty
@@ -30,9 +39,11 @@ defmodule Swarm.Graph.Procedure do
   (default `"entity"`).
   """
   @spec steps(String.t(), [String.t()], keyword()) :: [variant()]
+  def steps(entity_key, scopes, opts \\ [])
+
   def steps(_entity_key, [], _opts), do: []
 
-  def steps(entity_key, scopes, opts \\ []) when is_binary(entity_key) and is_list(scopes) do
+  def steps(entity_key, scopes, opts) when is_binary(entity_key) and is_list(scopes) do
     type = Keyword.get(opts, :type, "entity")
 
     %{rows: rows} =
@@ -56,9 +67,24 @@ defmodule Swarm.Graph.Procedure do
     |> Enum.map(fn {origin, group} ->
       %{
         origin: origin,
-        steps: Enum.map(group, fn [_o, ord, key] -> %{ordinal: ord, key: key} end)
+        steps: Enum.map(group, fn [_o, ord, key] -> %{ordinal: ord, key: key} end),
+        has_generation_collision?: generation_collision?(group)
       }
     end)
     |> Enum.sort_by(& &1.origin)
+  end
+
+  # A re-ingest of a changed page leaves OLD+NEW `has_step` edges under the SAME
+  # origin until GC/watermark purge — so an ordinal can point at more than one
+  # distinct step node, and `ORDER BY origin, step_ordinal` would splice the
+  # generations (1,1,2,2,3,3). The rows are already DISTINCT on (origin, ordinal,
+  # key), so within one origin any ordinal appearing on >1 row means >1 distinct
+  # step text at that position — a collision. The tier-gate treats this as a HARD
+  # blocker (ADR-17 §2/§3, gemini Correction 3): defence-in-depth at the aggregation
+  # layer so a delayed GC can never yield a spliced served procedure.
+  defp generation_collision?(group) do
+    group
+    |> Enum.group_by(fn [_origin, ord, _key] -> ord end)
+    |> Enum.any?(fn {_ord, rows} -> length(rows) > 1 end)
   end
 end
