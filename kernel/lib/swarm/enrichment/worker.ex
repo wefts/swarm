@@ -31,6 +31,7 @@ defmodule Swarm.Enrichment.Worker do
   group); the model is LOCAL (config). Enrichment output IS content — never logged.
   """
 
+  alias Swarm.Enrichment.Procedures
   alias Swarm.Enrichment.Watermark
   alias Swarm.Graph.Store
   alias Swarm.Ingest.Content
@@ -48,7 +49,11 @@ defmodule Swarm.Enrichment.Worker do
   @generated_kinds ~w(claim hypothesis derived)
 
   @typedoc "Outcome of one enrichment: how many triples were extracted and how many became edges."
-  @type result :: %{claims: non_neg_integer(), edges: non_neg_integer()}
+  @type result :: %{
+          claims: non_neg_integer(),
+          edges: non_neg_integer(),
+          procedures: non_neg_integer()
+        }
 
   @doc """
   Enrich one node: extract S-P-O claims from its stored body and write them as
@@ -129,9 +134,16 @@ defmodule Swarm.Enrichment.Worker do
         # we skip reconcile + the fresh watermark, and record `error` to retry.
         case write_claims(node, claims) do
           {:ok, edge_ids} ->
-            reconcile(node.id, edge_ids)
+            # Procedure extraction (ADR-17 #2): a SEPARATE gated pass — best-effort + additive,
+            # it never aborts the claim path. Its fresh has_step edge ids join the reconcile
+            # kept-set so the same-source reconcile does not re-delete them.
+            procedures = Procedures.extract(body, gen_fun: gen, model: model)
+            step_ids = Procedures.write(node, procedures, provenance(node.id))
+            reconcile(node.id, edge_ids ++ step_ids)
             Watermark.record(node.id, stamp.("fresh"))
-            {:ok, %{claims: length(claims), edges: length(edge_ids)}}
+
+            {:ok,
+             %{claims: length(claims), edges: length(edge_ids), procedures: length(procedures)}}
 
           {:error, reason} ->
             Watermark.record(node.id, stamp.("error"))

@@ -46,7 +46,7 @@ defmodule Swarm.Graph.Contract do
   # and is pinned to `private` scope (person-scope-leak-guard). Connectors and
   # enrichers map corpus-mentioned people to `entity` (or `agent` for actors),
   # never `user` — a wider `user` write fails loud.
-  @types ~w(self agent user source article concept entity event file dir task ticket anchor)
+  @types ~w(self agent user source article concept entity event file dir task ticket anchor step)
   # Graph zones / tuple-classes (T12). `observation` = external evidence;
   # `claim` = LLM-generated (NEVER independent corroboration, ADR-3); the rest are
   # lifecycle classes. Each kind may carry its own TTL/compaction policy.
