@@ -175,4 +175,76 @@ defmodule Swarm.SynonymyTest do
       assert out |> String.split() |> Enum.count(&(&1 == "Service")) == 1
     end
   end
+
+  describe "propose_acronyms/1 + run_acronym_pass/1 (slice 3 — automated proposer)" do
+    setup do
+      Store.upsert_node("concept", "SSP", scope: "group")
+      Store.upsert_node("concept", "Self Service Password", scope: "group")
+      :ok
+    end
+
+    test "proposes an acronym pair among existing concept nodes" do
+      [c] = Synonymy.propose_acronyms([])
+      assert c.alias_key == "SSP"
+      assert c.canonical_key == "Self Service Password"
+      assert c.scope == "group"
+    end
+
+    test "does not propose an already-linked pair" do
+      {:ok, _} = Synonymy.link("SSP", "Self Service Password")
+      assert Synonymy.propose_acronyms([]) == []
+    end
+
+    test "a sibling_of edge auto-rejects the pair (contrastive guard, council gemini)" do
+      a = Synonymy.node_id!("concept", "SSP")
+      b = Synonymy.node_id!("concept", "Self Service Password")
+
+      {:ok, _} =
+        Store.add_edge(a, b, "sibling_of", "contrast", scope: "group", evidence_kind: "derived")
+
+      assert Synonymy.propose_acronyms([]) == []
+    end
+
+    test "cross-scope acronym pairs are never proposed (no-leak)" do
+      Store.upsert_node("concept", "MFA", scope: "group")
+      Store.upsert_node("concept", "Multi Factor Authentication", scope: "public")
+      cands = Synonymy.propose_acronyms([])
+      refute Enum.any?(cands, &(&1.alias_key == "MFA"))
+    end
+
+    test "run pass links only confirmed candidates (injected confirm)" do
+      yes = fn _pair -> true end
+      assert %{proposed: 1, linked: 1} = Synonymy.run_acronym_pass(confirm_fun: yes)
+      assert Synonymy.forms("SSP", ["group"]) |> Enum.sort() == ["SSP", "Self Service Password"]
+    end
+
+    test "run pass links nothing when the confirm rejects (precision-first)" do
+      no = fn _pair -> false end
+      assert %{proposed: 1, linked: 0} = Synonymy.run_acronym_pass(confirm_fun: no)
+      assert Synonymy.forms("SSP", ["group"]) == ["SSP"]
+    end
+
+    test "POLYSEMY: a short form matching two expansions in one scope proposes NEITHER" do
+      # SSP ⇒ "Self Service Password" (setup) AND "Supply Side Platform" — ambiguous
+      Store.upsert_node("concept", "Supply Side Platform", scope: "group")
+      cands = Synonymy.propose_acronyms([])
+      refute Enum.any?(cands, &(&1.alias_key == "SSP"))
+    end
+
+    test "component-aware sibling guard: link refused when a sibling spans the components" do
+      # SSP synonym_of Self Service Password (existing); Supply Side Platform sibling_of
+      # Self Service Password → linking SSP↔Supply Side Platform would fold a sibling in
+      {:ok, _} = Synonymy.link("SSP", "Self Service Password")
+      ssp2 = Store.upsert_node("concept", "Supply Side Platform", scope: "group")
+      ssp_canon = Synonymy.node_id!("concept", "Self Service Password")
+
+      {:ok, _} =
+        Store.add_edge(ssp2, ssp_canon, "sibling_of", "contrast",
+          scope: "group",
+          evidence_kind: "derived"
+        )
+
+      assert {:error, :sibling_conflict} = Synonymy.link("SSP", "Supply Side Platform")
+    end
+  end
 end
