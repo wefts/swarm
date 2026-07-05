@@ -1,6 +1,6 @@
 ---
-status: draft
-adr: workspace ADR-17 (Proposed 2026-07-04)
+status: in-build (substrate shipped 2026-07-05; tier-gate next)
+adr: workspace ADR-17 (Accepted 2026-07-04)
 owns: swarm kernel — procedure representation, aggregation view, tier-routing gate; hive — glpi-agent oracle connector (later phase)
 supersedes: nothing (composes ADR-13 evidential origin + the shipped STEP-2 aggregation; overrides the charter's glpi-first bootstrap lean)
 ---
@@ -47,7 +47,7 @@ N is X", never a first-class truth-node.
 
 **Load-bearing constraint (the council's sharpest catch):** a procedure may be described by
 more than one source. The aggregation **groups `has_step` edges by `origin` FIRST, then
-orders by `step_index` within each origin** — never interleaves indices across sources
+orders by `step_ordinal` within each origin** — never interleaves indices across sources
 (two docs' "step 1" would otherwise fuse into a broken chain). When multiple origins
 describe the same procedure, present them as corroborating variants (reuse the STEP-2
 corroboration ranking), do not merge step-lists positionally.
@@ -64,7 +64,7 @@ A read-time projection (sibling of STEP-2 `Aggregation`), NOT stored:
 1. resolve the query's entity (via synonymy-coherent nodes);
 2. gather its `has_step`/`requires_tool`/`applies_to` edges, **scope-enforced** (edge +
    both endpoints, exactly as the corroboration query);
-3. group by `origin`, order steps by `step_index` within origin;
+3. group by `origin`, order steps by `step_ordinal` within origin;
 4. attach each step's citation (source node) — every emitted step is **citable**;
 5. compute a **coverage descriptor** for the gate (§3): which intent slots are filled, by
    how many independent origins, at what reliability, whether any dependency watermark is
@@ -147,8 +147,9 @@ later proposal on the same substrate. This epic ships around the gate.
 
 ## Open questions for the spike
 
-- Does `step_index` live cleanly in the edge property map, or does ordered-step aggregation
-  need an index the current schema can't express (→ the `procedure`-kind fallback)?
+- ~~Does `step_index` live cleanly in the edge property map?~~ **Resolved (2026-07-05,
+  §1):** it is a dedicated nullable `step_ordinal` edge column (schema v6), not a
+  property-map entry; the `procedure`-kind fallback stays unneeded.
 - Stage-1 "intent slots": how are a query's required slots derived cheaply (a light intent
   classifier vs the retrieval shape itself)?
 - Stage-2 model choice + the confidence threshold that keeps false-serve ~0 without
