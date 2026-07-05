@@ -114,6 +114,10 @@ defmodule Swarm.Graph.Store do
     reliability = Keyword.get(opts, :reliability, 1.0)
     origin = Keyword.get(opts, :origin, provenance)
     evidence_kind = Keyword.get(opts, :evidence_kind, "observation")
+    # ADR-17: a `has_step` edge's position in its procedure (NULL for every other
+    # edge — enforced here at the write boundary, not just by convention). Set only
+    # on first insert, like weight/reliability.
+    step_ordinal = if type == "has_step", do: Keyword.get(opts, :step_ordinal), else: nil
 
     Repo.transaction(fn ->
       # swarm ADR-4: enforce the contract at the write boundary — type/scope
@@ -136,7 +140,8 @@ defmodule Swarm.Graph.Store do
         {:error, reason} -> Repo.rollback({:contract, reason})
       end
 
-      edge_id = upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind)
+      edge_id =
+        upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind, step_ordinal)
 
       case record_event(edge_id, provenance, origin) do
         :new_origin ->
@@ -468,22 +473,23 @@ defmodule Swarm.Graph.Store do
           String.t(),
           float(),
           float(),
-          String.t()
+          String.t(),
+          integer() | nil
         ) ::
           integer()
-  defp upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind) do
-    # evidence_kind is set on first insert (like weight/reliability); the no-op
-    # DO UPDATE keeps the original on reinforcement.
+  defp upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind, step_ordinal) do
+    # evidence_kind + step_ordinal are set on first insert (like weight/reliability);
+    # the no-op DO UPDATE keeps the original on reinforcement.
     sql = """
-    INSERT INTO edge (src, dst, type, visibility_scope, weight, reliability, evidence_kind, seen_count)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+    INSERT INTO edge (src, dst, type, visibility_scope, weight, reliability, evidence_kind, step_ordinal, seen_count)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
     ON CONFLICT (src, type, dst, visibility_scope)
     DO UPDATE SET last_seen = edge.last_seen
     RETURNING id
     """
 
     %{rows: [[id]]} =
-      Repo.query!(sql, [src, dst, type, scope, weight, reliability, evidence_kind])
+      Repo.query!(sql, [src, dst, type, scope, weight, reliability, evidence_kind, step_ordinal])
 
     id
   end

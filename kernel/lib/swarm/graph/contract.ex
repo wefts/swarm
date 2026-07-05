@@ -32,7 +32,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 5
+  @schema_version 6
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/
