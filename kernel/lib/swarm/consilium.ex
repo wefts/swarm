@@ -295,12 +295,15 @@ defmodule Swarm.Consilium do
   end
 
   defp judge_system do
-    ~s|You are a synthesis judge. Combine the panel answers into ONE answer | <>
-      ~s|supported by the grounding; drop unsupported claims. Set "supported" to | <>
-      ~s|true ONLY if the grounding actually contains the answer; set it to false | <>
-      ~s|if the grounding does not answer the question (do not guess). Respond as | <>
-      ~s|strict JSON only: {"answer": string, "confidence": number between 0 and | <>
-      ~s|1, "supported": boolean}.|
+    ~s|You are a strict synthesis judge. Combine the panel answers into ONE answer | <>
+      ~s|that the grounding SUPPORTS; drop any claim the grounding does not support, and | <>
+      ~s|if a panel answer contradicts the grounding, correct it to the grounded value. | <>
+      ~s|Set "supported" to true ONLY if the grounding directly and unambiguously answers | <>
+      ~s|the EXACT question asked. Set it to false if: the grounding does not address the | <>
+      ~s|question, answers only a different/partial case than asked, or gives CONFLICTING | <>
+      ~s|answers with no way to resolve which is correct. Never guess from outside the | <>
+      ~s|grounding. Respond as strict JSON only: {"answer": string, "confidence": number | <>
+      ~s|between 0 and 1, "supported": boolean}.|
   end
 
   defp judge_prompt(query, grounding, takes) do

@@ -74,15 +74,15 @@ defmodule Swarm.Consilium.Calibration do
       panel_answer: "William Shakespeare",
       supported: false
     },
-    # partial — only part of the asked thing is in the grounding
+    # absent — the grounding answers a DIFFERENT day than asked (Saturday, not Sunday)
     %{
-      id: "partial-weekend-hours",
-      query: "What are the weekend opening hours?",
+      id: "absent-sunday-hours",
+      query: "What are the office opening hours on Sundays?",
       grounding: "The office opens at 9am on Saturdays.",
-      panel_answer: "9am on Saturdays and Sundays.",
+      panel_answer: "9am on Sundays.",
       supported: false
     },
-    # conflicting — grounding gives two answers, no resolution
+    # conflicting — grounding gives two irreconcilable answers, no resolution ⇒ NOT supported
     %{
       id: "conflicting-version",
       query: "Which version is currently deployed?",
@@ -90,13 +90,15 @@ defmodule Swarm.Consilium.Calibration do
       panel_answer: "Version 2.",
       supported: false
     },
-    # contradicts — the panel answer contradicts the grounding
+    # corrects-panel — the panel answer is WRONG but the grounding DOES answer the question;
+    # the judge must synthesize the GROUNDED value (8080) and mark supported=true (the
+    # `supported` flag is about the grounding answering the question, not the panel's answer).
     %{
-      id: "contradicts-port",
+      id: "corrects-panel-to-grounded",
       query: "Which port does the service listen on?",
       grounding: "The service listens on port 8080.",
       panel_answer: "Port 8443.",
-      supported: false
+      supported: true
     },
     # absent-empty — grounding is off-topic; the honest answer is not-found
     %{
