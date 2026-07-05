@@ -1,5 +1,5 @@
 ---
-status: in-build (substrate shipped 2026-07-05; tier-gate DESIGNED — council 2026-07-05, board/research/tier-gate-blackboard.md; prerequisites §6.3 next, then build)
+status: in-build (substrate + tier-gate BUILT 2026-07-05, OFF by default; NEXT = qa-gold curation + measurement + go/no-go council to enable)
 adr: workspace ADR-17 (Accepted 2026-07-04)
 owns: swarm kernel — procedure representation, aggregation view, tier-routing gate; hive — glpi-agent oracle connector (later phase)
 supersedes: nothing (composes ADR-13 evidential origin + the shipped STEP-2 aggregation; overrides the charter's glpi-first bootstrap lean)
@@ -231,17 +231,18 @@ later proposal on the same substrate. This epic ships around the gate.
 3. **Prerequisites before ANY gate wiring** (residuals card + council Correction 3):
    watermark/GC ghost-purge + `has_generation_collision?` computed in `Procedure.steps/3` +
    two-generation regression test; opaque-origin citation tokens (residual #1); LLM-confirm
-   prompt-injection hardening (residual #4).
-4. `%CoverageDescriptor{}` + `Coverage.describe/3` over `Procedure.steps` + `entity_profile`
-   (pure, deterministic, the `blockers` list) — TDD, no wiring.
-5. The typed fail-closed machine (§3): `RawCoverage → validate/1 → ValidatedCoverage →
-   render/1` + the property / mutation / golden suite.
-6. Stage-2 small-LLM entailment **veto** (injectable like the synonymy confirm) — DAY 1, not
-   deferred (Correction 1); YES/NO, escalate on anything but strict YES.
-7. Wire `Gate.sufficient?/2` into `Core.ask/2`'s `:escalate` interception; `GateAudit`
-   telemetry + the 1500ms circuit-breaker.
-8. Measure on curated + adversarial `qa.json`: false-serve (~0 hard gate) + needless-escalation
-   + latency p50/p95 + blocker distribution. **Council go/no-go on the two numbers.**
+   prompt-injection hardening (residual #4). **[DONE]**
+4. `Swarm.WorldMap.Coverage.describe/3` (deterministic `%Descriptor{}`, the `blockers` list,
+   opaque citations) — pure, TDD. **[DONE]**
+5. The typed fail-closed machine (§3): `%Descriptor{} → validate/1 → %Validated{}` — a
+   `Validated` is mintable ONLY blocker-free; the fail-closed property sweep. **[DONE]**
+6. `Swarm.WorldMap.Gate.sufficient?/1` + the Stage-2 small-LLM entailment **veto** (injectable,
+   DAY 1, veto-only) + evidence-closed `render/1` + `%Audit{}`. **[DONE]**
+7. Wired into `Core.ask/2`'s `:escalate` interception, **OFF by default** (config/opts gated);
+   `GateAudit` telemetry + the 1500ms NOLINK-task circuit-breaker + fail-closed DB-probe. **[DONE]**
+8. **[NEXT]** Curate `qa.json` (+ the adversarial procedure suite) → measure false-serve (~0
+   hard gate) + needless-escalation + latency p50/p95 + blocker distribution → **council
+   go/no-go on the two numbers, then flip the config flag to enable live.**
 9. glpi bootstrap (§4 Phase 2).
 10. Gate-7 end-to-end: answer-rate + accuracy + **latency** on the curated set,
     before/after; council go/no-go on the two gate rates (§3).
