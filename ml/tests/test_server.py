@@ -145,7 +145,9 @@ def test_generate_body_pins_residency_and_caps_output(monkeypatch) -> None:
         "http://x", "m", "p", "", False, keep_alive="-1", num_predict=256
     )
     assert out == "ok"
-    assert captured["body"]["keep_alive"] == "-1"
+    # "-1" must reach Ollama as the NUMBER -1, not the string "-1" (a string "-1" is not a
+    # valid Go duration → HTTP 400). A real duration string passes through unchanged.
+    assert captured["body"]["keep_alive"] == -1
     assert captured["body"]["options"] == {"num_predict": 256}
 
 
@@ -160,7 +162,7 @@ def test_generate_no_options_when_num_predict_zero(monkeypatch) -> None:
     server_mod._call_ollama_generate(
         "http://x", "m", "p", "", False, keep_alive="5m", num_predict=0
     )
-    assert captured["body"]["keep_alive"] == "5m"
+    assert captured["body"]["keep_alive"] == "5m"  # a real duration passes through as a string
     assert "options" not in captured["body"]
 
 
@@ -173,7 +175,7 @@ def test_embed_body_pins_residency(monkeypatch) -> None:
 
     monkeypatch.setattr(server_mod.urllib.request, "urlopen", fake_urlopen)
     server_mod._call_ollama("http://x", "bge-m3", ["hi"], keep_alive="-1")
-    assert captured["body"]["keep_alive"] == "-1"
+    assert captured["body"]["keep_alive"] == -1
 
 
 def test_config_defaults_pin_residency_and_cap(monkeypatch) -> None:

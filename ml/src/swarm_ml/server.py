@@ -31,6 +31,20 @@ class OllamaGenerateError(Exception):
     """Ollama was unreachable or returned an unusable generation response."""
 
 
+def _keep_alive(raw: str) -> object:
+    """Coerce a keep_alive config value to what Ollama accepts.
+
+    Ollama takes keep_alive as a NUMBER (seconds; -1 = forever, 0 = unload now) OR a Go
+    DURATION string ("10m", "24h"). A bare integer-looking STRING ("-1", "300") is NOT a
+    valid duration and returns HTTP 400 — so send integer-looking values as an int and pass
+    real durations through as a string.
+    """
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
 def _call_ollama(
     base_url: str, model: str, texts: list[str], keep_alive: str = "-1"
 ) -> list[list[float]]:
@@ -40,7 +54,9 @@ def _call_ollama(
     transport or shape problem — the caller decides the gRPC status. `keep_alive`
     pins the embedder resident (no cold-load tax on the retrieval/disagreement path).
     """
-    payload = json.dumps({"model": model, "input": texts, "keep_alive": keep_alive}).encode("utf-8")
+    payload = json.dumps(
+        {"model": model, "input": texts, "keep_alive": _keep_alive(keep_alive)}
+    ).encode("utf-8")
     req = urllib.request.Request(
         f"{base_url}/api/embed",
         data=payload,
@@ -83,7 +99,7 @@ def _call_ollama_generate(
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": keep_alive,
+        "keep_alive": _keep_alive(keep_alive),
     }
     if system:
         body["system"] = system
