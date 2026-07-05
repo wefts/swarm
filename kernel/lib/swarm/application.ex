@@ -20,7 +20,11 @@ defmodule Swarm.Application do
           Swarm.Ingest.Queue,
           Swarm.Plugins.Registry,
           # Gate (Domain 5): cost telemetry counters.
-          Swarm.Gate.Telemetry
+          Swarm.Gate.Telemetry,
+          # ADR-17 tier-gate: run the (LLM-bearing) sufficiency check under a
+          # nolink task so a crash/timeout degrades to escalate, never taking the
+          # ask process down (codex review).
+          {Task.Supervisor, name: Swarm.WorldMap.GateTaskSupervisor}
         ]
 
     # one_for_one: a child crash restarts only that child — graceful degradation,

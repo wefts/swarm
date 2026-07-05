@@ -13,6 +13,9 @@ defmodule Swarm.Core do
 
   alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Aggregation, Neighborhood, Retrieval}
+  alias Swarm.WorldMap
+
+  require Logger
 
   @default_scopes ["public"]
   @search_limit 10
@@ -418,6 +421,19 @@ defmodule Swarm.Core do
     # grouped by canonical predicate + corroboration-ranked, scope-enforced — so a
     # "what is X" answer synthesizes across the corpus, not just whatever chunk landed.
     profile = Aggregation.entity_profile(query, scopes)
+
+    # Tier-routing gate (ADR-17 §3, Fork B): try to answer from the pre-built world-map
+    # structure BEFORE paying the consilium. Fail-closed + circuit-broken — a served
+    # answer is only ever backed by current, citable structure; anything else (and any
+    # gate slowness) falls through to the consilium exactly as before. OFF by default
+    # (config-gated) until the false-serve/needless-escalation council go/no-go.
+    case try_structured_gate(query, scopes, hits, profile, opts) do
+      {:serve, answer} -> answer
+      :escalate -> deliberate(query, hits, base_status, scopes, profile, opts)
+    end
+  end
+
+  defp deliberate(query, hits, base_status, scopes, profile, opts) do
     grounding = build_grounding(profile, hits)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
@@ -434,6 +450,101 @@ defmodule Swarm.Core do
         # quarantined low-confidence, never raw panel text. Reason logged, not leaked.
         error_result({:escalation_failed, reason}, "escalate")
     end
+  end
+
+  # --- ADR-17 tier-routing gate (Fork B) wiring ------------------------------
+
+  # Never let the gate make an ask SLOWER than pure escalation (spec §3, gemini's
+  # sink-risk): the gate runs under a hard time budget; a timeout or crash escalates,
+  # so the worst case is (budget + consilium), capped — never an unbounded double-pay.
+  @gate_breaker_ms 1500
+
+  @spec try_structured_gate(String.t(), [String.t()], [hit()], Aggregation.profile(), keyword()) ::
+          {:serve, answer()} | :escalate
+  defp try_structured_gate(query, scopes, hits, profile, opts) do
+    if tier_gate_enabled?(opts) do
+      descriptor =
+        WorldMap.Coverage.describe(query, scopes,
+          candidate_keys: hit_keys(hits),
+          profile: profile
+        )
+
+      run_gate(descriptor, opts)
+    else
+      :escalate
+    end
+  rescue
+    # Fail-closed: the coverage probe (`describe` runs `Procedure.steps` DB queries in
+    # THIS process — outside the breaker task, for Ecto connection ownership) must never
+    # raise into the ask; any error degrades to the consilium (codex review).
+    e ->
+      Logger.warning("world-map gate: coverage probe failed (#{inspect(e)}) — escalating")
+      :escalate
+  end
+
+  # Run the (LLM-bearing) sufficiency check under a NOLINK task bounded to the breaker:
+  # a timeout OR a crash surfaces as `{:exit, _}`/`nil` here and degrades to escalate — so
+  # a slow/crashing gate never takes the ask process down (async_nolink, not async) and
+  # never double-pays gate + consilium unbounded (codex review + gemini's sink-risk).
+  defp run_gate(descriptor, opts) do
+    gate_opts = Keyword.take(opts, [:entail_fun])
+
+    task =
+      Task.Supervisor.async_nolink(WorldMap.GateTaskSupervisor, fn ->
+        WorldMap.Gate.sufficient?(descriptor, gate_opts)
+      end)
+
+    case Task.yield(task, @gate_breaker_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:serve, %WorldMap.Gate.Answer{} = answer, audit}} ->
+        log_gate(audit)
+        {:serve, structured_answer(answer)}
+
+      {:ok, {:escalate, audit}} ->
+        log_gate(audit)
+        :escalate
+
+      _timeout_or_crash ->
+        Logger.info(
+          "world-map gate: circuit-break (>#{@gate_breaker_ms}ms or crash) — escalating"
+        )
+
+        :escalate
+    end
+  end
+
+  # Map the gate's evidence-closed answer onto the Core `answer()` shape. Citations are
+  # the gate's OPAQUE labels (no source identity) wrapped as `citation()`.
+  @spec structured_answer(WorldMap.Gate.Answer.t()) :: answer()
+  defp structured_answer(%WorldMap.Gate.Answer{} = a) do
+    %{
+      answer: a.text,
+      confidence: 0.85,
+      tier: "structured",
+      status: :found,
+      citations: Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
+    }
+  end
+
+  # Candidate entity keys to probe for procedures — the retrieval hits' keys, bounded.
+  @spec hit_keys([hit()]) :: [String.t()]
+  defp hit_keys(hits), do: hits |> Enum.map(& &1.key) |> Enum.uniq() |> Enum.take(8)
+
+  # OFF by default (config `:swarm, :tier_gate, enabled: true`); `opts[:tier_gate]`
+  # overrides per-call (tests, shadow measurement). Until the go/no-go council, wiring
+  # the gate in is behaviour-neutral live.
+  @spec tier_gate_enabled?(keyword()) :: boolean()
+  defp tier_gate_enabled?(opts) do
+    Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
+  end
+
+  @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok
+  defp log_gate(%WorldMap.Gate.Audit{} = audit) do
+    Logger.info(
+      "world-map gate: #{audit.decision} intent=#{audit.intent} " <>
+        "blockers=#{inspect(audit.blockers)} stage2=#{inspect(audit.stage2)}"
+    )
+
+    :ok
   end
 
   # Confidence calibration (the lynchpin) — anchor the escalated answer's confidence

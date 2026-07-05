@@ -3,6 +3,7 @@ defmodule Swarm.CoreTest do
 
   alias Swarm.Core
   alias Swarm.Gate.Bands
+  alias Swarm.Graph.Store
 
   defp ingest_public_files do
     event = fn key ->
@@ -95,5 +96,80 @@ defmodule Swarm.CoreTest do
     assert a.tier == "escalate"
     assert a.confidence == 0.0
     assert a.citations == []
+  end
+
+  describe "ADR-17 tier-routing gate (Fork B) wire" do
+    defp seed_procedure do
+      p = Store.upsert_node("entity", "ldap password reset", scope: "public")
+      s1 = Store.upsert_node("concept", "open the self-service portal", scope: "public")
+      s2 = Store.upsert_node("concept", "choose a new password", scope: "public")
+
+      for {s, ord} <- [{s1, 1}, {s2, 2}] do
+        {:ok, _} =
+          Store.add_edge(p, s, "has_step", "wiki:reset",
+            scope: "public",
+            origin: "wiki:reset",
+            evidence_kind: "claim",
+            step_ordinal: ord,
+            source_node_id: p
+          )
+      end
+
+      p
+    end
+
+    # A retriever that surfaces the procedure entity so its key becomes a gate candidate.
+    defp proc_retriever(p) do
+      fn _q, _s, _o ->
+        {:ok, [%{id: p, type: "entity", key: "ldap password reset", score: 0.9}]}
+      end
+    end
+
+    defp consilium_stub do
+      fn _model, _prompt, opts ->
+        if Keyword.get(opts, :json),
+          do: {:ok, ~s({"answer": "consilium answer", "confidence": 0.8, "supported": true})},
+          else: {:ok, "panel take"}
+      end
+    end
+
+    test "serves a clean procedure from structure (tier=structured, consilium bypassed)" do
+      p = seed_procedure()
+
+      opts =
+        escalate_opts(consilium_stub()) ++
+          [retriever: proc_retriever(p), tier_gate: true, entail_fun: fn _q, _g -> true end]
+
+      a = Core.ask("how to reset the ldap password", opts)
+
+      assert a.tier == "structured"
+      assert a.status == :found
+      assert a.answer =~ "open the self-service portal"
+      assert a.answer =~ "choose a new password"
+      # opaque citation only — never the raw origin
+      assert Enum.all?(a.citations, &(&1.source == "structured"))
+      refute a.answer =~ "wiki"
+    end
+
+    test "entailment NO vetoes the serve ⇒ escalates to the consilium (near-miss guard)" do
+      p = seed_procedure()
+
+      opts =
+        escalate_opts(consilium_stub()) ++
+          [retriever: proc_retriever(p), tier_gate: true, entail_fun: fn _q, _g -> false end]
+
+      a = Core.ask("how to reset the ldap password", opts)
+      assert a.tier == "escalate"
+      assert a.answer == "consilium answer"
+    end
+
+    test "gate OFF by default ⇒ escalates even when structure exists (behaviour-neutral wire)" do
+      p = seed_procedure()
+      opts = escalate_opts(consilium_stub()) ++ [retriever: proc_retriever(p)]
+
+      a = Core.ask("how to reset the ldap password", opts)
+      assert a.tier == "escalate"
+      assert a.answer == "consilium answer"
+    end
   end
 end
