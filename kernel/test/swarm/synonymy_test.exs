@@ -125,4 +125,54 @@ defmodule Swarm.SynonymyTest do
       refute "Some Article" in Synonymy.forms("SSP", ["group"])
     end
   end
+
+  describe "expand_query/3 — query-time expansion (slice 2)" do
+    setup do
+      Store.upsert_node("concept", "SSP", scope: "group")
+      Store.upsert_node("concept", "Self Service Password", scope: "group")
+      {:ok, _} = Synonymy.link("SSP", "Self Service Password")
+      :ok
+    end
+
+    test "a query naming an acronym gains the canonical's surface tokens" do
+      out = Synonymy.expand_query("how do i reset my SSP", ["group"])
+      assert out =~ "Self Service Password"
+      assert out =~ "SSP"
+    end
+
+    test "case-insensitive match (query token 'ssp' finds node 'SSP')" do
+      assert Synonymy.expand_query("reset ssp today", ["group"]) =~ "Self Service Password"
+    end
+
+    test "no expansion when the query names no linked concept — unchanged" do
+      assert Synonymy.expand_query("how do i reset my laptop", ["group"]) ==
+               "how do i reset my laptop"
+    end
+
+    test "scope-enforced — a public-only reader gets no group synonym expansion" do
+      assert Synonymy.expand_query("reset my SSP", ["public"]) == "reset my SSP"
+    end
+
+    test "empty scopes ⇒ query unchanged (default-deny)" do
+      assert Synonymy.expand_query("reset my SSP", []) == "reset my SSP"
+    end
+
+    test "a REFUTED synonym edge (reward<0) no longer expands (code review)" do
+      # refute the synonym_of edge; retrieval read paths exclude reward<0
+      %{rows: [[eid]]} =
+        Swarm.Repo.query!("SELECT id FROM edge WHERE type = 'synonym_of' LIMIT 1")
+
+      Swarm.Graph.Store.set_reward(eid, -1.0)
+      assert Synonymy.expand_query("reset my SSP", ["group"]) == "reset my SSP"
+      refute Synonymy.forms("SSP", ["group"]) == ["SSP", "Self Service Password"]
+    end
+
+    test "a multi-word form already fully present is NOT re-added (code review)" do
+      # all tokens of "Self Service Password" already in the query → no re-add
+      out = Synonymy.expand_query("reset my Self Service Password now", ["group"])
+      # 'SSP' is the only form whose tokens aren't all present → it may be added;
+      # 'Self Service Password' must NOT be duplicated
+      assert out |> String.split() |> Enum.count(&(&1 == "Service")) == 1
+    end
+  end
 end

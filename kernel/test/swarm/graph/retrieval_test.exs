@@ -269,4 +269,47 @@ defmodule Swarm.Graph.RetrievalTest do
                expand: false
              )
   end
+
+  describe "concept-synonymy query expansion (ADR-17 slice 2)" do
+    setup do
+      # the canonical page's body uses the CORPUS's words, never the acronym
+      page = node!("Password Reset Guide", "group")
+      chunk!(page, 0, "Reset it via the Self Service Password portal", 0)
+      # the concept nodes + the reversible synonym link
+      Store.upsert_node("concept", "SSP", scope: "group")
+      Store.upsert_node("concept", "Self Service Password", scope: "group")
+      {:ok, _} = Swarm.Synonymy.link("SSP", "Self Service Password")
+      %{page: "Password Reset Guide"}
+    end
+
+    test "an acronym query reaches the canonical page ONLY with expansion on", %{page: page} do
+      # lexical-only (test env: dense off, native arm). Without expansion the acronym
+      # 'SSP' appears in no chunk → miss.
+      assert %{status: :not_found} =
+               Retrieval.search("how do I use SSP", ["group"],
+                 dense: false,
+                 expand: false,
+                 synonym_expansion: false
+               )
+
+      # with expansion the query gains 'Self Service Password' → the chunk matches.
+      %{status: :found, memories: mems} =
+        Retrieval.search("how do I use SSP", ["group"],
+          dense: false,
+          expand: false,
+          synonym_expansion: true
+        )
+
+      assert page in keys(mems)
+    end
+
+    test "expansion is scope-safe — a public-only asker gets no group synonym, no page" do
+      assert %{status: :not_found} =
+               Retrieval.search("how do I use SSP", ["public"],
+                 dense: false,
+                 expand: false,
+                 synonym_expansion: true
+               )
+    end
+  end
 end

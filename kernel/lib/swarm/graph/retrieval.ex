@@ -95,8 +95,17 @@ defmodule Swarm.Graph.Retrieval do
         true -> nil
       end
 
+    # Concept-synonymy query expansion (ADR-17 substrate): the LEXICAL/title arm sees
+    # the user's query augmented with the synonym surface forms of any concept it names
+    # (so "SSP" also matches "Self Service Password" chunks); the dense arm above
+    # already embedded the ORIGINAL NL query. Config/opt-gated + scope-enforced.
+    lex_query =
+      if synonym_expansion?(opts),
+        do: Swarm.Synonymy.expand_query(query, scopes),
+        else: query
+
     memories =
-      query
+      lex_query
       |> fused_chunks(scopes, candidates, k, qvec, lex_w, dense_w)
       |> group_by_node(spans, floor, k, title_w)
       |> Enum.sort_by(& &1.score, :desc)
@@ -472,6 +481,16 @@ defmodule Swarm.Graph.Retrieval do
 
   defp configured_floor do
     Application.get_env(:swarm, :retrieval, [])[:floor] || @default_floor
+  end
+
+  # Concept-synonymy query expansion (ADR-17). Per-call `:synonym_expansion` overrides
+  # config; defaults ON (a query never resolves fewer forms than its literal self, so
+  # expansion only adds recall). Set false to A/B or in a corpus with no synonym edges.
+  defp synonym_expansion?(opts) do
+    case Keyword.get(opts, :synonym_expansion) do
+      nil -> Application.get_env(:swarm, :retrieval, [])[:synonym_expansion] != false
+      v -> v
+    end
   end
 
   # Weighted-RRF arm weights (Card 7 + ADR-0016). Per-call

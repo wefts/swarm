@@ -126,7 +126,7 @@ defmodule Swarm.Synonymy do
           SELECT other.id, comp.depth + 1
             FROM comp
             JOIN edge e
-              ON e.type = $1 AND e.visibility_scope = ANY($3)
+              ON e.type = $1 AND e.visibility_scope = ANY($3) AND e.reward >= 0
              AND (e.src = comp.id OR e.dst = comp.id)
             JOIN node other
               ON other.id = CASE WHEN e.src = comp.id THEN e.dst ELSE e.src END
@@ -142,6 +142,79 @@ defmodule Swarm.Synonymy do
       [] -> [key]
       keys -> Enum.uniq(keys)
     end
+  end
+
+  @doc """
+  Query-time expansion (slice 2): augment `query` with the synonym surface forms of
+  any concept it names, so a query in the USER's words also matches the CORPUS's words
+  (e.g. "reset my SSP" also matches "Self Service Password" chunks). A query token that
+  case-insensitively equals a `concept` node key contributes that concept's whole
+  `synonym_of` closure (scope-enforced, type-pure, depth-bounded). Forms already
+  present in the query (case-insensitive) are not re-added. Returns the augmented
+  string (the original unchanged when nothing expands) — feed it to the LEXICAL/title
+  arm only; the dense arm embeds the original NL query.
+  """
+  @spec expand_query(String.t(), [String.t()], keyword()) :: String.t()
+  def expand_query(query, scopes, opts \\ [])
+  def expand_query(query, [], _opts), do: query
+
+  def expand_query(query, scopes, opts) when is_binary(query) do
+    type = Keyword.get(opts, :type, "concept")
+    max_depth = Keyword.get(opts, :max_depth, 6)
+    toks = query_tokens(query)
+
+    if toks == [] do
+      query
+    else
+      %{rows: rows} =
+        Repo.query!(
+          """
+          WITH RECURSIVE seeds(id) AS (
+            SELECT n.id FROM node n
+             WHERE n.type = $1 AND n.scope = ANY($2) AND lower(n.key) = ANY($3)
+          ),
+          comp(id, depth) AS (
+            SELECT id, 0 FROM seeds
+            UNION
+            SELECT other.id, comp.depth + 1
+              FROM comp
+              JOIN edge e
+                ON e.type = 'synonym_of' AND e.visibility_scope = ANY($2) AND e.reward >= 0
+               AND (e.src = comp.id OR e.dst = comp.id)
+              JOIN node other
+                ON other.id = CASE WHEN e.src = comp.id THEN e.dst ELSE e.src END
+               AND other.type = $1 AND other.scope = ANY($2)
+             WHERE comp.depth < $4
+          )
+          SELECT DISTINCT n.key FROM comp JOIN node n ON n.id = comp.id
+          """,
+          [type, scopes, toks, max_depth]
+        )
+
+      present = MapSet.new(toks)
+
+      # A form is already present if ALL its tokens are in the query (handles a
+      # multi-word form like "Self Service Password" whose tokens are all present —
+      # avoids re-adding + overweighting it in the raw bm25 arm; code review).
+      added =
+        rows
+        |> List.flatten()
+        |> Enum.reject(fn k -> MapSet.subset?(MapSet.new(query_tokens(k)), present) end)
+
+      if added == [], do: query, else: query <> " " <> Enum.join(added, " ")
+    end
+  end
+
+  def expand_query(query, _scopes, _opts), do: query
+
+  # Distinct lowercased content tokens of a query (len >= 2), for concept-key matching.
+  @spec query_tokens(String.t()) :: [String.t()]
+  defp query_tokens(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.filter(&(String.length(&1) >= 2))
+    |> Enum.uniq()
   end
 
   # --- internals -------------------------------------------------------------
