@@ -183,7 +183,9 @@ def test_config_defaults_pin_residency_and_cap(monkeypatch) -> None:
     monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
     cfg = load_config()
     assert cfg.ollama_keep_alive == "-1"
-    assert cfg.ollama_num_predict == 512
+    # generous cap: thinking models (qwen3:14b) reason for many tokens before answering; a
+    # tight cap truncates them mid-thought and breaks extraction (learned live 2026-07-05).
+    assert cfg.ollama_num_predict == 4096
 
 
 @pytest.mark.integration
