@@ -148,6 +148,27 @@ defmodule Swarm.Consilium do
     _ -> 0.0
   end
 
+  @doc """
+  Run ONLY the judge stage on already-gathered panel `takes`: build the judge prompt,
+  budget-check it, run the judge, parse the verdict. A public seam for the
+  `supported`-calibration eval (`Swarm.Consilium.Calibration`) and the future adaptive
+  thin-judge — so both exercise the EXACT judge prompt + parse the live path uses. `opts`:
+  `:fleet`, `:generator`, `:token_ceiling`.
+  """
+  @spec judge_verdict(String.t(), String.t(), [take()], keyword()) ::
+          {:ok, %{answer: String.t(), confidence: float(), supported: boolean()}}
+          | {:error, term()}
+  def judge_verdict(query, grounding, takes, opts \\ []) do
+    fleet = Keyword.get_lazy(opts, :fleet, &Swarm.Config.consilium/0)
+    generator = Keyword.get(opts, :generator, &Generation.generate/3)
+    ceiling = Keyword.get(opts, :token_ceiling, Map.get(fleet, :token_ceiling, 32_000))
+    judge_prompt = judge_prompt(query, grounding, takes)
+
+    with :ok <- budget(judge_prompt, ceiling) do
+      judge(fleet.judge, judge_prompt, generator)
+    end
+  end
+
   @spec budget(String.t(), pos_integer()) :: :ok | {:error, Budget.over_budget()}
   defp budget(prompt, ceiling), do: Budget.ensure(prompt, ceiling)
 
