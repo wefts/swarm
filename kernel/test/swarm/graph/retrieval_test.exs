@@ -311,5 +311,25 @@ defmodule Swarm.Graph.RetrievalTest do
                  synonym_expansion: true
                )
     end
+
+    test "wiring: retrieval expands over ENTITY synonyms (the real-corpus type), not just concept" do
+      # the deployed corpus has NO concept nodes — synonyms live in entity/article.
+      # Prove Retrieval.search (default synonym_types) now reaches the canonical page
+      # via an ENTITY synonym, which the concept-only default would have missed.
+      page = node!("VPN Setup Guide", "group")
+      chunk!(page, 0, "Connect using the Virtual Private Network client", 0)
+      Store.upsert_node("entity", "VPN", scope: "group")
+      Store.upsert_node("entity", "Virtual Private Network", scope: "group")
+      {:ok, _} = Swarm.Synonymy.link("VPN", "Virtual Private Network", type: "entity")
+
+      %{status: :found, memories: mems} =
+        Retrieval.search("how do I use VPN", ["group"],
+          dense: false,
+          expand: false,
+          synonym_expansion: true
+        )
+
+      assert "VPN Setup Guide" in keys(mems)
+    end
   end
 end

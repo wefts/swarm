@@ -172,7 +172,12 @@ defmodule Swarm.Synonymy do
   def expand_query(query, [], _opts), do: query
 
   def expand_query(query, scopes, opts) when is_binary(query) do
-    type = Keyword.get(opts, :type, "concept")
+    # `:types` (list) is the corpus's concept-bearing node types — on this deployment
+    # concepts live in `entity`/`article`, not `concept` (live QA 2026-07-05). A
+    # synonym_of edge is within one type (link enforces it), so the closure stays
+    # in-type; only the SEED match spans the type set. `:type` (single) is kept for
+    # back-compat. Default `["concept"]`.
+    types = Keyword.get(opts, :types) || [Keyword.get(opts, :type, "concept")]
     max_depth = Keyword.get(opts, :max_depth, 6)
     toks = query_tokens(query)
 
@@ -184,7 +189,7 @@ defmodule Swarm.Synonymy do
           """
           WITH RECURSIVE seeds(id) AS (
             SELECT n.id FROM node n
-             WHERE n.type = $1 AND n.scope = ANY($2) AND lower(n.key) = ANY($3)
+             WHERE n.type = ANY($1) AND n.scope = ANY($2) AND lower(n.key) = ANY($3)
           ),
           comp(id, depth) AS (
             SELECT id, 0 FROM seeds
@@ -196,12 +201,12 @@ defmodule Swarm.Synonymy do
                AND (e.src = comp.id OR e.dst = comp.id)
               JOIN node other
                 ON other.id = CASE WHEN e.src = comp.id THEN e.dst ELSE e.src END
-               AND other.type = $1 AND other.scope = ANY($2)
+               AND other.type = ANY($1) AND other.scope = ANY($2)
              WHERE comp.depth < $4
           )
           SELECT DISTINCT n.key FROM comp JOIN node n ON n.id = comp.id
           """,
-          [type, scopes, toks, max_depth]
+          [types, scopes, toks, max_depth]
         )
 
       present = MapSet.new(toks)

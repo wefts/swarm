@@ -157,6 +157,21 @@ defmodule Swarm.SynonymyTest do
       assert Synonymy.expand_query("reset my SSP", []) == "reset my SSP"
     end
 
+    test "types: expands across the concept-bearing types present (entity/article), not just concept" do
+      # the real-corpus shape (live QA): the concept lives in `entity`, not `concept`
+      Store.upsert_node("entity", "VPN", scope: "group")
+      Store.upsert_node("entity", "Virtual Private Network", scope: "group")
+      {:ok, _} = Synonymy.link("VPN", "Virtual Private Network", type: "entity")
+
+      # default (concept) misses it; the multi-type set resolves it
+      assert Synonymy.expand_query("configure my VPN", ["group"]) == "configure my VPN"
+
+      assert Synonymy.expand_query("configure my VPN", ["group"],
+               types: ~w(concept entity article)
+             ) =~
+               "Virtual Private Network"
+    end
+
     test "a REFUTED synonym edge (reward<0) no longer expands (code review)" do
       # refute the synonym_of edge; retrieval read paths exclude reward<0
       %{rows: [[eid]]} =

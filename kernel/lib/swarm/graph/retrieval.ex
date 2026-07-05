@@ -101,7 +101,7 @@ defmodule Swarm.Graph.Retrieval do
     # already embedded the ORIGINAL NL query. Config/opt-gated + scope-enforced.
     lex_query =
       if synonym_expansion?(opts),
-        do: Swarm.Synonymy.expand_query(query, scopes),
+        do: Swarm.Synonymy.expand_query(query, scopes, types: synonym_types()),
         else: query
 
     memories =
@@ -491,6 +491,14 @@ defmodule Swarm.Graph.Retrieval do
       nil -> Application.get_env(:swarm, :retrieval, [])[:synonym_expansion] != false
       v -> v
     end
+  end
+
+  # The concept-bearing node types the synonym expansion resolves against. On this
+  # deployment concepts live in `entity`/`article` (enrichment + page titles), not a
+  # `concept` type — so the default spans all three (live QA 2026-07-05). Only LINKED
+  # forms expand, so a wide type set adds no noise beyond confirmed synonyms.
+  defp synonym_types do
+    Application.get_env(:swarm, :retrieval, [])[:synonym_types] || ~w(concept entity article)
   end
 
   # Weighted-RRF arm weights (Card 7 + ADR-0016). Per-call
