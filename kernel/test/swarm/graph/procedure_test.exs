@@ -118,6 +118,34 @@ defmodule Swarm.Graph.ProcedureTest do
     end
   end
 
+  describe "candidates/3 (ADR-17 #2 — direct procedure-entity lookup for the gate)" do
+    test "returns an entity that carries has_step edges and matches query terms" do
+      p = ent("password reset portal", "group")
+      s = step_node("open it", "group")
+      has_step(p, s, 1, "wiki:reset", "group")
+      has_step(p, step_node("do it", "group"), 2, "wiki:reset", "group")
+
+      assert "password reset portal" in Procedure.candidates("how do I reset my password", [
+               "group"
+             ])
+    end
+
+    test "does NOT return a plain entity with no has_step edges (even if the key matches)" do
+      ent("password facts", "group")
+      refute "password facts" in Procedure.candidates("tell me password facts", ["group"])
+    end
+
+    test "scope-enforced + default-deny" do
+      p = ent("group procedure thing", "group")
+      has_step(p, step_node("x", "group"), 1, "w", "group")
+      has_step(p, step_node("y", "group"), 2, "w", "group")
+
+      assert Procedure.candidates("procedure thing", ["public"]) == []
+      assert Procedure.candidates("procedure thing", []) == []
+      refute "group procedure thing" in Procedure.candidates("nothing relevant here", ["group"])
+    end
+  end
+
   describe "has_generation_collision? (ADR-17 §2 Correction 3 — two-generation belt)" do
     test "a clean single-generation variant is NOT flagged" do
       p = ent("password reset", "group")

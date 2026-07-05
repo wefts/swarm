@@ -44,6 +44,65 @@ defmodule Swarm.Graph.Procedure do
         }
 
   @doc """
+  Procedure-CANDIDATE entity keys for a free-text query: entities that actually carry
+  ≥1 in-scope, non-refuted `has_step` edge AND whose key shares a significant term with
+  the query. The tier-gate probes these directly (ADR-17 #2) — generic content retrieval
+  ranks a key-only procedure entity poorly, so the gate would otherwise never see it.
+  Scope-enforced (edge + entity), bounded, ordered by term-overlap. `opts`: `:type`
+  (default `"entity"`), `:limit` (default 8).
+  """
+  @spec candidates(String.t(), [String.t()], keyword()) :: [String.t()]
+  def candidates(query, scopes, opts \\ [])
+
+  def candidates(_query, [], _opts), do: []
+
+  def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
+    type = Keyword.get(opts, :type, "entity")
+    limit = Keyword.get(opts, :limit, 8)
+    terms = query_terms(query)
+
+    if terms == [] do
+      []
+    else
+      likes = Enum.map(terms, &("%" <> &1 <> "%"))
+
+      %{rows: rows} =
+        Repo.query!(
+          """
+          SELECT ent.key,
+                 (SELECT count(*) FROM unnest($4::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
+            FROM node ent
+           WHERE ent.type = $1 AND ent.scope = ANY($2)
+             AND lower(ent.key) LIKE ANY($4::text[])
+             AND EXISTS (
+               SELECT 1 FROM edge e
+                WHERE e.src = ent.id AND e.type = 'has_step' AND e.reward >= 0
+                  AND e.visibility_scope = ANY($2) AND e.step_ordinal IS NOT NULL
+             )
+           ORDER BY overlap DESC, ent.key
+           LIMIT $3
+          """,
+          [type, scopes, limit, likes]
+        )
+
+      Enum.map(rows, fn [key, _overlap] -> key end)
+    end
+  end
+
+  # Significant query terms (lowercased, ≥3 chars, stopwords dropped) for key matching.
+  @stopwords ~w(the a an of to and or for with about how what which why who when where is
+                are was were do does did can could should would from your you my our this
+                that these those into out get set new)
+  @spec query_terms(String.t()) :: [String.t()]
+  defp query_terms(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+  end
+
+  @doc """
   The procedure `entity_key` describes, as per-origin ordered step variants (empty
   when the entity is absent/out-of-scope or has no ordered steps). `opts`: `:type`
   (default `"entity"`).

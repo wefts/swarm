@@ -12,7 +12,7 @@ defmodule Swarm.Core do
   """
 
   alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
-  alias Swarm.Graph.{Aggregation, Neighborhood, Retrieval}
+  alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
 
   require Logger
@@ -463,9 +463,14 @@ defmodule Swarm.Core do
           {:serve, answer()} | :escalate
   defp try_structured_gate(query, scopes, hits, profile, opts) do
     if tier_gate_enabled?(opts) do
+      # Candidate keys = the retrieval hits' keys UNION procedure-shaped entities the query
+      # names directly (`Procedure.candidates` — a key-only procedure entity ranks poorly in
+      # content retrieval, so the gate would otherwise never see it; ADR-17 #2).
+      candidate_keys = Enum.uniq(hit_keys(hits) ++ Procedure.candidates(query, scopes))
+
       descriptor =
         WorldMap.Coverage.describe(query, scopes,
-          candidate_keys: hit_keys(hits),
+          candidate_keys: candidate_keys,
           profile: profile
         )
 
