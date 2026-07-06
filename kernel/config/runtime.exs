@@ -110,8 +110,11 @@ if System.get_env("SWARM_TIER_GATE_ENABLED") == "true" do
   config :swarm, :tier_gate, enabled: true
 end
 
-if entail_model = System.get_env("SWARM_TIER_GATE_ENTAIL_MODEL") do
-  config :swarm, :tier_gate, entail_model: entail_model
+# NB: `if "" do` is TRUTHY in Elixir — an UNSET compose var arrives as "" and must be treated
+# as absent, else the gate gets an empty model name.
+case System.get_env("SWARM_TIER_GATE_ENTAIL_MODEL") do
+  m when is_binary(m) and m != "" -> config :swarm, :tier_gate, entail_model: m
+  _ -> :ok
 end
 
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
