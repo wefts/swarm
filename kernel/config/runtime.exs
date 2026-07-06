@@ -101,6 +101,19 @@ if er_vec = System.get_env("SWARM_ER_VEC_THRESHOLD") do
   config :swarm, :entity_resolution, vec_threshold: String.to_float(er_vec)
 end
 
+# ADR-17 tier-gate (Fork B): serve covered asks from pre-built structure before the
+# consilium. OFF unless EXPLICITLY enabled — a false-serve breaks trust, so it ships off
+# until the go/no-go (`board/todo/tier-gate-gonogo.md`) shows false_serve_rate ~0 (measured
+# on `Swarm.WorldMap.Gate.Calibration`). `SWARM_TIER_GATE_ENTAIL_MODEL` overrides the Stage-2
+# entail model (default gemma4:31b — the resident judge; fsr 0.0 / recall 1.0 on the eval).
+if System.get_env("SWARM_TIER_GATE_ENABLED") == "true" do
+  config :swarm, :tier_gate, enabled: true
+end
+
+if entail_model = System.get_env("SWARM_TIER_GATE_ENTAIL_MODEL") do
+  config :swarm, :tier_gate, entail_model: entail_model
+end
+
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
 # pg_search BM25 arm (`bm25`, the shipped default) and the retained native `ts_rank`
 # arm (`native`). Set `SWARM_LEXICAL_ENGINE=native` to roll back instantly at deploy
