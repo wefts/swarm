@@ -55,6 +55,7 @@ defmodule Swarm.WorldMap.Coverage do
     @enforce_keys [:query, :intent]
     defstruct query: nil,
               intent: :unknown,
+              procedure_name: nil,
               procedure_variants: [],
               entity_groups: [],
               blockers: []
@@ -62,6 +63,7 @@ defmodule Swarm.WorldMap.Coverage do
     @type t :: %__MODULE__{
             query: String.t(),
             intent: Swarm.WorldMap.Coverage.intent(),
+            procedure_name: String.t() | nil,
             procedure_variants: [map()],
             entity_groups: [map()],
             blockers: [Swarm.WorldMap.Coverage.blocker()]
@@ -76,13 +78,14 @@ defmodule Swarm.WorldMap.Coverage do
     opaque, leak-free source references.
     """
     @enforce_keys [:query, :intent, :atoms, :citations]
-    defstruct [:query, :intent, :atoms, :citations]
+    defstruct [:query, :intent, :atoms, :citations, name: nil]
 
     @type t :: %__MODULE__{
             query: String.t(),
             intent: :procedure | :entity_profile,
             atoms: [map()],
-            citations: [String.t()]
+            citations: [String.t()],
+            name: String.t() | nil
           }
   end
 
@@ -112,11 +115,12 @@ defmodule Swarm.WorldMap.Coverage do
     # not the union of all — different candidate entities are DIFFERENT procedures, so unioning
     # them would spuriously look "ambiguous". Ambiguity means multiple ORIGINS of the ONE
     # chosen procedure (handled in procedure_descriptor), never multiple distinct procedures.
-    variants = if cue?, do: first_procedure(candidate_keys, scopes, procedure_fun), else: []
+    chosen = if cue?, do: first_procedure(candidate_keys, scopes, procedure_fun), else: :none
 
     cond do
-      variants != [] ->
-        procedure_descriptor(query, variants)
+      match?({_name, [_ | _]}, chosen) ->
+        {name, variants} = chosen
+        procedure_descriptor(query, name, variants)
 
       # A procedure cue with NO clean variant must ESCALATE — it is NOT reclassified as
       # an entity ask (codex review): "how do I reset X" wants the PROCESS; serving
@@ -140,11 +144,12 @@ defmodule Swarm.WorldMap.Coverage do
   @spec validate(Descriptor.t()) :: {:ok, Validated.t()} | {:error, [blocker()]}
   def validate(%Descriptor{blockers: [_ | _] = blockers}), do: {:error, blockers}
 
-  def validate(%Descriptor{intent: :procedure, procedure_variants: [variant], query: q}) do
+  def validate(%Descriptor{intent: :procedure, procedure_variants: [variant], query: q} = d) do
     {:ok,
      %Validated{
        query: q,
        intent: :procedure,
+       name: d.procedure_name,
        atoms: variant.steps,
        citations: [variant.citation]
      }}
@@ -170,16 +175,16 @@ defmodule Swarm.WorldMap.Coverage do
   # The variants of the FIRST candidate entity (in ranked order) that has any ordered-step
   # variants — i.e. the best-matching procedure. Distinct later candidates are distinct
   # procedures, not extra variants of this one, so they are not mixed in.
-  defp first_procedure([], _scopes, _procedure_fun), do: []
+  defp first_procedure([], _scopes, _procedure_fun), do: :none
 
   defp first_procedure([key | rest], scopes, procedure_fun) do
     case procedure_fun.(key, scopes, []) do
       [] -> first_procedure(rest, scopes, procedure_fun)
-      variants -> variants
+      variants -> {key, variants}
     end
   end
 
-  defp procedure_descriptor(query, variants) do
+  defp procedure_descriptor(query, name, variants) do
     labelled = Enum.map(Enum.with_index(variants, 1), &label_variant/1)
     collision? = Enum.any?(variants, & &1.has_generation_collision?)
     stepless? = Enum.any?(variants, &(&1.steps == []))
@@ -195,6 +200,7 @@ defmodule Swarm.WorldMap.Coverage do
     %Descriptor{
       query: query,
       intent: :procedure,
+      procedure_name: name,
       procedure_variants: labelled,
       blockers: blockers
     }

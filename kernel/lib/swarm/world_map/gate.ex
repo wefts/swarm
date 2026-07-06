@@ -101,8 +101,11 @@ defmodule Swarm.WorldMap.Gate do
   # hits). Same evidence the answer would render, so the judge rules on exactly what
   # would be served.
   @spec grounding(Validated.t()) :: String.t()
-  defp grounding(%Validated{intent: :procedure, atoms: steps}) do
-    steps |> Enum.map_join("\n", fn s -> "#{s.ordinal}. #{s.key}" end)
+  defp grounding(%Validated{intent: :procedure, atoms: steps, name: name}) do
+    # Include WHAT the steps accomplish (the procedure name) — without it the entail judge
+    # sees bare steps and can't tell they answer the query, and over-vetoes (go/no-go tuning).
+    header = if name, do: "Procedure — #{name}:\n", else: ""
+    header <> Enum.map_join(steps, "\n", fn s -> "#{s.ordinal}. #{s.key}" end)
   end
 
   defp grounding(%Validated{intent: :entity_profile, atoms: groups}) do
@@ -148,9 +151,10 @@ defmodule Swarm.WorldMap.Gate do
   validated atoms + opaque citations — no raw hits, profiles, or origins.
   """
   @spec render(Validated.t()) :: Answer.t()
-  def render(%Validated{intent: :procedure, atoms: steps, citations: cits, query: _}) do
+  def render(%Validated{intent: :procedure, atoms: steps, citations: cits, name: name}) do
     body = steps |> Enum.map_join("\n", fn s -> "#{s.ordinal}. #{s.key}" end)
-    %Answer{text: "Steps:\n#{body}", citations: cits, intent: :procedure}
+    head = if name, do: "#{name}:\n", else: "Steps:\n"
+    %Answer{text: head <> body, citations: cits, intent: :procedure}
   end
 
   def render(%Validated{intent: :entity_profile, atoms: groups, citations: cits}) do

@@ -36,7 +36,7 @@ defmodule Swarm.WorldMap.GateTest do
 
   defp clean_procedure do
     Coverage.describe("how do I reset my password", ["group"],
-      candidate_keys: ["password reset"],
+      candidate_keys: ["reset password procedure"],
       procedure_fun: proc_fun([variant([step(1, "open portal"), step(2, "set password")])]),
       profile: profile([])
     )
@@ -50,6 +50,8 @@ defmodule Swarm.WorldMap.GateTest do
                Gate.sufficient?(clean_procedure(), entail_fun: always(true))
 
       assert ans.intent == :procedure
+      # the served answer + the entail grounding carry the procedure NAME (go/no-go tuning)
+      assert ans.text =~ "reset password procedure"
       assert ans.text =~ "1. open portal"
       assert ans.text =~ "2. set password"
       assert ans.citations == ["source-1"]
