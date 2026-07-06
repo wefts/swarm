@@ -22,11 +22,17 @@ _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 # 128GB unified memory). "-1" = pin indefinitely (Ollama semantics). Overridable per deploy.
 _DEFAULT_OLLAMA_KEEP_ALIVE = "-1"
 # Output cap: bound a runaway generation, but generously — the fleet has THINKING models
-# (e.g. qwen3:14b) that reason for hundreds–thousands of tokens BEFORE the answer; a tight cap
+# (e.g. qwen3:14b) that reason for hundreds-to-thousands of tokens BEFORE the answer; a tight cap
 # (e.g. 512) truncates them mid-thought (`done_reason:length`, empty `response`) and breaks
 # extraction/judging. 4096 leaves room for thinking + a full answer while still capping true
 # runaways. 0 disables the cap (Ollama default). Tunable per deploy (OLLAMA_NUM_PREDICT).
 _DEFAULT_OLLAMA_NUM_PREDICT = 4096
+# Context window for generation. A resident model allocates a KV cache sized to num_ctx, so a
+# model's huge DEFAULT context (e.g. gemma4:31b at 262144) wastes tens of GB when the escalation
+# grounding is budget-capped at ~32K tokens anyway. Pinning num_ctx to the real need slashes the
+# resident KV cache (keep_alive=-1 residency memory). 0 = leave the model default. Tunable
+# (OLLAMA_NUM_CTX). Must comfortably exceed prompt+num_predict (grounding<~8K + 4096 out ≪ 32K).
+_DEFAULT_OLLAMA_NUM_CTX = 32768
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +47,7 @@ class ServerConfig:
     ollama_base_url: str
     ollama_keep_alive: str
     ollama_num_predict: int
+    ollama_num_ctx: int
 
 
 def load_config() -> ServerConfig:
@@ -54,6 +61,7 @@ def load_config() -> ServerConfig:
         ollama_base_url=os.environ.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
         ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", _DEFAULT_OLLAMA_KEEP_ALIVE),
         ollama_num_predict=_env_int("OLLAMA_NUM_PREDICT", _DEFAULT_OLLAMA_NUM_PREDICT),
+        ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", _DEFAULT_OLLAMA_NUM_CTX),
     )
 
 

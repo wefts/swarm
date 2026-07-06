@@ -27,6 +27,7 @@ def _config() -> ServerConfig:
         ollama_base_url="http://localhost:11434",
         ollama_keep_alive="-1",
         ollama_num_predict=512,
+        ollama_num_ctx=32768,
     )
 
 
@@ -142,13 +143,14 @@ def test_generate_body_pins_residency_and_caps_output(monkeypatch) -> None:
 
     monkeypatch.setattr(server_mod.urllib.request, "urlopen", fake_urlopen)
     out = server_mod._call_ollama_generate(
-        "http://x", "m", "p", "", False, keep_alive="-1", num_predict=256
+        "http://x", "m", "p", "", False, keep_alive="-1", num_predict=256, num_ctx=32768
     )
     assert out == "ok"
     # "-1" must reach Ollama as the NUMBER -1, not the string "-1" (a string "-1" is not a
     # valid Go duration → HTTP 400). A real duration string passes through unchanged.
     assert captured["body"]["keep_alive"] == -1
-    assert captured["body"]["options"] == {"num_predict": 256}
+    # num_ctx sizes the KV cache to the real need (resident-memory saving)
+    assert captured["body"]["options"] == {"num_predict": 256, "num_ctx": 32768}
 
 
 def test_generate_no_options_when_num_predict_zero(monkeypatch) -> None:
@@ -181,11 +183,13 @@ def test_embed_body_pins_residency(monkeypatch) -> None:
 def test_config_defaults_pin_residency_and_cap(monkeypatch) -> None:
     monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
     monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
     cfg = load_config()
     assert cfg.ollama_keep_alive == "-1"
     # generous cap: thinking models (qwen3:14b) reason for many tokens before answering; a
     # tight cap truncates them mid-thought and breaks extraction (learned live 2026-07-05).
     assert cfg.ollama_num_predict == 4096
+    assert cfg.ollama_num_ctx == 32768
 
 
 @pytest.mark.integration

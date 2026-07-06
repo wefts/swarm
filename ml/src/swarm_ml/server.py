@@ -88,12 +88,14 @@ def _call_ollama_generate(
     json_mode: bool,
     keep_alive: str = "-1",
     num_predict: int = 0,
+    num_ctx: int = 0,
 ) -> str:
     """POST to Ollama `/api/generate`; return the response text. Fail loud.
 
     `keep_alive` pins the fleet model resident (kills the interactive cold-load tax);
     `num_predict` (>0) hard-caps output tokens (panel/judge are intermediate processors,
-    not chatbots — an uncapped generation is pure latency). ADR-17 #1.
+    not chatbots — an uncapped generation is pure latency); `num_ctx` (>0) sizes the KV
+    cache to the real need (a model's huge default context wastes resident memory). ADR-17 #1.
     """
     body: dict[str, object] = {
         "model": model,
@@ -105,8 +107,14 @@ def _call_ollama_generate(
         body["system"] = system
     if json_mode:
         body["format"] = "json"
+
+    options = {}
     if num_predict > 0:
-        body["options"] = {"num_predict": num_predict}
+        options["num_predict"] = num_predict
+    if num_ctx > 0:
+        options["num_ctx"] = num_ctx
+    if options:
+        body["options"] = options
 
     req = urllib.request.Request(
         f"{base_url}/api/generate",
@@ -152,6 +160,7 @@ class GeneratorService(embed_pb2_grpc.GeneratorServicer):
                 request.json,
                 keep_alive=cfg.ollama_keep_alive,
                 num_predict=cfg.ollama_num_predict,
+                num_ctx=cfg.ollama_num_ctx,
             )
         except OllamaGenerateError as exc:
             _LOG.error("generate failed: %s", exc)
