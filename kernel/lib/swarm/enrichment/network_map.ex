@@ -102,8 +102,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     "connects_site" => {~w(site tunnel), ~w(site tunnel)},
     # a tunnel terminates at an endpoint
     "terminates_at" => {~w(tunnel), ~w(gateway firewall host)},
-    # a tunnel/gateway CARRIES (reaches) a subnet — the ipsec "remote_subnets" relation (Phase-2)
-    "carries" => {~w(tunnel gateway), ~w(subnet)},
+    # a tunnel/gateway/cluster CARRIES a subnet — ipsec "remote_subnets" + kubespray pod/service CIDRs
+    "carries" => {~w(tunnel gateway cluster), ~w(subnet)},
     # an entity HAS an IP address (wiki inventory tables — public/private IP columns)
     "has_address" => {~w(host service gateway firewall cluster site), ~w(address)},
     # something is protected by a firewall
