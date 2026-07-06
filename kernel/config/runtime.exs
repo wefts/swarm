@@ -126,6 +126,14 @@ if System.get_env("SWARM_TIER_GATE_NETWORK_SERVE") == "true" do
   config :swarm, :tier_gate, network_serve: true
 end
 
+# Corroboration floor for the network serve path (default 2 = only multi-source-confirmed;
+# 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
+# the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
+case System.get_env("SWARM_TIER_GATE_NETWORK_MIN_CORROB") do
+  n when is_binary(n) and n != "" -> config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
+  _ -> :ok
+end
+
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
 # pg_search BM25 arm (`bm25`, the shipped default) and the retained native `ts_rank`
 # arm (`native`). Set `SWARM_LEXICAL_ENGINE=native` to roll back instantly at deploy

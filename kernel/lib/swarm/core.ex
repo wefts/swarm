@@ -477,6 +477,7 @@ defmodule Swarm.Core do
           candidate_keys: candidate_keys,
           network_keys: network_keys,
           network_serve: network_serve?(opts),
+          network_min_corroboration: network_min_corroboration(),
           profile: profile
         )
 
@@ -558,6 +559,13 @@ defmodule Swarm.Core do
       :network_serve,
       Application.get_env(:swarm, :tier_gate, [])[:network_serve] == true
     )
+  end
+
+  # Corroboration floor for the network serve path (config, default 2 = safe/narrow; staging runs
+  # 1 = wider, entail-veto-guarded). See `Coverage.describe`.
+  @spec network_min_corroboration() :: pos_integer()
+  defp network_min_corroboration do
+    Application.get_env(:swarm, :tier_gate, [])[:network_min_corroboration] || 2
   end
 
   @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok

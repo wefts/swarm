@@ -125,6 +125,10 @@ defmodule Swarm.WorldMap.Coverage do
     # The network serve path is OFF by default (like entity_serve): it must be calibrated
     # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. `network_serve: true` enables.
     network_serve = Keyword.get(opts, :network_serve, false)
+    # Corroboration floor for the network serve path: min distinct origins a fact needs to be
+    # servable. 2 = only multi-source-confirmed (safe-but-narrow); 1 = any ground-truth fact
+    # (wider — leans on the Stage-2 entail veto). Tunable per deploy.
+    network_min_corr = Keyword.get(opts, :network_min_corroboration, 2)
     net_cue? = Regex.match?(@network_cue, query)
     # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
     # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
@@ -152,7 +156,7 @@ defmodule Swarm.WorldMap.Coverage do
         %Descriptor{query: query, intent: :procedure, blockers: [:no_candidate]}
 
       network_serve and net_cue? ->
-        network_descriptor(query, network_keys, scopes, network_fun)
+        network_descriptor(query, network_keys, scopes, network_fun, network_min_corr)
 
       entity_serve and profile.groups != [] ->
         entity_descriptor(query, profile)
@@ -280,8 +284,8 @@ defmodule Swarm.WorldMap.Coverage do
   # safety choice (the entity_profile path false-served on single, loosely-matched claims):
   # uncorroborated topology escalates to the consilium. `:no_candidate` (no subject resolves) /
   # `:no_corroboration` (subject found but no ≥2-source facts) ⇒ escalate.
-  defp network_descriptor(query, network_keys, scopes, network_fun) do
-    case first_neighborhood(network_keys, scopes, network_fun) do
+  defp network_descriptor(query, network_keys, scopes, network_fun, min_corr) do
+    case first_neighborhood(network_keys, scopes, network_fun, min_corr) do
       {subject, facts} ->
         %Descriptor{query: query, intent: :network, network_subject: subject, network_facts: facts}
 
@@ -293,12 +297,12 @@ defmodule Swarm.WorldMap.Coverage do
     end
   end
 
-  # First candidate (ranked) whose corroborated (≥2-origin) neighborhood is non-empty.
-  defp first_neighborhood([], _scopes, _fun), do: :none
+  # First candidate (ranked) whose neighborhood (facts ≥ `min_corr` distinct origins) is non-empty.
+  defp first_neighborhood([], _scopes, _fun, _min_corr), do: :none
 
-  defp first_neighborhood([key | rest], scopes, fun) do
-    case fun.(key, scopes, min_corroboration: 2) do
-      [] -> first_neighborhood(rest, scopes, fun)
+  defp first_neighborhood([key | rest], scopes, fun, min_corr) do
+    case fun.(key, scopes, min_corroboration: min_corr) do
+      [] -> first_neighborhood(rest, scopes, fun, min_corr)
       facts -> {display_name(key), facts}
     end
   end
