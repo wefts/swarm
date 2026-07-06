@@ -125,9 +125,12 @@ defmodule Swarm.WorldMap.Gate do
   # The default cheap-LLM veto. Strict YES/NO; anything but a confident `sufficient:true`
   # escalates. The grounding is fenced as untrusted data (prompt-injection guard, mirrors
   # the synonymy confirm). Model is tunable; a small fast model is ideal (spec §3).
+  # Default entail model: lfm2.5:8b — small, fast (~360ms), already resident (panel), and it
+  # emits a VALID `{"sufficient": …}` under json:true. (qwen3:14b, a thinking model, returns an
+  # empty `{}` under json:true → always parses false → vetoes everything; measured.) Tunable.
   @spec default_entail(String.t(), String.t()) :: boolean()
   defp default_entail(query, grounding) do
-    model = Application.get_env(:swarm, :tier_gate, [])[:entail_model] || "qwen3:14b"
+    model = Application.get_env(:swarm, :tier_gate, [])[:entail_model] || "lfm2.5:8b"
 
     prompt =
       "QUESTION: #{query}\n\n" <>
