@@ -90,6 +90,46 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       assert NetworkMap.extract(body, gen_fun: gen(json)) == []
     end
 
+    test "drops a mis-typed relation↔kind signature (gateway hosted_on subnet)" do
+      body = "the gateway opnsense is hosted_on the lansitesur subnet"
+      # gateway hosted_on subnet is a real observed error — hosted_on object must be host/cluster
+      json =
+        ~s({"facts":[{"subject":"opnsense","subject_kind":"gateway","relation":"hosted_on","object":"lansitesur","object_kind":"subnet"}]})
+
+      assert NetworkMap.extract(body, gen_fun: gen(json)) == []
+    end
+
+    test "drops connects_site between hosts (must be site↔site)" do
+      body = "host hercules connects_site to host swnet"
+
+      json =
+        ~s({"facts":[{"subject":"hercules","subject_kind":"host","relation":"connects_site","object":"swnet","object_kind":"host"}]})
+
+      assert NetworkMap.extract(body, gen_fun: gen(json)) == []
+    end
+
+    test "keeps a well-typed fact (service hosted_on host)" do
+      body = "In the cluster, the icinga service is hosted on the lyderic node."
+
+      json =
+        ~s({"facts":[{"subject":"icinga","subject_kind":"service","relation":"hosted_on","object":"lyderic","object_kind":"host"}]})
+
+      assert [%{subject: "icinga", object: "lyderic"}] = NetworkMap.extract(body, gen_fun: gen(json))
+    end
+
+    test "alias_of requires matching endpoint kinds" do
+      body = "gw01 is an alias_of gw01.corp and both are hosts"
+
+      good =
+        ~s({"facts":[{"subject":"gw01","subject_kind":"host","relation":"alias_of","object":"gw01.corp","object_kind":"host"}]})
+
+      bad =
+        ~s({"facts":[{"subject":"gw01","subject_kind":"host","relation":"alias_of","object":"gw01.corp","object_kind":"subnet"}]})
+
+      assert [%{relation: "alias_of"}] = NetworkMap.extract(body, gen_fun: gen(good))
+      assert NetworkMap.extract(body, gen_fun: gen(bad)) == []
+    end
+
     test "drops a self-loop (same kind + same name)" do
       body = "core relates to core"
 

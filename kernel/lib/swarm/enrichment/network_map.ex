@@ -84,6 +84,30 @@ defmodule Swarm.Enrichment.NetworkMap do
   # A bare IP or CIDR is NOT a valid Phase-1 ENTITY name (macro-only — addresses wait for Phase-2).
   @address_shape ~r/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/
 
+  # Relation↔endpoint-kind signatures (measured hardening, 2026-07-06 sequential re-measure): each
+  # governed relation only makes sense between certain kinds. A fact whose endpoint kinds don't fit
+  # is DROPPED (a mis-typed edge is worse than a missing one — same conservative ethos). This
+  # catches the observed errors: `gateway hosted_on subnet` (should be in_subnet), `host
+  # connects_site host` (connects_site is site↔site). `{subj_kinds, obj_kinds}`.
+  @signatures %{
+    # container → contained
+    "contains" => {~w(site subnet cluster vlan), ~w(subnet host service vlan site)},
+    # a service/host/cluster runs ON a host/cluster (NOT a gateway on a subnet)
+    "hosted_on" => {~w(service host cluster), ~w(host cluster)},
+    # something routes VIA routing infrastructure (gateway/firewall/host-hop)
+    "routes_via" => {~w(subnet site host gateway cluster service), ~w(gateway firewall host)},
+    # egress OUT via a gateway/firewall
+    "egresses_via" => {~w(host subnet site cluster service), ~w(gateway firewall)},
+    # site/tunnel connects site/tunnel (site↔site connectivity) — symmetric
+    "connects_site" => {~w(site tunnel), ~w(site tunnel)},
+    # a tunnel terminates at an endpoint
+    "terminates_at" => {~w(tunnel), ~w(gateway firewall host)},
+    # something is protected by a firewall
+    "protected_by" => {~w(host subnet site service cluster), ~w(firewall)},
+    # identity: alias_of is between same-kind endpoints
+    "alias_of" => {:same_kind, :same_kind}
+  }
+
   @system "You extract a MACRO network-topology skeleton from a passage. Output STRICT JSON " <>
             "only, no prose: " <>
             ~s|{"facts":[{"subject":"gw-a","subject_kind":"gateway","relation":"routes_via","object":"fw-lille","object_kind":"firewall"}]}. | <>
@@ -248,9 +272,10 @@ defmodule Swarm.Enrichment.NetworkMap do
     end
   end
 
-  # A fact is kept ONLY if: relation is in the governed vocabulary; both kinds are governed; both
-  # endpoint names are non-blank, NOT bare addresses (macro-only), and verbatim-grounded in the
-  # passage (guards invented endpoints); and it is not a self-loop.
+  # A fact is kept ONLY if: relation is in the governed vocabulary; both kinds are governed; the
+  # relation↔endpoint-kind SIGNATURE fits (drops mis-typed edges like `gateway hosted_on subnet`);
+  # both endpoint names are non-blank, NOT bare addresses (macro-only), and verbatim-grounded in
+  # the passage (guards invented endpoints); and it is not a self-loop.
   @spec validate(map(), String.t()) :: fact() | nil
   defp validate(
          %{
@@ -268,6 +293,7 @@ defmodule Swarm.Enrichment.NetworkMap do
     o = String.trim(obj)
 
     if rel in @relations and sk in @kinds and ok in @kinds and
+         valid_signature?(rel, sk, ok) and
          valid_name?(s, passage) and valid_name?(o, passage) and
          not (sk == ok and String.downcase(s) == String.downcase(o)) do
       %{subject: s, subject_kind: sk, relation: rel, object: o, object_kind: ok}
@@ -277,6 +303,18 @@ defmodule Swarm.Enrichment.NetworkMap do
   end
 
   defp validate(_, _), do: nil
+
+  # Does the (relation, subject_kind, object_kind) triple fit the governed signature? Unknown
+  # relations (shouldn't reach here — `rel in @relations` gates first) pass. `:same_kind` relations
+  # (alias_of) require matching endpoint kinds.
+  @spec valid_signature?(String.t(), String.t(), String.t()) :: boolean()
+  defp valid_signature?(rel, sk, ok) do
+    case Map.get(@signatures, rel) do
+      {:same_kind, :same_kind} -> sk == ok
+      {subj_kinds, obj_kinds} -> sk in subj_kinds and ok in obj_kinds
+      nil -> true
+    end
+  end
 
   # A valid Phase-1 endpoint name: non-blank, not a bare IP/CIDR (addresses wait for Phase-2), and
   # near-verbatim present in the source passage.
