@@ -219,4 +219,50 @@ defmodule Swarm.WorldMap.CoverageTest do
       end
     end
   end
+
+  describe "describe/3 + validate/1 — network intent" do
+    # a fake Network.neighborhood/3: returns the configured facts (ignores args)
+    defp net_fun(facts), do: fn _key, _scopes, _opts -> facts end
+    defp net_fact(rel, obj, corr \\ 2), do: %{relation: rel, object: obj, object_kind: "subnet", corroboration: corr}
+
+    test "OFF by default: a network query without network_serve escalates (unknown intent)" do
+      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+            network_keys: ["net:tunnel:orbit"], network_fun: net_fun([net_fact("carries", "10.0.0.0/8")]))
+      assert d.intent == :unknown
+    end
+
+    test "serves a corroborated neighborhood when network_serve is on" do
+      facts = [net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")]
+
+      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+            network_serve: true, network_keys: ["net:tunnel:orbit"], network_fun: net_fun(facts))
+
+      assert d.intent == :network
+      assert d.network_subject == "tunnel orbit"
+      assert {:ok, %Validated{intent: :network, atoms: ^facts, name: "tunnel orbit"}} = Coverage.validate(d)
+    end
+
+    test "no candidate → :no_candidate → escalate" do
+      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+            network_serve: true, network_keys: [], network_fun: net_fun([]))
+      assert d.blockers == [:no_candidate]
+      assert {:error, [:no_candidate]} = Coverage.validate(d)
+    end
+
+    test "candidate but NO corroborated facts → :no_corroboration → escalate (fail-closed floor)" do
+      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+            network_serve: true, network_keys: ["net:tunnel:orbit"], network_fun: net_fun([]))
+      assert d.blockers == [:no_corroboration]
+      assert {:error, [:no_corroboration]} = Coverage.validate(d)
+    end
+
+    test "a PROCEDURE cue takes precedence over a network cue (intent split honored)" do
+      # 'configure the firewall' has both cues; procedure branch wins → not network
+      d = Coverage.describe("how do I configure the firewall", ["group"],
+            network_serve: true, network_keys: ["net:firewall:edge"], network_fun: net_fun([net_fact("protected_by", "x")]),
+            candidate_keys: [], procedure_fun: fn _, _, _ -> [] end)
+      assert d.intent == :procedure
+      assert d.blockers == [:no_candidate]
+    end
+  end
 end

@@ -103,4 +103,40 @@ defmodule Swarm.WorldMap.GateTest do
                Gate.sufficient?(d, entail_fun: always(true))
     end
   end
+
+  describe "network intent" do
+    defp net_desc(subject, facts) do
+      %Descriptor{
+        query: "what subnets does #{subject} carry",
+        intent: :network,
+        network_subject: subject,
+        network_facts:
+          Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "subnet", corroboration: 2} end),
+        blockers: []
+      }
+    end
+
+    test "serves a network neighborhood when the entail veto passes" do
+      d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}, {"carries", "10.129.0.0/16"}])
+
+      assert {:serve, %Answer{intent: :network, text: text, citations: cits}, %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "tunnel orbit"
+      assert text =~ "carries 10.128.0.0/16"
+      assert cits == ["corroboration:2"]
+    end
+
+    test "entail veto escalates (never serves the wrong-relation/entity)" do
+      d = net_desc("tunnel conduit", [{"terminates_at", "gateway peer"}])
+      assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
+               Gate.sufficient?(d, entail_fun: always(false))
+    end
+
+    test "an empty network neighborhood cannot mint a Validated (fail-closed)" do
+      d = %Descriptor{query: "q", intent: :network, network_facts: [], blockers: [:no_corroboration]}
+      assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
 end

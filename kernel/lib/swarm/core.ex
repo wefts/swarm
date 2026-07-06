@@ -468,10 +468,15 @@ defmodule Swarm.Core do
       # otherwise never see it; ADR-17 #2), then the retrieval hits as fallback. Order matters:
       # the gate picks the best-matching procedure, so the targeted candidates lead.
       candidate_keys = Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits))
+      # Network-neighborhood candidates (net:<kind>:<name> entities matching the query) for the
+      # :network serve path — probed directly, like procedure candidates (ADR-17 world-map).
+      network_keys = Swarm.Graph.Network.candidates(query, scopes)
 
       descriptor =
         WorldMap.Coverage.describe(query, scopes,
           candidate_keys: candidate_keys,
+          network_keys: network_keys,
+          network_serve: network_serve?(opts),
           profile: profile
         )
 
@@ -541,6 +546,18 @@ defmodule Swarm.Core do
   @spec tier_gate_enabled?(keyword()) :: boolean()
   defp tier_gate_enabled?(opts) do
     Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
+  end
+
+  # The :network serve path is OFF by default (like entity_serve) — it needs its own calibration
+  # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. Config `:swarm, :tier_gate,
+  # network_serve: true` or `opts[:network_serve]` enables it.
+  @spec network_serve?(keyword()) :: boolean()
+  defp network_serve?(opts) do
+    Keyword.get(
+      opts,
+      :network_serve,
+      Application.get_env(:swarm, :tier_gate, [])[:network_serve] == true
+    )
   end
 
   @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok

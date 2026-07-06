@@ -43,4 +43,29 @@ defmodule Swarm.Graph.NetworkTest do
     assert [%{relation: "protected_by", src: "host/web01", dst: "firewall/fw-edge"}] = relations
     refute Enum.any?(relations, &(&1.relation == "is_a"))
   end
+
+  test "candidates/3 finds net entities matching a query term (with a relation edge)" do
+    node = src_node("group")
+    facts = [%{subject: "orbit", subject_kind: "tunnel", relation: "carries", object: "10.1.0.0/16", object_kind: "subnet"}]
+    NetworkMap.write(node, facts, "prov-c")
+
+    assert "net:tunnel:orbit" in Network.candidates("what does the orbit tunnel carry", ["group"])
+    assert Network.candidates("something unrelated entirely", ["group"]) == []
+    assert Network.candidates("orbit", []) == []
+  end
+
+  test "neighborhood/3 with min_corroboration filters to multi-origin facts" do
+    node = src_node("group")
+    facts = [%{subject: "orbit", subject_kind: "tunnel", relation: "carries", object: "10.2.0.0/16", object_kind: "subnet"}]
+    # single origin → seen_count 1
+    NetworkMap.write(node, facts, "prov-1", origin: "iac:repo")
+
+    assert Network.neighborhood("net:tunnel:orbit", ["group"], min_corroboration: 2) == []
+    assert [%{relation: "carries"}] = Network.neighborhood("net:tunnel:orbit", ["group"], min_corroboration: 1)
+
+    # second distinct origin on the SAME edge → seen_count 2 → now passes the ≥2 floor
+    NetworkMap.write(node, facts, "prov-2", origin: "wiki:corrob")
+    assert [%{relation: "carries", corroboration: 2}] =
+             Network.neighborhood("net:tunnel:orbit", ["group"], min_corroboration: 2)
+  end
 end

@@ -93,6 +93,96 @@ defmodule Swarm.Graph.Network do
     end)
   end
 
+  @stopwords ~w(the a an of to and or for with about how what which why who when where is are was
+                were do does did can could should would from your you my our this that these those
+                into out get set new list show tell me connected connect behind carried carry
+                carries contains contain hosted host route routes via terminates)
+
+  @doc """
+  Network-entity CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
+  in-scope `net:<kind>:<name>` entities whose name shares a significant term with the query AND
+  that carry ≥1 non-`is_a`, non-refuted relation edge. Ranked by term-overlap, bounded. The gate
+  probes these directly (like `Procedure.candidates/3`). `opts`: `:limit` (default 8).
+  """
+  @spec candidates(String.t(), [String.t()], keyword()) :: [String.t()]
+  def candidates(query, scopes, opts \\ [])
+  def candidates(_query, [], _opts), do: []
+
+  def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
+    limit = Keyword.get(opts, :limit, 8)
+    terms = query_terms(query)
+
+    if terms == [] do
+      []
+    else
+      likes = Enum.map(terms, &("%:" <> &1 <> "%"))
+
+      %{rows: rows} =
+        Repo.query!(
+          """
+          SELECT ent.key,
+                 (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
+            FROM node ent
+           WHERE ent.type = 'entity' AND ent.scope = ANY($1) AND ent.key LIKE 'net:%'
+             AND lower(ent.key) LIKE ANY($3::text[])
+             AND EXISTS (
+               SELECT 1 FROM edge e
+                WHERE e.src = ent.id AND e.type <> 'is_a' AND e.reward >= 0
+                  AND e.visibility_scope = ANY($1)
+             )
+           ORDER BY overlap DESC, ent.key
+           LIMIT $2
+          """,
+          [scopes, limit, likes]
+        )
+
+      Enum.map(rows, fn [key, _o] -> key end)
+    end
+  end
+
+  @doc """
+  The relation NEIGHBORHOOD of a network entity `key` (outgoing non-`is_a` edges), scope-enforced,
+  refuted excluded. Each fact carries its `corroboration` (distinct-origin `seen_count`). `opts`:
+  `:min_corroboration` (default 1) — the tier-gate passes 2 to serve ONLY multi-source-confirmed
+  topology (wiki∩IaC / cross-repo / live). Returns `[%{relation, object, object_kind, corroboration}]`.
+  """
+  @spec neighborhood(String.t(), [String.t()], keyword()) :: [map()]
+  def neighborhood(key, scopes, opts \\ [])
+
+  def neighborhood(_key, [], _opts), do: []
+
+  def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
+    min_corr = Keyword.get(opts, :min_corroboration, 1)
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT e.type, d.key, e.seen_count
+          FROM edge e
+          JOIN node s ON s.id = e.src
+          JOIN node d ON d.id = e.dst
+         WHERE s.key = $1 AND e.type <> 'is_a' AND e.reward >= 0
+           AND e.visibility_scope = ANY($2) AND d.scope = ANY($2) AND s.scope = ANY($2)
+           AND e.seen_count >= $3
+         ORDER BY e.seen_count DESC, e.type, d.key
+        """,
+        [key, scopes, min_corr]
+      )
+
+    Enum.map(rows, fn [type, dkey, seen] ->
+      %{relation: type, object: strip_ns(dkey), object_kind: decode_key(dkey).kind, corroboration: seen}
+    end)
+  end
+
+  @spec query_terms(String.t()) :: [String.t()]
+  defp query_terms(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+  end
+
   # `net:<kind>:<name>` → %{key, kind, name}. A malformed key degrades gracefully to kind "entity".
   @spec decode_key(String.t()) :: entity()
   defp decode_key(key) do

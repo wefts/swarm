@@ -32,10 +32,11 @@ defmodule Swarm.WorldMap.Coverage do
   """
 
   alias Swarm.Graph.Aggregation
+  alias Swarm.Graph.Network
   alias Swarm.Graph.Procedure
 
   @typedoc "What kind of structure, if any, cleanly covers the query."
-  @type intent :: :procedure | :entity_profile | :unknown
+  @type intent :: :procedure | :entity_profile | :network | :unknown
 
   @typedoc "Why the structure is insufficient to serve — any blocker ⇒ escalate."
   @type blocker ::
@@ -50,6 +51,13 @@ defmodule Swarm.WorldMap.Coverage do
   # necessary but NOT sufficient — a clean procedure variant must also exist in structure.
   @procedure_cue ~r/\b(how\s+(do|to|can|would|should)|steps?|procedure|reset|configure|set\s?up|install|enable|disable|troubleshoot|provision|deploy|restart|rotate)\b/i
 
+  # Query cue for a NETWORK-neighborhood ask ("what subnets does tunnel X carry", "what is behind
+  # firewall Y", "what is X connected to", "which cluster contains Z"). A network noun/relation is
+  # necessary but NOT sufficient — a resolvable, CORROBORATED subject must also exist in structure.
+  # Checked AFTER the procedure branch, so a how-to about network gear ("configure the firewall")
+  # stays a procedure ask.
+  @network_cue ~r/\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?)\b/i
+
   defmodule Descriptor do
     @moduledoc "Raw (unvalidated) coverage. Deterministic output of `Coverage.describe/3`."
     @enforce_keys [:query, :intent]
@@ -58,6 +66,8 @@ defmodule Swarm.WorldMap.Coverage do
               procedure_name: nil,
               procedure_variants: [],
               entity_groups: [],
+              network_subject: nil,
+              network_facts: [],
               blockers: []
 
     @type t :: %__MODULE__{
@@ -66,6 +76,8 @@ defmodule Swarm.WorldMap.Coverage do
             procedure_name: String.t() | nil,
             procedure_variants: [map()],
             entity_groups: [map()],
+            network_subject: String.t() | nil,
+            network_facts: [map()],
             blockers: [Swarm.WorldMap.Coverage.blocker()]
           }
   end
@@ -82,7 +94,7 @@ defmodule Swarm.WorldMap.Coverage do
 
     @type t :: %__MODULE__{
             query: String.t(),
-            intent: :procedure | :entity_profile,
+            intent: :procedure | :entity_profile | :network,
             atoms: [map()],
             citations: [String.t()],
             name: String.t() | nil
@@ -107,7 +119,13 @@ defmodule Swarm.WorldMap.Coverage do
   def describe(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     procedure_fun = Keyword.get(opts, :procedure_fun, &Procedure.steps/3)
     candidate_keys = Keyword.get(opts, :candidate_keys, [])
+    network_keys = Keyword.get(opts, :network_keys, [])
+    network_fun = Keyword.get(opts, :network_fun, &Network.neighborhood/3)
     profile = Keyword.get(opts, :profile) || Aggregation.entity_profile(query, scopes)
+    # The network serve path is OFF by default (like entity_serve): it must be calibrated
+    # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. `network_serve: true` enables.
+    network_serve = Keyword.get(opts, :network_serve, false)
+    net_cue? = Regex.match?(@network_cue, query)
     # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
     # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
     # query and serves the wrong facts. Only the (validated-safe) PROCEDURE path serves until
@@ -132,6 +150,9 @@ defmodule Swarm.WorldMap.Coverage do
       # entity facts about X would be a category mismatch. Honor the intent split.
       cue? ->
         %Descriptor{query: query, intent: :procedure, blockers: [:no_candidate]}
+
+      network_serve and net_cue? ->
+        network_descriptor(query, network_keys, scopes, network_fun)
 
       entity_serve and profile.groups != [] ->
         entity_descriptor(query, profile)
@@ -167,6 +188,17 @@ defmodule Swarm.WorldMap.Coverage do
        intent: :entity_profile,
        atoms: groups,
        citations: entity_citations(groups)
+     }}
+  end
+
+  def validate(%Descriptor{intent: :network, network_facts: [_ | _] = facts, query: q} = d) do
+    {:ok,
+     %Validated{
+       query: q,
+       intent: :network,
+       name: d.network_subject,
+       atoms: facts,
+       citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
      }}
   end
 
@@ -241,6 +273,43 @@ defmodule Swarm.WorldMap.Coverage do
 
   # An object is citable iff asserted by ≥1 evidential source (corroboration ≥ 1).
   defp citable?(object), do: Map.get(object, :corroboration, 0) >= 1
+
+  # The network-neighborhood descriptor. Resolves the FIRST (best-ranked) candidate net entity
+  # that has a CORROBORATED neighborhood (≥2 distinct origins — wiki∩IaC / cross-repo / live), and
+  # serves only those multi-source-confirmed facts. This corroboration floor is the fail-closed
+  # safety choice (the entity_profile path false-served on single, loosely-matched claims):
+  # uncorroborated topology escalates to the consilium. `:no_candidate` (no subject resolves) /
+  # `:no_corroboration` (subject found but no ≥2-source facts) ⇒ escalate.
+  defp network_descriptor(query, network_keys, scopes, network_fun) do
+    case first_neighborhood(network_keys, scopes, network_fun) do
+      {subject, facts} ->
+        %Descriptor{query: query, intent: :network, network_subject: subject, network_facts: facts}
+
+      :none when network_keys == [] ->
+        %Descriptor{query: query, intent: :network, blockers: [:no_candidate]}
+
+      :none ->
+        %Descriptor{query: query, intent: :network, blockers: [:no_corroboration]}
+    end
+  end
+
+  # First candidate (ranked) whose corroborated (≥2-origin) neighborhood is non-empty.
+  defp first_neighborhood([], _scopes, _fun), do: :none
+
+  defp first_neighborhood([key | rest], scopes, fun) do
+    case fun.(key, scopes, min_corroboration: 2) do
+      [] -> first_neighborhood(rest, scopes, fun)
+      facts -> {display_name(key), facts}
+    end
+  end
+
+  # `net:<kind>:<name>` → "<kind> <name>" for the served subject label (no raw key leak).
+  defp display_name(key) do
+    case String.split(key, ":", parts: 3) do
+      ["net", kind, name] -> kind <> " " <> name
+      _ -> key
+    end
+  end
 
   # Entity citations are corroboration COUNTS only (Aggregation deliberately never emits
   # a source identity — a count cannot leak which document asserted a claim).
