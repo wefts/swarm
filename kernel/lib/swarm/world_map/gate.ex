@@ -125,12 +125,22 @@ defmodule Swarm.WorldMap.Gate do
   # The default cheap-LLM veto. Strict YES/NO; anything but a confident `sufficient:true`
   # escalates. The grounding is fenced as untrusted data (prompt-injection guard, mirrors
   # the synonymy confirm). Model is tunable; a small fast model is ideal (spec §3).
-  # Default entail model: lfm2.5:8b — small, fast (~360ms), already resident (panel), and it
-  # emits a VALID `{"sufficient": …}` under json:true. (qwen3:14b, a thinking model, returns an
-  # empty `{}` under json:true → always parses false → vetoes everything; measured.) Tunable.
-  @spec default_entail(String.t(), String.t()) :: boolean()
-  defp default_entail(query, grounding) do
-    model = Application.get_env(:swarm, :tier_gate, [])[:entail_model] || "lfm2.5:8b"
+  defp default_entail(query, grounding), do: entail(query, grounding, [])
+
+  @doc """
+  The Stage-2 entailment check (public seam for the go/no-go calibration eval,
+  `Swarm.WorldMap.Gate.Calibration`). Returns `true` iff the cheap model judges the grounding
+  sufficient for the query. `opts`: `:model` (default config / `lfm2.5:8b`), `:system` (default
+  `@entail_system`). Model note: lfm2.5:8b is small, fast (~360ms), resident, and emits valid
+  `{"sufficient": …}` under json:true — qwen3:14b (thinking) returns an empty `{}` → always
+  false. Fail-closed: a non-YES / parse-fail / model error is `false` (escalate).
+  """
+  @spec entail(String.t(), String.t(), keyword()) :: boolean()
+  def entail(query, grounding, opts \\ []) do
+    model =
+      opts[:model] || Application.get_env(:swarm, :tier_gate, [])[:entail_model] || "lfm2.5:8b"
+
+    system = opts[:system] || @entail_system
 
     prompt =
       "QUESTION: #{query}\n\n" <>
@@ -140,7 +150,7 @@ defmodule Swarm.WorldMap.Gate do
     # json: true — CONSTRAIN the output to JSON so a thinking model (qwen3:14b) doesn't reason
     # for seconds (which would blow the gate's latency breaker and force an escalate); a
     # constrained YES/NO verdict returns in a few hundred ms on the resident fleet.
-    case Generation.generate(model, prompt, json: true, system: @entail_system) do
+    case Generation.generate(model, prompt, json: true, system: system) do
       {:ok, raw} -> parse_sufficient(raw)
       {:error, _} -> false
     end
