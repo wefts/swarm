@@ -115,7 +115,9 @@ defmodule Swarm.Graph.Network do
     if terms == [] do
       []
     else
-      likes = Enum.map(terms, &("%:" <> &1 <> "%"))
+      # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
+      # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
+      likes = Enum.map(terms, &("%" <> &1 <> "%"))
 
       %{rows: rows} =
         Repo.query!(
