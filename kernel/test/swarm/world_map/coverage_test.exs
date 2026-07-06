@@ -138,7 +138,7 @@ defmodule Swarm.WorldMap.CoverageTest do
   describe "describe/3 + validate/1 — entity_profile intent" do
     test "corroborated claim groups ⇒ served (counts as citations, no source identity)" do
       p = profile([group("is_a", [{"a load balancer", 2}]), group("runs_on", [{"k8s", 1}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p)
+      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
 
       assert %Descriptor{intent: :entity_profile, blockers: []} = d
 
@@ -151,7 +151,7 @@ defmodule Swarm.WorldMap.CoverageTest do
 
     test "zero-corroboration groups ⇒ no citable source ⇒ escalate" do
       p = profile([group("is_a", [{"guess", 0}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p)
+      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
 
       assert d.blockers == [:no_corroboration]
       assert {:error, [:no_corroboration]} = Coverage.validate(d)
@@ -161,7 +161,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       # a group mixing a corroborated object with a bare guess — only the citable one
       # survives into the validated atoms; the uncitable guess is never served.
       p = profile([group("is_a", [{"a load balancer", 2}, {"a guess", 0}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p)
+      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
 
       assert {:ok, %Validated{atoms: [g]}} = Coverage.validate(d)
       assert Enum.map(g.objects, & &1.object) == ["a load balancer"]
@@ -175,11 +175,19 @@ defmodule Swarm.WorldMap.CoverageTest do
           candidate_keys: ["postgres"],
           # even if a procedure_fun would return a variant, no cue ⇒ not probed
           procedure_fun: proc_fun([variant([step(1, "x")])]),
-          profile: p
+          profile: p,
+          entity_serve: true
         )
 
       assert d.intent == :entity_profile
       assert {:ok, %Validated{intent: :entity_profile}} = Coverage.validate(d)
+    end
+
+    test "entity coverage ESCALATES by default (entity_serve OFF — live false-serve guard)" do
+      p = profile([group("is_a", [{"a database", 3}])])
+      d = Coverage.describe("what is postgres", ["group"], profile: p)
+      assert d.intent == :unknown
+      assert {:error, [:unknown_intent]} = Coverage.validate(d)
     end
   end
 

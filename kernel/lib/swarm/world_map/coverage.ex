@@ -108,6 +108,11 @@ defmodule Swarm.WorldMap.Coverage do
     procedure_fun = Keyword.get(opts, :procedure_fun, &Procedure.steps/3)
     candidate_keys = Keyword.get(opts, :candidate_keys, [])
     profile = Keyword.get(opts, :profile) || Aggregation.entity_profile(query, scopes)
+    # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
+    # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
+    # query and serves the wrong facts. Only the (validated-safe) PROCEDURE path serves until
+    # the entity path is calibrated (its own go/no-go). `entity_serve: true` opts back in.
+    entity_serve = Keyword.get(opts, :entity_serve, false)
 
     cue? = Regex.match?(@procedure_cue, query)
 
@@ -128,7 +133,7 @@ defmodule Swarm.WorldMap.Coverage do
       cue? ->
         %Descriptor{query: query, intent: :procedure, blockers: [:no_candidate]}
 
-      profile.groups != [] ->
+      entity_serve and profile.groups != [] ->
         entity_descriptor(query, profile)
 
       true ->

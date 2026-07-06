@@ -84,7 +84,8 @@ defmodule Swarm.WorldMap.GateTest do
     test "corroborated entity coverage + entailment YES ⇒ SERVE (counts as citations)" do
       d =
         Coverage.describe("what is the ingress", ["group"],
-          profile: profile([group("is_a", [{"a load balancer", 2}])])
+          profile: profile([group("is_a", [{"a load balancer", 2}])]),
+          entity_serve: true
         )
 
       assert {:serve, %Answer{intent: :entity_profile} = ans, %Audit{decision: :serve}} =
