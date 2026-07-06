@@ -117,6 +117,15 @@ case System.get_env("SWARM_TIER_GATE_ENTAIL_MODEL") do
   _ -> :ok
 end
 
+# The :network serve path (topology neighborhoods) — OFF unless explicitly enabled, its OWN
+# go/no-go separate from the procedure gate. Calibrated on `Swarm.WorldMap.Gate.NetworkCalibration`
+# (fsr 0.0 / recall 1.0, gemma4:31b) + live-verified; serves only CORROBORATED (>=2-origin)
+# topology, so a false-serve stays unrepresentable. Widen the corroboration floor to 1 only after
+# floor-2 proves safe live.
+if System.get_env("SWARM_TIER_GATE_NETWORK_SERVE") == "true" do
+  config :swarm, :tier_gate, network_serve: true
+end
+
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
 # pg_search BM25 arm (`bm25`, the shipped default) and the retained native `ts_rank`
 # arm (`native`). Set `SWARM_LEXICAL_ENGINE=native` to roll back instantly at deploy
