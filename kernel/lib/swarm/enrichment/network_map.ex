@@ -64,7 +64,7 @@ defmodule Swarm.Enrichment.NetworkMap do
   # The governed Phase-1 relation vocabulary (macro-topology only). `is_a` is generated from a
   # fact's endpoint kinds, never asked of the model. `contains` subsumes in_subnet at macro
   # level; exact-address relations (has_address/resolves_to/CIDR identity) are DEFERRED to Phase-2.
-  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of)
+  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries)
   # Symmetric relations: emit both directions with shared provenance (evidential, both families).
   @symmetric ~w(connects_site alias_of)
 
@@ -102,6 +102,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     "connects_site" => {~w(site tunnel), ~w(site tunnel)},
     # a tunnel terminates at an endpoint
     "terminates_at" => {~w(tunnel), ~w(gateway firewall host)},
+    # a tunnel/gateway CARRIES (reaches) a subnet — the ipsec "remote_subnets" relation (Phase-2)
+    "carries" => {~w(tunnel gateway), ~w(subnet)},
     # something is protected by a firewall
     "protected_by" => {~w(host subnet site service cluster), ~w(firewall)},
     # identity: alias_of is between same-kind endpoints
@@ -176,26 +178,42 @@ defmodule Swarm.Enrichment.NetworkMap do
   end
 
   @doc """
-  Write extracted `facts` for source `node` as namespaced network `entity` nodes + `is_a` type
-  edges + the governed relation claim-edges (symmetric relations doubled). Returns the fresh edge
-  ids (the caller folds them into the enrichment `reconcile` kept-set so they are not re-deleted).
-  Network scope is clamped to `min(source_scope, group)` — never public (no-leak). All edges carry
-  `evidence_kind: hypothesis`, low reliability, and `source_node_id` for ghost-purge.
+  Write `facts` for source `node` as namespaced network `entity` nodes + `is_a` type edges + the
+  governed relation claim-edges (symmetric relations doubled). Returns the fresh edge ids (the
+  caller folds them into the enrichment `reconcile` kept-set so they are not re-deleted). Network
+  scope is clamped to `min(source_scope, group)` — never public (no-leak). Each edge carries
+  `source_node_id` for ghost-purge.
+
+  `opts` (Phase-2 IaC vs Phase-1 prose):
+  - `:reliability` (default #{@reliability}) — Phase-1 prose is a low-reliability `hypothesis`;
+    Phase-2 IaC (ground truth) passes ~0.85 so it wins aggregation over the prose hypothesis.
+  - `:evidence_kind` (default `#{@evidence_kind}`) — Phase-2 passes `observation`.
+  - `:origin` (default per-node) — Phase-2 passes a distinct `iac:<repo>` origin, so a repo fact
+    that matches a wiki fact lands on the SAME edge with a 2nd origin (ADR-13 corroboration:
+    `seen_count↑`); a repo fact the wiki lacks is undocumented; a wiki fact repo contradicts is a
+    doc-vs-reality conflict. This is the "described vs actual" check.
+
+  Facts are signature-filtered (`admissible?/1`) before writing, so a directly-fed (non-LLM) fact
+  with a mis-typed relation↔kind is dropped, same as the extract path.
   """
-  @spec write(map(), [fact()], String.t()) :: [integer()]
-  def write(node, facts, provenance) do
-    origin = "enrich:origin:node:#{node.id}"
+  @spec write(map(), [fact()], String.t(), keyword()) :: [integer()]
+  def write(node, facts, provenance, opts \\ []) do
+    origin = Keyword.get(opts, :origin) || "enrich:origin:node:#{node.id}"
+    reliability = Keyword.get(opts, :reliability, @reliability)
+    evidence_kind = Keyword.get(opts, :evidence_kind, @evidence_kind)
     scope = net_scope(node.scope)
+    edge_opts = {reliability, evidence_kind}
 
     facts
+    |> Enum.filter(&admissible?/1)
     |> Enum.flat_map(fn fact ->
-      subj = ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance)
-      obj = ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance)
+      subj = ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance, edge_opts)
+      obj = ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance, edge_opts)
 
       case {subj, obj} do
         {{:ok, subj_id, subj_edges}, {:ok, obj_id, obj_edges}} ->
           rel_edges =
-            emit_relation(subj_id, obj_id, fact.relation, scope, node, origin, provenance)
+            emit_relation(subj_id, obj_id, fact.relation, scope, node, origin, provenance, edge_opts)
 
           subj_edges ++ obj_edges ++ rel_edges
 
@@ -205,13 +223,31 @@ defmodule Swarm.Enrichment.NetworkMap do
     end)
   end
 
+  # A directly-fed fact is admissible if its vocab + relation↔kind signature are valid (the LLM
+  # `extract` path already applies these via `validate/2` with grounding; repo facts skip grounding
+  # but must still be well-typed).
+  @spec admissible?(fact()) :: boolean()
+  defp admissible?(%{subject_kind: sk, relation: rel, object_kind: ok})
+       when is_binary(sk) and is_binary(rel) and is_binary(ok) do
+    rel in @relations and sk in @kinds and ok in @kinds and valid_signature?(rel, sk, ok)
+  end
+
+  defp admissible?(_), do: false
+
   # --- write helpers ---------------------------------------------------------
 
   # Upsert a namespaced network entity node + its `is_a` edge to the kind marker. Returns
   # `{:ok, node_id, [is_a_edge_id]}` or `:error` (a write failure drops just this endpoint's fact).
-  @spec ensure_entity(String.t(), String.t(), String.t(), map(), String.t(), String.t()) ::
-          {:ok, integer(), [integer()]} | :error
-  defp ensure_entity(name, kind, scope, node, origin, provenance) do
+  @spec ensure_entity(
+          String.t(),
+          String.t(),
+          String.t(),
+          map(),
+          String.t(),
+          String.t(),
+          {float(), String.t()}
+        ) :: {:ok, integer(), [integer()]} | :error
+  defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind}) do
     key = entity_key(kind, name)
     ent = Store.upsert_node(@entity_type, key, scope: scope)
     # Kind markers are generic type labels (non-sensitive) — pinned at `group` so the is_a edge's
@@ -221,8 +257,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     case Store.add_edge(ent, marker, "is_a", provenance,
            scope: scope,
            origin: origin,
-           reliability: @reliability,
-           evidence_kind: @evidence_kind,
+           reliability: reliability,
+           evidence_kind: evidence_kind,
            source_node_id: node.id
          ) do
       {:ok, %{id: id}} -> {:ok, ent, [id]}
@@ -232,17 +268,25 @@ defmodule Swarm.Enrichment.NetworkMap do
 
   # Emit the governed relation claim-edge(s). Symmetric relations emit both directions with the
   # SAME provenance (evidential — each direction is a distinct claim); the read view folds them.
-  @spec emit_relation(integer(), integer(), String.t(), String.t(), map(), String.t(), String.t()) ::
-          [integer()]
-  defp emit_relation(src, dst, relation, scope, node, origin, provenance) do
+  @spec emit_relation(
+          integer(),
+          integer(),
+          String.t(),
+          String.t(),
+          map(),
+          String.t(),
+          String.t(),
+          {float(), String.t()}
+        ) :: [integer()]
+  defp emit_relation(src, dst, relation, scope, node, origin, provenance, {reliability, evidence_kind}) do
     directed = [{src, dst} | if(relation in @symmetric, do: [{dst, src}], else: [])]
 
     Enum.flat_map(directed, fn {s, d} ->
       case Store.add_edge(s, d, relation, provenance,
              scope: scope,
              origin: origin,
-             reliability: @reliability,
-             evidence_kind: @evidence_kind,
+             reliability: reliability,
+             evidence_kind: evidence_kind,
              source_node_id: node.id
            ) do
         {:ok, %{id: id}} -> [id]

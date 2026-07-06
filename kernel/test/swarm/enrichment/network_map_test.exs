@@ -212,6 +212,66 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       assert %{entities: [], relations: []} = Network.map(["public"])
     end
 
+    test "Phase-2 opts: distinct origin corroborates a matching wiki edge (ADR-13 seen_count↑)" do
+      node = src_node("group")
+
+      facts = [
+        %{
+          subject: "orbit",
+          subject_kind: "tunnel",
+          relation: "terminates_at",
+          object: "gw-peer",
+          object_kind: "gateway"
+        }
+      ]
+
+      # Phase-1 (wiki prose) writes the hypothesis
+      NetworkMap.write(node, facts, "wiki-prov", origin: "enrich:origin:node:#{node.id}")
+      # Phase-2 (repo) writes the SAME fact with a distinct origin + high reliability
+      NetworkMap.write(node, facts, "iac-prov",
+        origin: "iac:nebula-forge-cloud-cluster",
+        reliability: 0.85,
+        evidence_kind: "observation"
+      )
+
+      %{rows: [[seen]]} =
+        Repo.query!("SELECT seen_count FROM edge WHERE type = 'terminates_at' LIMIT 1")
+
+      # two distinct origins on one edge → corroborated
+      assert seen == 2
+    end
+
+    test "Phase-2 opts set reliability + evidence_kind on the edge" do
+      node = src_node("group")
+
+      facts = [
+        %{subject: "orbit", subject_kind: "tunnel", relation: "carries", object: "10.0.0.0/8", object_kind: "subnet"}
+      ]
+
+      NetworkMap.write(node, facts, "iac-prov",
+        origin: "iac:repo",
+        reliability: 0.85,
+        evidence_kind: "observation"
+      )
+
+      %{rows: [[kind, rel]]} =
+        Repo.query!("SELECT evidence_kind, reliability FROM edge WHERE type = 'carries' LIMIT 1")
+
+      assert kind == "observation"
+      assert rel >= 0.8
+    end
+
+    test "write signature-filters a directly-fed mis-typed fact" do
+      node = src_node("group")
+
+      facts = [
+        # gateway hosted_on subnet — mis-typed, must be dropped even on the direct-write path
+        %{subject: "gw", subject_kind: "gateway", relation: "hosted_on", object: "net", object_kind: "subnet"}
+      ]
+
+      assert NetworkMap.write(node, facts, "iac-prov", origin: "iac:repo") == []
+    end
+
     test "network edges carry the hypothesis band (low reliability)" do
       node = src_node("group")
 
