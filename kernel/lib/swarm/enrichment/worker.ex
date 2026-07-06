@@ -31,6 +31,7 @@ defmodule Swarm.Enrichment.Worker do
   group); the model is LOCAL (config). Enrichment output IS content — never logged.
   """
 
+  alias Swarm.Enrichment.NetworkMap
   alias Swarm.Enrichment.Procedures
   alias Swarm.Enrichment.Watermark
   alias Swarm.Graph.Store
@@ -52,7 +53,8 @@ defmodule Swarm.Enrichment.Worker do
   @type result :: %{
           claims: non_neg_integer(),
           edges: non_neg_integer(),
-          procedures: non_neg_integer()
+          procedures: non_neg_integer(),
+          network_facts: non_neg_integer()
         }
 
   @doc """
@@ -139,11 +141,23 @@ defmodule Swarm.Enrichment.Worker do
             # kept-set so the same-source reconcile does not re-delete them.
             procedures = Procedures.extract(body, gen_fun: gen, model: model)
             step_ids = Procedures.write(node, procedures, provenance(node.id))
-            reconcile(node.id, edge_ids ++ step_ids)
+
+            # Network-map skeleton (ADR-17 world-map): a THIRD gated additive pass — like the
+            # procedure pass it never aborts the claim path, and its fresh edge ids join the
+            # reconcile kept-set so the same-source reconcile does not re-delete them.
+            net_facts = NetworkMap.extract(body, gen_fun: gen, model: model)
+            net_ids = NetworkMap.write(node, net_facts, provenance(node.id))
+
+            reconcile(node.id, edge_ids ++ step_ids ++ net_ids)
             Watermark.record(node.id, stamp.("fresh"))
 
             {:ok,
-             %{claims: length(claims), edges: length(edge_ids), procedures: length(procedures)}}
+             %{
+               claims: length(claims),
+               edges: length(edge_ids),
+               procedures: length(procedures),
+               network_facts: length(net_facts)
+             }}
 
           {:error, reason} ->
             Watermark.record(node.id, stamp.("error"))

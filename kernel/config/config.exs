@@ -157,7 +157,9 @@ config :swarm, :entity_resolution, vec_threshold: 0.85, lex_threshold: 0.2, max_
 # Extraction is rare + deliberate (~120 s/source) — never the continuous default.
 config :swarm, :enrichment,
   model: "qwen3:14b",
-  policy_version: 1,
+  # v2: added the network-map skeleton extraction pass (ADR-17 world-map) alongside claims +
+  # procedures — a re-enrichment repopulates existing nodes with network entities/edges.
+  policy_version: 2,
   max_passage: 2_400,
   # Prior reliability of a single unverified LLM claim (ADR-3): plausible, not
   # certain. Corroboration collapses repeated claims (combine_typed), and external
