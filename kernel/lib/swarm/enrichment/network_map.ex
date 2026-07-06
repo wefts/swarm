@@ -59,12 +59,12 @@ defmodule Swarm.Enrichment.NetworkMap do
 
   # The governed network-entity kinds (Phase-1 macro). Each becomes an `is_a` edge to a
   # `concept:<kind>` marker. Closed by discipline, not by the (node-type) contract.
-  @kinds ~w(host subnet site gateway firewall tunnel cluster service vlan)
+  @kinds ~w(host subnet site gateway firewall tunnel cluster service vlan address)
 
   # The governed Phase-1 relation vocabulary (macro-topology only). `is_a` is generated from a
   # fact's endpoint kinds, never asked of the model. `contains` subsumes in_subnet at macro
   # level; exact-address relations (has_address/resolves_to/CIDR identity) are DEFERRED to Phase-2.
-  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries)
+  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address)
   # Symmetric relations: emit both directions with shared provenance (evidential, both families).
   @symmetric ~w(connects_site alias_of)
 
@@ -104,6 +104,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     "terminates_at" => {~w(tunnel), ~w(gateway firewall host)},
     # a tunnel/gateway CARRIES (reaches) a subnet — the ipsec "remote_subnets" relation (Phase-2)
     "carries" => {~w(tunnel gateway), ~w(subnet)},
+    # an entity HAS an IP address (wiki inventory tables — public/private IP columns)
+    "has_address" => {~w(host service gateway firewall cluster site), ~w(address)},
     # something is protected by a firewall
     "protected_by" => {~w(host subnet site service cluster), ~w(firewall)},
     # identity: alias_of is between same-kind endpoints

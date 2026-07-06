@@ -56,7 +56,7 @@ defmodule Swarm.WorldMap.Coverage do
   # necessary but NOT sufficient — a resolvable, CORROBORATED subject must also exist in structure.
   # Checked AFTER the procedure branch, so a how-to about network gear ("configure the firewall")
   # stays a procedure ask.
-  @network_cue ~r/\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?)\b/i
+  @network_cue ~r/\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|public\s+ip)\b/i
 
   defmodule Descriptor do
     @moduledoc "Raw (unvalidated) coverage. Deterministic output of `Coverage.describe/3`."

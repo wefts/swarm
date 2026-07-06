@@ -261,6 +261,17 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       assert rel >= 0.8
     end
 
+    test "has_address (host → address, IP object) is admitted via the write path (table facts)" do
+      node = src_node("group")
+      # bare-IP object: refused by the LLM extract path (Phase-1), but the table parser feeds it
+      # directly to write, where admissible?/1 (vocab+signature) allows host → has_address → address
+      facts = [%{subject: "web01.corp", subject_kind: "host", relation: "has_address", object: "10.0.0.5", object_kind: "address"}]
+      assert [_ | _] = NetworkMap.write(node, facts, "wiki:tables", origin: "wiki:tables", reliability: 0.55, evidence_kind: "observation")
+
+      %{relations: rels} = Network.map(["group"])
+      assert Enum.any?(rels, &(&1.relation == "has_address" and &1.src == "host/web01.corp"))
+    end
+
     test "write signature-filters a directly-fed mis-typed fact" do
       node = src_node("group")
 
