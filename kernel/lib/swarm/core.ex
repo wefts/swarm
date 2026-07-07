@@ -482,10 +482,19 @@ defmodule Swarm.Core do
       # — via WhoMap.candidates), and read its serve flag + corroboration floor from config. A new
       # neighborhood domain = one Domain registry entry, no wiring here. Flat `<key>_*` opts are what
       # Coverage.describe/3 expects.
+      #
+      # `active_keys(opts)` is unioned into EVERY domain's own candidates here too (chat-thread
+      # epic 2, live-verify finding): the generic `candidate_keys` above feeds Procedure/hit_keys
+      # only — a neighborhood domain reads its candidates from THIS opt, a wholly separate pool,
+      # so without this union a pronoun follow-up ("who manages it?") that matches a domain's cue
+      # but carries no key of its own would never see the previous turn's key at all. A
+      # wrong-domain/foreign key here is harmless: Stage 1 (`Coverage.validate/1`) only mints a
+      # `Validated` when the key actually resolves to real neighborhood facts IN that domain.
       neighborhood_opts =
         Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
           [
-            {:"#{dom.key}_keys", dom.candidates_fun.(query, scopes)},
+            {:"#{dom.key}_keys",
+             Enum.uniq(dom.candidates_fun.(query, scopes) ++ active_keys(opts))},
             {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
             {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
           ]
