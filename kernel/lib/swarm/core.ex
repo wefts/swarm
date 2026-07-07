@@ -471,6 +471,9 @@ defmodule Swarm.Core do
       # Network-neighborhood candidates (net:<kind>:<name> entities matching the query) for the
       # :network serve path — probed directly, like procedure candidates (ADR-17 world-map).
       network_keys = Swarm.Graph.Network.candidates(query, scopes)
+      # Who-neighborhood candidates (who:<kind>:<name> — persons by profile content, teams/roles/
+      # sites by key) for the :who serve path (E1). Probed directly like network candidates.
+      who_keys = Swarm.Enrichment.WhoMap.candidates(query, scopes)
 
       descriptor =
         WorldMap.Coverage.describe(query, scopes,
@@ -478,6 +481,8 @@ defmodule Swarm.Core do
           network_keys: network_keys,
           network_serve: network_serve?(opts),
           network_min_corroboration: network_min_corroboration(),
+          who_keys: who_keys,
+          who_serve: who_serve?(opts),
           profile: profile
         )
 
@@ -566,6 +571,17 @@ defmodule Swarm.Core do
   @spec network_min_corroboration() :: pos_integer()
   defp network_min_corroboration do
     Application.get_env(:swarm, :tier_gate, [])[:network_min_corroboration] || 2
+  end
+
+  # The :who serve path is OFF by default until calibrated (`Gate.WhoCalibration`, false-serve ~0).
+  # Config `:swarm, :tier_gate, who_serve: true` or `opts[:who_serve]` enables it.
+  @spec who_serve?(keyword()) :: boolean()
+  defp who_serve?(opts) do
+    Keyword.get(
+      opts,
+      :who_serve,
+      Application.get_env(:swarm, :tier_gate, [])[:who_serve] == true
+    )
   end
 
   @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok

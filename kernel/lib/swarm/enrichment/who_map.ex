@@ -153,6 +153,73 @@ defmodule Swarm.Enrichment.WhoMap do
 
   def write_profile(_profile, _provenance, _opts), do: :error
 
+  # Stopwords + question words stripped from candidate matching (so "who is in the X team" probes on
+  # "X"/"team", not "who"/"the"). Kept small + generic.
+  @stopwords ~w(who whom whose the a an of in on at to for and or is are was were be whos
+                what which that this these those my your our their his her its team teams
+                department departments group groups unit units manage manages managed leads lead
+                works work working reports report member members)
+
+  @doc """
+  Resolve a query to candidate who: subject keys (best-overlap first, ≤ `:limit`, default 8) whose
+  directory neighborhood is servable in `scopes`. Two arms merged: PERSONS matched by their profile
+  CONTENT (a name in the query — persons are keyed by uid, so a name never appears in the key), and
+  TEAMS/ROLES/SITES matched by their key tail (their canonical name IS the key). Only subjects with a
+  non-`is_a`, non-refuted, in-scope edge (either direction) are returned. Mirrors `Network.candidates/3`.
+  """
+  @spec candidates(String.t(), [String.t()], keyword()) :: [String.t()]
+  def candidates(query, scopes, opts \\ [])
+  def candidates(_query, [], _opts), do: []
+
+  def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
+    limit = Keyword.get(opts, :limit, 8)
+    terms = query_terms(query)
+
+    if terms == [] do
+      []
+    else
+      likes = Enum.map(terms, &("%" <> &1 <> "%"))
+
+      %{rows: rows} =
+        Repo.query!(
+          """
+          WITH servable AS (
+            SELECT n.id, n.key,
+                   (SELECT count(*) FROM unnest($3::text[]) t
+                      WHERE lower(n.key) LIKE t
+                         OR (n.key LIKE 'who:person:%' AND EXISTS (
+                               SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE t))
+                   ) AS overlap
+              FROM node n
+             WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
+          )
+          SELECT s.key, s.overlap
+            FROM servable s
+           WHERE s.overlap > 0
+             AND EXISTS (
+                   SELECT 1 FROM edge e
+                    WHERE (e.src = s.id OR e.dst = s.id) AND e.type <> 'is_a' AND e.reward >= 0
+                      AND e.visibility_scope = ANY($1)
+                 )
+           ORDER BY s.overlap DESC, s.key
+           LIMIT $2
+          """,
+          [scopes, limit, likes]
+        )
+
+      Enum.map(rows, fn [key, _o] -> key end)
+    end
+  end
+
+  @spec query_terms(String.t()) :: [String.t()]
+  defp query_terms(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+  end
+
   @doc """
   The who neighborhood of a subject `key` (a `who:<kind>:<canonical>` node): the org-directory facts
   directly incident to it, in BOTH directions — "who manages X" is X's OUTGOING `managed_by`; "who's

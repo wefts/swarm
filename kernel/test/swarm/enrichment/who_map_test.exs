@@ -142,5 +142,14 @@ defmodule Swarm.Enrichment.WhoMapTest do
     test "is scope-fenced — nothing served outside the viewer's scopes" do
       assert WhoMap.neighborhood("who:person:jdoe", ["public"]) == []
     end
+
+    test "candidates/2 resolves a person by profile NAME and a team by key" do
+      # person by name (keyed by uid — name lives only in content)
+      assert "who:person:jdoe" in WhoMap.candidates("who manages Jane Doe", ["group"])
+      # team by canonical key tail
+      assert "who:team:platform" in WhoMap.candidates("who is in the platform team", ["group"])
+      # scope-fenced
+      assert WhoMap.candidates("Jane Doe", ["public"]) == []
+    end
   end
 end
