@@ -27,12 +27,15 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
+  # v8 — edge_provenance.lineage (master-plan S1): corroboration counts distinct upstream lineage,
+  # not origin labels (mechanism landed inert — lineage defaults to origin; granularity policy TBD).
+  # v7 added edge_provenance.source_node_id (ghost-purge). v6 …
   # v5 — edge-level evidential kind (workspace ADR-13, refines EOS-2): an
   # assertion carries its own `evidence_kind` (what it CONTRIBUTES), so the
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 7
+  @schema_version 8
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/

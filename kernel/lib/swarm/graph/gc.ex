@@ -107,7 +107,7 @@ defmodule Swarm.Graph.GC do
 
         Repo.query!(
           "UPDATE edge e SET seen_count = " <>
-            "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+            "(SELECT count(DISTINCT coalesce(lineage, origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
             "WHERE e.id = ANY($1::bigint[])",
           [edge_ids]
         )

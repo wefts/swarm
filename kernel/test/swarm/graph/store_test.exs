@@ -85,6 +85,19 @@ defmodule Swarm.Graph.StoreTest do
                Graph.add_edge(a, b, "mentions", "ev-2", origin: "src-B")
     end
 
+    test "S1: an explicit :lineage collapses distinct origins to one upstream vote", %{a: a, b: b} do
+      # two DISTINCT origins but the SAME upstream lineage → corroboration counts ONE (the
+      # mechanism that stops N-mirrors-of-one-source from manufacturing false confidence).
+      {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", origin: "src-A", lineage: "up-1")
+
+      assert {:ok, %{seen_count: 1, reinforced: false}} =
+               Graph.add_edge(a, b, "mentions", "ev-2", origin: "src-B", lineage: "up-1")
+
+      # a genuinely distinct lineage DOES reinforce
+      assert {:ok, %{seen_count: 2, reinforced: true}} =
+               Graph.add_edge(a, b, "mentions", "ev-3", origin: "src-C", lineage: "up-2")
+    end
+
     test "absent :origin defaults to provenance (pre-v4 behaviour preserved)", %{a: a, b: b} do
       # Without an explicit origin, every distinct event is its own origin, so
       # two distinct provenance keys still reinforce exactly as before.
