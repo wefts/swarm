@@ -84,7 +84,7 @@ defmodule Swarm.Enrichment.WhoMap do
     "has_title" => "title_of",
     "has_role_family" => "role_of",
     "has_employment" => "status_of",
-    "located_at" => "location_of",
+    "located_at" => "based_here",
     "in_group" => "includes",
     "managed_by_team" => "manages"
   }
