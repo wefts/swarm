@@ -150,7 +150,7 @@ defmodule Swarm.WorldMap.Domain do
       relations: @who_relations,
       scope: ["group"],
       neighborhood_fun: &Swarm.Enrichment.WhoMap.neighborhood/3,
-      subject_fun: &Swarm.Enrichment.WhoMap.display_object(&1, nil),
+      subject_fun: &Swarm.Enrichment.WhoMap.display_subject/1,
       candidates_fun: &Swarm.Enrichment.WhoMap.candidates/2,
       serve_opt: :who_serve,
       display_label: "Directory",

@@ -74,6 +74,21 @@ defmodule Swarm.Enrichment.WhoMap do
 
   @segmenter "who-profile-v1"
 
+  # Inverse label for a directional relation seen from the OTHER end (incoming edge): a manager's
+  # neighborhood must read "manages <report>", not "managed_by <report>". Non-directional/symmetric
+  # relations keep their type (default).
+  @inverse_label %{
+    "managed_by" => "manages",
+    "member_of" => "has_member",
+    "works_in" => "has_member",
+    "has_title" => "title_of",
+    "has_role_family" => "role_of",
+    "has_employment" => "status_of",
+    "located_at" => "location_of",
+    "in_group" => "includes",
+    "managed_by_team" => "manages"
+  }
+
   # Query-word → role-family synonyms, for common query words that don't share a prefix with the
   # family key (admin↛sysadmin, manager↛management). A matched term ADDS the family tail so the
   # exact-tier match fires. Keep curated + small; families themselves are the connector's taxonomy.
@@ -229,7 +244,10 @@ defmodule Swarm.Enrichment.WhoMap do
                    -- FAMILY (53), not the raw title "qa engineer 1" (1); "contractors" → the status.
                    (SELECT coalesce(sum(
                              CASE WHEN replace(split_part(lower(n.key), ':', 3), ' ', '') = t
-                                       OR t LIKE replace(split_part(lower(n.key), ':', 3), ' ', '') || '%' THEN 100
+                                       -- inflection prefix (developers→developer) only for tails ≥ 4
+                                       -- chars, so a 3-char code (site "bor") can't grab "boremchuk"
+                                       OR (length(replace(split_part(lower(n.key), ':', 3), ' ', '')) >= 4
+                                           AND t LIKE replace(split_part(lower(n.key), ':', 3), ' ', '') || '%') THEN 100
                                   WHEN replace(lower(n.key), ' ', '') LIKE '%' || t || '%' THEN 2
                                   WHEN n.key LIKE 'who:person:%' AND EXISTS (
                                          SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
@@ -308,7 +326,8 @@ defmodule Swarm.Enrichment.WhoMap do
         """
         SELECT e.type, other.key, e.seen_count, e.reliability::float8,
                extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec,
-               substring(c.body from 'name: ([^\n]*)') AS cn
+               substring(c.body from 'name: ([^\n]*)') AS cn,
+               (e.src = self0.id) AS outgoing
           FROM node self0
           JOIN edge e ON (e.src = self0.id OR e.dst = self0.id)
           JOIN node other ON other.id = CASE WHEN e.src = self0.id THEN e.dst ELSE e.src END
@@ -321,11 +340,14 @@ defmodule Swarm.Enrichment.WhoMap do
       )
 
     rows
-    |> Enum.map(fn [type, okey, seen, rel, age, cn] ->
+    |> Enum.map(fn [type, okey, seen, rel, age, cn, outgoing] ->
       age = age || 0.0
 
       %{
-        relation: type,
+        # Direction-aware label: a directional edge where the subject is the DST (incoming) reads
+        # backwards under the bare type (e.g. a manager's reports would show `managed_by <report>`),
+        # so incoming edges get the INVERSE label (`managed_by`→`manages`, `member_of`→`has_member`).
+        relation: if(outgoing, do: type, else: Map.get(@inverse_label, type, type)),
         object: display_object(okey, cn),
         object_kind: who_kind(okey),
         corroboration: seen,
@@ -344,6 +366,23 @@ defmodule Swarm.Enrichment.WhoMap do
     case {who_kind(key), cn} do
       {"person", name} when is_binary(name) and name != "" -> name
       _ -> who_tail(key)
+    end
+  end
+
+  @doc """
+  Display label for a SUBJECT key (the served answer's header) — resolves a person's `cn` from their
+  profile content (so "who is erker" heads with the NAME, not the uid), else the canonicalized tail.
+  Used as the who-domain's `subject_fun`.
+  """
+  @spec display_subject(String.t()) :: String.t()
+  def display_subject(key) do
+    if who_kind(key) == "person" do
+      case Repo.query!("SELECT substring(body from 'name: ([^\n]*)') FROM content WHERE node_id = (SELECT id FROM node WHERE key = $1)", [key]) do
+        %{rows: [[cn]]} when is_binary(cn) and cn != "" -> cn
+        _ -> who_tail(key)
+      end
+    else
+      who_tail(key)
     end
   end
 

@@ -192,11 +192,40 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
     test "INCOMING to a team surfaces its members by NAME (not uid)" do
       facts = WhoMap.neighborhood("who:team:platform", ["group"])
-      assert [%{relation: "member_of", object: "Jane Doe", object_kind: "person"}] = facts
+      # incoming member_of → inverse label: the team HAS member Jane Doe (direction-aware)
+      assert [%{relation: "has_member", object: "Jane Doe", object_kind: "person"}] = facts
     end
 
     test "is scope-fenced — nothing served outside the viewer's scopes" do
       assert WhoMap.neighborhood("who:person:jdoe", ["public"]) == []
+    end
+
+    test "direction-aware labels: a manager's INCOMING managed_by reads 'manages', not 'managed_by'" do
+      # jdoe managed_by bsmith (setup) → from BSMITH's side it's an INCOMING managed_by (jdoe reports
+      # to him), which must render as 'manages Jane Doe', not 'managed_by Jane Doe' (the erker bug).
+      mgr = WhoMap.neighborhood("who:person:bsmith", ["group"])
+      by_rel = Map.new(mgr, &{&1.relation, &1.object})
+      assert by_rel["manages"] == "Jane Doe"
+      refute Map.has_key?(by_rel, "managed_by")
+      # jdoe's OWN side keeps the outgoing label
+      jf = WhoMap.neighborhood("who:person:jdoe", ["group"]) |> Map.new(&{&1.relation, &1.object})
+      assert jf["managed_by"] == "Bob Smith"
+    end
+
+    test "display_subject resolves a person's cn (not the uid) for the answer header" do
+      assert WhoMap.display_subject("who:person:jdoe") == "Jane Doe"
+      # a non-person subject falls back to the canonical tail
+      assert WhoMap.display_subject("who:team:platform") == "platform"
+    end
+
+    test "candidates: a surname doesn't get hijacked by a short site code (boremchuk ≠ site 'bor')" do
+      a = anchor()
+      WhoMap.write(a, [fact("sboremchuk", "person", "located_at", "Bor", "site")], "p")
+      WhoMap.write_profile(%{"uid" => "sboremchuk", "cn" => "Serhii Boremchuk", "sn" => "Boremchuk"}, "p")
+      cands = WhoMap.candidates("who is boremchuk", ["group"])
+      # the 3-char site 'bor' must NOT prefix-grab the 9-char surname; the person resolves
+      refute "who:site:bor" in cands
+      assert "who:person:sboremchuk" in cands
     end
 
     test "candidates/2 resolves a person by profile NAME and a team by key" do
