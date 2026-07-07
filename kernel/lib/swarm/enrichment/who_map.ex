@@ -226,11 +226,18 @@ defmodule Swarm.Enrichment.WhoMap do
                                          SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
                                   ELSE 0 END), 0)
                       FROM unnest($3::text[]) t)
-                   -- group phrase tier: the query CONTAINS a group name/alias phrase (≥ 2 words) → strong
+                   -- group phrase tier: the query CONTAINS a group name/alias PHRASE (≥ 2 words) →
+                   -- strong. Each alias is normalized the SAME way as $4 (qnorm: punctuation → space)
+                   -- so hyphenated aliases match, and matched on WORD boundaries (space-wrapped) so an
+                   -- alias like "aw ops" can't fire inside "jigsaw opsroom".
                    + CASE WHEN n.key LIKE 'who:group:%' AND EXISTS (
-                            SELECT 1 FROM content c, unnest(string_to_array(replace(lower(c.body), 'group: ', ''), ' · ')) phrase
-                             WHERE c.node_id = n.id AND length(phrase) > 3
-                               AND position(' ' in phrase) > 0 AND position(phrase in $4) > 0) THEN 300 ELSE 0 END
+                            SELECT 1
+                              FROM content c,
+                                   unnest(string_to_array(replace(lower(c.body), 'group: ', ''), ' · ')) raw,
+                                   LATERAL (SELECT btrim(regexp_replace(raw, '[^a-z0-9]+', ' ', 'g')) AS phrase) np
+                             WHERE c.node_id = n.id AND length(np.phrase) > 3
+                               AND position(' ' in np.phrase) > 0
+                               AND position(' ' || np.phrase || ' ' in ' ' || $4 || ' ') > 0) THEN 300 ELSE 0 END
                    AS overlap
               FROM node n
              WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)

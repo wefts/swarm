@@ -245,5 +245,15 @@ defmodule Swarm.Enrichment.WhoMapTest do
       # entity + qualifier → the curated group (phrase "alterway ops" in the query)
       assert List.first(WhoMap.candidates("who is in AlterWay ops", ["group"])) == "who:group:alterway-ops"
     end
+
+    test "phrase tier is word-boundary + punctuation-normalized" do
+      a = anchor()
+      WhoMap.write(a, [fact("u3", "person", "in_group", "aw-ops", "group")], "p")
+      WhoMap.write_group("aw-ops", "AlterWay Ops Squad", ["aw ops", "alter-way squad"])
+      # punctuation: the hyphenated alias 'alter-way squad' resolves against a spaced query
+      assert List.first(WhoMap.candidates("who is in the alter way squad", ["group"])) == "who:group:aw-ops"
+      # word boundary: alias 'aw ops' must NOT fire inside 'jigsaw opsroom' (previously a hijack)
+      assert WhoMap.candidates("jigsaw opsroom please", ["group"]) == []
+    end
   end
 end
