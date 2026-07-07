@@ -51,11 +51,11 @@ defmodule Swarm.Enrichment.WhoMap do
   # `org` = employing subsidiary/entity (AlterWay, SensioLabs…, from ou); `team` = the finer
   # team/department (from departmentNumber); `status` = employment category (employee/contractor);
   # `family` = coarse role family (developer, sysadmin, hr…) clustered from the messy free-text title.
-  @kinds ~w(person team role site status family org)
+  @kinds ~w(person team role site status family org group)
 
   # Governed relation vocabulary (closed by discipline — an open relation set drifts into an
   # accidental schema via near-duplicates, NetworkMap's top anti-pattern).
-  @relations ~w(managed_by works_in member_of has_title located_at has_employment has_role_family)
+  @relations ~w(managed_by works_in member_of has_title located_at has_employment has_role_family in_group)
 
   # Relation↔endpoint-kind signatures: a fact whose endpoint kinds don't fit is DROPPED (a mis-typed
   # edge is worse than a missing one). `{subject_kinds, object_kinds}`. The org hierarchy has two
@@ -67,7 +67,8 @@ defmodule Swarm.Enrichment.WhoMap do
     "has_title" => {~w(person), ~w(role)},
     "located_at" => {~w(person), ~w(site)},
     "has_employment" => {~w(person), ~w(status)},
-    "has_role_family" => {~w(person), ~w(family)}
+    "has_role_family" => {~w(person), ~w(family)},
+    "in_group" => {~w(person), ~w(group)}
   }
 
   @segmenter "who-profile-v1"

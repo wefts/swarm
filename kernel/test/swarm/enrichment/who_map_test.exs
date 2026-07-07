@@ -110,6 +110,18 @@ defmodule Swarm.Enrichment.WhoMapTest do
                "SELECT DISTINCT visibility_scope FROM edge WHERE type = 'works_in'"
              ).rows == [["group"]]
     end
+
+    test "in_group (person→group) is a governed relation; group node + is_a minted" do
+      ids = WhoMap.write(anchor(), [fact("jdoe", "person", "in_group", "alterway-ops", "group")], "p")
+      assert [[person]] = node_id("who:person:jdoe")
+      assert [[grp]] = node_id("who:group:alterway-ops")
+      assert [[_]] =
+               Repo.query!("SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'in_group'", [person, grp]).rows
+      assert node_id("who:kind:group") != []
+      # mis-typed: in_group object must be a group
+      assert WhoMap.write(anchor(), [fact("jdoe", "person", "in_group", "bob", "person")], "p") == []
+      refute ids == []
+    end
   end
 
   describe "write_profile/3 — searchable profile content" do

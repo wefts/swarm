@@ -58,7 +58,8 @@ defmodule Swarm.Graph.Freshness do
     # employment category + clustered role family: stable typing-like facts (change on a
     # role/contract change) — structural backstop; reconciliation is the primary staleness defense.
     "has_employment" => :structural,
-    "has_role_family" => :structural
+    "has_role_family" => :structural,
+    "in_group" => :structural
   }
 
   # serve floor: a fact decayed below this factor is too stale to serve (→ escalate). 0.5 = one
