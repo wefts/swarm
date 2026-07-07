@@ -228,6 +228,18 @@ defmodule Swarm.Graph.Store do
         alias_key == into_key or alias_id == into_id ->
           %{into_id: into_id, edges: 0, result: :noop_same}
 
+        merge_blocked?(type, alias_key, into_key) ->
+          # S4 do-not-merge: an explicit assertion that these are DISTINCT entities. Never merge
+          # (a wrong merge is catastrophic + hard to un-merge); surface for escalation.
+          emit_outbox(
+            "merge_refused",
+            "node:#{into_id || alias_id}",
+            %{into: into_id, from: alias_id, reason: "do_not_merge"},
+            "merge_refused:do_not_merge:#{type}:#{alias_key}->#{into_key}"
+          )
+
+          %{into_id: into_id, edges: 0, result: :refused_do_not_merge}
+
         is_nil(into_id) ->
           # Canonical not yet present: rename the alias to the canonical key. Safe —
           # (type, into_key) is free, and the unique index would reject any race.
@@ -381,6 +393,40 @@ defmodule Swarm.Graph.Store do
     )
 
     :ok
+  end
+
+  @doc """
+  Assert (durably) that `(type, k1)` and `(type, k2)` are DISTINCT entities and must NEVER be
+  merged (master-plan S4 do-not-merge). `merge_nodes/3` then refuses this pair
+  (`:refused_do_not_merge`) and entity-resolution excludes it from merge proposals. Symmetric —
+  stored order-independent. Idempotent.
+  """
+  @spec block_merge(String.t(), String.t(), String.t(), String.t() | nil) :: :ok
+  def block_merge(type, k1, k2, reason \\ nil)
+      when is_binary(type) and is_binary(k1) and is_binary(k2) do
+    {a, b} = if k1 <= k2, do: {k1, k2}, else: {k2, k1}
+
+    Repo.query!(
+      "INSERT INTO node_do_not_merge (type, key_a, key_b, reason) VALUES ($1,$2,$3,$4) " <>
+        "ON CONFLICT (type, key_a, key_b) DO NOTHING",
+      [type, a, b, reason]
+    )
+
+    :ok
+  end
+
+  @doc "Is this `(type, k1, k2)` pair blocked from merging (S4 do-not-merge)? Order-independent."
+  @spec merge_blocked?(String.t(), String.t(), String.t()) :: boolean()
+  def merge_blocked?(type, k1, k2) when is_binary(type) and is_binary(k1) and is_binary(k2) do
+    {a, b} = if k1 <= k2, do: {k1, k2}, else: {k2, k1}
+
+    %{rows: [[c]]} =
+      Repo.query!(
+        "SELECT count(*) FROM node_do_not_merge WHERE type = $1 AND key_a = $2 AND key_b = $3",
+        [type, a, b]
+      )
+
+    c > 0
   end
 
   @spec node_id(String.t(), String.t()) :: integer() | nil

@@ -27,6 +27,8 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
+  # v9 — node_do_not_merge (master-plan S4): a negative identity assertion so ER/merge never
+  # collapse two DISTINCT entities.
   # v8 — edge_provenance.lineage (master-plan S1): corroboration counts distinct upstream lineage,
   # not origin labels (mechanism landed inert — lineage defaults to origin; granularity policy TBD).
   # v7 added edge_provenance.source_node_id (ghost-purge). v6 …
@@ -35,7 +37,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 8
+  @schema_version 9
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @type_format ~r/^[a-z][a-z0-9_]*$/

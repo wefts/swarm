@@ -65,6 +65,12 @@ defmodule Swarm.EntityResolution.Candidates do
                 AND ((x.alias_key = a.key AND x.canonical_key = b.key)
                   OR (x.alias_key = b.key AND x.canonical_key = a.key))
            )
+           -- S4 do-not-merge: never propose an explicitly-distinct pair (order-independent)
+           AND NOT EXISTS (
+             SELECT 1 FROM node_do_not_merge d
+              WHERE d.type = 'entity'
+                AND d.key_a = least(a.key, b.key) AND d.key_b = greatest(a.key, b.key)
+           )
          ORDER BY cosine DESC
          LIMIT $2
         """,
