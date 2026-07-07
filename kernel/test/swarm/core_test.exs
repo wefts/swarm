@@ -149,6 +149,35 @@ defmodule Swarm.CoreTest do
       # opaque citation only — never the raw origin
       assert Enum.all?(a.citations, &(&1.source == "structured"))
       refute a.answer =~ "wiki"
+      # chat-thread epic 2: the served entity's real key rides along in citations (not
+      # just the gate's opaque "corroboration:N" labels) — a channel echoing THESE refs
+      # back as the next turn's active_keys must be able to re-hit this same procedure.
+      assert "ldap password reset" in Enum.map(a.citations, & &1.ref)
+    end
+
+    test "chat-thread epic 2: a structured turn's own citations re-serve the NEXT pronoun follow-up" do
+      p = seed_procedure()
+
+      opts1 =
+        escalate_opts(consilium_stub()) ++
+          [retriever: proc_retriever(p), tier_gate: true, entail_fun: fn _q, _g -> true end]
+
+      first = Core.ask("how to reset the ldap password", opts1)
+      assert first.tier == "structured"
+      echoed_keys = Enum.map(first.citations, & &1.ref)
+
+      opts2 =
+        escalate_opts(consilium_stub()) ++
+          [
+            retriever: unrelated_retriever(),
+            tier_gate: true,
+            entail_fun: fn _q, _g -> true end,
+            active_keys: echoed_keys
+          ]
+
+      second = Core.ask("and how do I do that again?", opts2)
+      assert second.tier == "structured"
+      assert second.answer =~ "open the self-service portal"
     end
 
     test "entailment NO vetoes the serve ⇒ escalates to the consilium (near-miss guard)" do

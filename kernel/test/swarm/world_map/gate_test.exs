@@ -55,6 +55,8 @@ defmodule Swarm.WorldMap.GateTest do
       assert ans.text =~ "1. open portal"
       assert ans.text =~ "2. set password"
       assert ans.citations == ["source-1"]
+      # chat-thread epic 2: for active_keys
+      assert ans.key == "reset password procedure"
       # opaque citation only — no raw origin leaks into the served answer
       refute ans.text =~ "wiki"
       refute Enum.any?(ans.citations, &String.contains?(&1, "wiki"))
@@ -112,7 +114,9 @@ defmodule Swarm.WorldMap.GateTest do
         domain: :network,
         neighborhood_subject: subject,
         neighborhood_facts:
-          Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "subnet", corroboration: 2} end),
+          Enum.map(facts, fn {r, o} ->
+            %{relation: r, object: o, object_kind: "subnet", corroboration: 2}
+          end),
         blockers: []
       }
     end
@@ -120,23 +124,39 @@ defmodule Swarm.WorldMap.GateTest do
     test "serves a network neighborhood when the entail veto passes" do
       d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}, {"carries", "10.129.0.0/16"}])
 
-      assert {:serve, %Answer{intent: :neighborhood, domain: :network, text: text, citations: cits},
-              %Audit{decision: :serve}} =
+      assert {:serve,
+              %Answer{
+                intent: :neighborhood,
+                domain: :network,
+                text: text,
+                citations: cits,
+                key: key
+              }, %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "tunnel orbit"
       assert text =~ "carries 10.128.0.0/16"
       assert cits == ["corroboration:2"]
+      # chat-thread epic 2: the served subject, for active_keys
+      assert key == "tunnel orbit"
     end
 
     test "entail veto escalates (never serves the wrong-relation/entity)" do
       d = net_desc("tunnel conduit", [{"terminates_at", "gateway peer"}])
+
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
                Gate.sufficient?(d, entail_fun: always(false))
     end
 
     test "an empty network neighborhood cannot mint a Validated (fail-closed)" do
-      d = %Descriptor{query: "q", intent: :neighborhood, domain: :network, neighborhood_facts: [], blockers: [:no_corroboration]}
+      d = %Descriptor{
+        query: "q",
+        intent: :neighborhood,
+        domain: :network,
+        neighborhood_facts: [],
+        blockers: [:no_corroboration]
+      }
+
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
     end
@@ -150,7 +170,9 @@ defmodule Swarm.WorldMap.GateTest do
         domain: :who,
         neighborhood_subject: subject,
         neighborhood_facts:
-          Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "person", corroboration: 1} end),
+          Enum.map(facts, fn {r, o} ->
+            %{relation: r, object: o, object_kind: "person", corroboration: 1}
+          end),
         blockers: []
       }
     end
@@ -158,23 +180,34 @@ defmodule Swarm.WorldMap.GateTest do
     test "serves a directory neighborhood when the entail veto passes (names, not uids)" do
       d = who_desc("platform", [{"works_in", "Jane Doe"}, {"works_in", "Bob Smith"}])
 
-      assert {:serve, %Answer{intent: :neighborhood, domain: :who, text: text, citations: cits},
+      assert {:serve,
+              %Answer{intent: :neighborhood, domain: :who, text: text, citations: cits, key: key},
               %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "platform"
       assert text =~ "works_in Jane Doe"
       assert cits == ["corroboration:1"]
+      # chat-thread epic 2: the served subject, for active_keys
+      assert key == "platform"
     end
 
     test "entail veto escalates (never serves a different person/relation)" do
       d = who_desc("billing", [{"managed_by", "Wrong Person"}])
+
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
                Gate.sufficient?(d, entail_fun: always(false))
     end
 
     test "an empty directory neighborhood cannot mint a Validated (fail-closed)" do
-      d = %Descriptor{query: "q", intent: :neighborhood, domain: :who, neighborhood_facts: [], blockers: [:no_corroboration]}
+      d = %Descriptor{
+        query: "q",
+        intent: :neighborhood,
+        domain: :who,
+        neighborhood_facts: [],
+        blockers: [:no_corroboration]
+      }
+
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
     end

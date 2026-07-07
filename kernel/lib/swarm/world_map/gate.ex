@@ -53,13 +53,20 @@ defmodule Swarm.WorldMap.Gate do
   defmodule Answer do
     @moduledoc "The evidence-closed served answer (rendered from a `%Validated{}` only)."
     @enforce_keys [:text, :citations, :intent]
-    defstruct [:text, :citations, :intent, :domain]
+    defstruct [:text, :citations, :intent, :domain, :key]
 
     @type t :: %__MODULE__{
             text: String.t(),
             citations: [String.t()],
             intent: :procedure | :entity_profile | :neighborhood,
-            domain: atom() | nil
+            domain: atom() | nil,
+            # The served entity/subject key (`Validated.name`), when the intent has one
+            # (procedure/neighborhood) — nil for entity_profile. Distinct from `citations`
+            # (opaque audit labels, e.g. "corroboration:1"): this is the real graph key,
+            # threaded to Core so a served answer's citations can seed the NEXT turn's
+            # `active_keys` (chat-thread epic 2) — without it, a pronoun follow-up after a
+            # structured-served turn had nothing but opaque labels to echo back.
+            key: String.t() | nil
           }
   end
 
@@ -135,7 +142,12 @@ defmodule Swarm.WorldMap.Gate do
     end)
   end
 
-  defp grounding(%Validated{intent: :neighborhood, atoms: facts, name: subject, domain: domain_key}) do
+  defp grounding(%Validated{
+         intent: :neighborhood,
+         atoms: facts,
+         name: subject,
+         domain: domain_key
+       }) do
     label = Domain.get(domain_key).display_label
     header = if subject, do: "#{label} — #{subject}:\n", else: ""
     header <> Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
@@ -144,8 +156,11 @@ defmodule Swarm.WorldMap.Gate do
   # The default cheap-LLM veto, with the intent-appropriate system prompt. Strict YES/NO; anything
   # but a confident `sufficient:true` escalates. Grounding is fenced as untrusted data. A neighborhood
   # domain's entail_system is fetched from the registry BY the immutable matched `domain` key (#2).
-  defp default_entail(%Validated{intent: :neighborhood, domain: domain_key, query: query}, grounding),
-    do: entail(query, grounding, system: Domain.get(domain_key).entail_system)
+  defp default_entail(
+         %Validated{intent: :neighborhood, domain: domain_key, query: query},
+         grounding
+       ),
+       do: entail(query, grounding, system: Domain.get(domain_key).entail_system)
 
   defp default_entail(%Validated{query: query}, grounding), do: entail(query, grounding, [])
 
@@ -200,7 +215,7 @@ defmodule Swarm.WorldMap.Gate do
   def render(%Validated{intent: :procedure, atoms: steps, citations: cits, name: name}) do
     body = steps |> Enum.map_join("\n", fn s -> "#{s.ordinal}. #{s.key}" end)
     head = if name, do: "#{name}:\n", else: "Steps:\n"
-    %Answer{text: head <> body, citations: cits, intent: :procedure}
+    %Answer{text: head <> body, citations: cits, intent: :procedure, key: name}
   end
 
   def render(%Validated{intent: :entity_profile, atoms: groups, citations: cits}) do
@@ -213,9 +228,22 @@ defmodule Swarm.WorldMap.Gate do
     %Answer{text: body, citations: cits, intent: :entity_profile}
   end
 
-  def render(%Validated{intent: :neighborhood, atoms: facts, citations: cits, name: subject, domain: domain_key}) do
+  def render(%Validated{
+        intent: :neighborhood,
+        atoms: facts,
+        citations: cits,
+        name: subject,
+        domain: domain_key
+      }) do
     body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
     head = if subject, do: "#{subject}:\n", else: "#{Domain.get(domain_key).display_label}:\n"
-    %Answer{text: head <> body, citations: cits, intent: :neighborhood, domain: domain_key}
+
+    %Answer{
+      text: head <> body,
+      citations: cits,
+      intent: :neighborhood,
+      domain: domain_key,
+      key: subject
+    }
   end
 end

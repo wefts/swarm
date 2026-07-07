@@ -541,16 +541,23 @@ defmodule Swarm.Core do
     end
   end
 
-  # Map the gate's evidence-closed answer onto the Core `answer()` shape. Citations are
-  # the gate's OPAQUE labels (no source identity) wrapped as `citation()`.
+  # Map the gate's evidence-closed answer onto the Core `answer()` shape. The gate's own
+  # `a.citations` are OPAQUE audit labels (e.g. "corroboration:1" — no source identity);
+  # `a.key`, when present, is the real served entity/subject key. Both become `citation()`s
+  # so a channel's `active_keys` echo (chat-thread epic 2) has something usable to carry
+  # forward — without `a.key` here, a pronoun follow-up right after a structured-served
+  # turn would only see "corroboration:1" and could never resolve back to the entity.
   @spec structured_answer(WorldMap.Gate.Answer.t()) :: answer()
   defp structured_answer(%WorldMap.Gate.Answer{} = a) do
+    key_citation = if a.key, do: [%{source: "structured", ref: a.key, confidence: 1.0}], else: []
+
     %{
       answer: a.text,
       confidence: 0.85,
       tier: "structured",
       status: :found,
-      citations: Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
+      citations:
+        key_citation ++ Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
     }
   end
 
