@@ -34,6 +34,7 @@ defmodule Swarm.WorldMap.Coverage do
   alias Swarm.Graph.Aggregation
   alias Swarm.Graph.Network
   alias Swarm.Graph.Procedure
+  alias Swarm.WorldMap.Domain
 
   @typedoc "What kind of structure, if any, cleanly covers the query."
   @type intent :: :procedure | :entity_profile | :network | :unknown
@@ -51,12 +52,9 @@ defmodule Swarm.WorldMap.Coverage do
   # necessary but NOT sufficient — a clean procedure variant must also exist in structure.
   @procedure_cue ~r/\b(how\s+(do|to|can|would|should)|steps?|procedure|reset|configure|set\s?up|install|enable|disable|troubleshoot|provision|deploy|restart|rotate)\b/i
 
-  # Query cue for a NETWORK-neighborhood ask ("what subnets does tunnel X carry", "what is behind
-  # firewall Y", "what is X connected to", "which cluster contains Z"). A network noun/relation is
-  # necessary but NOT sufficient — a resolvable, CORROBORATED subject must also exist in structure.
-  # Checked AFTER the procedure branch, so a how-to about network gear ("configure the firewall")
-  # stays a procedure ask.
-  @network_cue ~r/\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|public\s+ip)\b/i
+  # The NETWORK-neighborhood cue now lives in the serve-domain CONTRACT (`Swarm.WorldMap.Domain`,
+  # master-plan S3) — one source per domain, so a new domain can't drift. Checked AFTER the
+  # procedure branch, so a how-to about network gear ("configure the firewall") stays a procedure ask.
 
   defmodule Descriptor do
     @moduledoc "Raw (unvalidated) coverage. Deterministic output of `Coverage.describe/3`."
@@ -129,7 +127,7 @@ defmodule Swarm.WorldMap.Coverage do
     # servable. 2 = only multi-source-confirmed (safe-but-narrow); 1 = any ground-truth fact
     # (wider — leans on the Stage-2 entail veto). Tunable per deploy.
     network_min_corr = Keyword.get(opts, :network_min_corroboration, 2)
-    net_cue? = Regex.match?(@network_cue, query)
+    net_cue? = Regex.match?(Domain.network().cue, query)
     # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
     # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
     # query and serves the wrong facts. Only the (validated-safe) PROCEDURE path serves until
