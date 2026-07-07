@@ -42,13 +42,17 @@ defmodule Swarm.Graph.Freshness do
     "located_at" => :structural,
     "located_in" => :structural,
     "part_of" => :structural,
-    "managed_by" => :structural,
-    "works_in" => :structural,
     "has_address" => :configuration,
     "hosted_on" => :configuration,
     "uses" => :configuration,
     "requires" => :configuration,
     "provides" => :configuration,
+    # org-membership (E1 who-is-who): changes on an employee move/reorg — 30d BACKSTOP so a stale
+    # edge decays out of serve within weeks if the daily directory reconcile ever stops (the primary
+    # staleness defense is full-state reconciliation, which purges departed/moved people at once;
+    # decorrelated review 2026-07-07 flagged 180d as too slow a backstop for org facts).
+    "managed_by" => :configuration,
+    "works_in" => :configuration,
     "has_title" => :configuration
   }
 

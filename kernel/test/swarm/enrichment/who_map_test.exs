@@ -1,0 +1,112 @@
+defmodule Swarm.Enrichment.WhoMapTest do
+  @moduledoc """
+  E1 who-is-who substrate writer. Proves namespaced uid-keyed person identity, governed
+  relation↔kind signatures, group-scope clamp (no-leak), and searchable profile content.
+  """
+  use Swarm.GraphCase, async: false
+
+  alias Swarm.Enrichment.WhoMap
+  alias Swarm.Graph.Store
+  alias Swarm.Repo
+
+  defp anchor, do: %{id: Store.upsert_node("source", "ldap:directory", scope: "group"), scope: "group"}
+
+  defp fact(subj, sk, rel, obj, ok),
+    do: %{subject: subj, subject_kind: sk, relation: rel, object: obj, object_kind: ok}
+
+  defp node_id(key), do: Repo.query!("SELECT id FROM node WHERE key = $1", [key]).rows
+
+  describe "write/4 — namespaced entities, is_a markers, governed relations" do
+    test "writes uid-keyed person + team nodes, an is_a marker each, and a works_in edge" do
+      ids = WhoMap.write(anchor(), [fact("jdoe", "person", "works_in", "Engineering", "team")], "p")
+
+      # namespaced keys (team canonicalized: downcased)
+      assert [[person]] = node_id("who:person:jdoe")
+      assert [[team]] = node_id("who:team:engineering")
+
+      # a works_in edge person→team exists
+      assert [[_]] =
+               Repo.query!(
+                 "SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'works_in'",
+                 [person, team]
+               ).rows
+
+      # is_a markers minted (person + team)
+      assert node_id("who:kind:person") != []
+      assert node_id("who:kind:team") != []
+      # returned ids include the two is_a edges + the works_in edge
+      assert length(ids) == 3
+    end
+
+    test "keys persons by uid — two same-named people (distinct uids) never collide" do
+      WhoMap.write(anchor(), [fact("jmartin1", "person", "has_title", "Engineer", "role")], "p")
+      WhoMap.write(anchor(), [fact("jmartin2", "person", "has_title", "Engineer", "role")], "p")
+
+      assert [[_]] = node_id("who:person:jmartin1")
+      assert [[_]] = node_id("who:person:jmartin2")
+      # distinct person nodes, one shared role node
+      assert Repo.query!("SELECT count(*) FROM node WHERE key LIKE 'who:person:%'").rows == [[2]]
+      assert Repo.query!("SELECT count(*) FROM node WHERE key = 'who:role:engineer'").rows == [[1]]
+    end
+
+    test "a mis-typed relation↔kind fact is DROPPED (managed_by must be person→person)" do
+      # managed_by whose object is a team is not admissible → no edge written
+      ids = WhoMap.write(anchor(), [fact("jdoe", "person", "managed_by", "Engineering", "team")], "p")
+      assert ids == []
+      assert node_id("who:person:jdoe") == []
+    end
+
+    test "managed_by person→person is admissible" do
+      ids = WhoMap.write(anchor(), [fact("jdoe", "person", "managed_by", "bsmith", "person")], "p")
+      assert [[a]] = node_id("who:person:jdoe")
+      assert [[b]] = node_id("who:person:bsmith")
+
+      assert [[_]] =
+               Repo.query!(
+                 "SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'managed_by'",
+                 [a, b]
+               ).rows
+
+      assert length(ids) == 3
+    end
+
+    test "who nodes/edges are clamped to group scope (no-leak — never public)" do
+      # even a public source anchor yields group-scoped who data
+      pub_anchor = %{id: Store.upsert_node("source", "ldap:directory", scope: "public"), scope: "public"}
+      WhoMap.write(pub_anchor, [fact("jdoe", "person", "works_in", "Eng", "team")], "p")
+
+      assert Repo.query!("SELECT scope FROM node WHERE key = 'who:person:jdoe'").rows == [["group"]]
+
+      assert Repo.query!(
+               "SELECT DISTINCT visibility_scope FROM edge WHERE type = 'works_in'"
+             ).rows == [["group"]]
+    end
+  end
+
+  describe "write_profile/3 — searchable profile content" do
+    test "stores allowlisted attrs as the person node's content body (name searchable)" do
+      profile = %{"uid" => "jdoe", "cn" => "Jane Doe", "title" => "Engineer", "ou" => "Platform"}
+      person = WhoMap.write_profile(profile, "p")
+
+      assert [[body]] = Repo.query!("SELECT body FROM content WHERE node_id = $1", [person]).rows
+      assert body =~ "Jane Doe"
+      assert body =~ "Engineer"
+      # keyed by uid
+      assert Repo.query!("SELECT key FROM node WHERE id = $1", [person]).rows == [["who:person:jdoe"]]
+    end
+
+    test "is idempotent — a re-write updates the same single content row" do
+      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p")
+      person = WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane D. Roe"}, "p")
+
+      assert Repo.query!("SELECT count(*) FROM content WHERE node_id = $1", [person]).rows == [[1]]
+      assert [[body]] = Repo.query!("SELECT body FROM content WHERE node_id = $1", [person]).rows
+      assert body =~ "Jane D. Roe"
+    end
+
+    test "a missing/blank uid is refused" do
+      assert WhoMap.write_profile(%{"cn" => "No Uid"}, "p") == :error
+      assert WhoMap.write_profile(%{"uid" => "  "}, "p") == :error
+    end
+  end
+end

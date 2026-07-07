@@ -15,10 +15,29 @@ defmodule Swarm.WorldMap.DomainTest do
       assert "carries" in d.relations
     end
 
+    test "the who (org-directory) domain declares its serve knobs" do
+      d = Domain.who()
+      assert d.key == :who
+      # authoritative single source → serves on 1 (reconciliation, not corroboration, defends stale)
+      assert d.min_corroboration == 1
+      assert d.entail_system =~ "ORG-DIRECTORY"
+      assert d.scope == ["group"]
+      assert "managed_by" in d.relations
+      # cue fires on who-questions...
+      assert Regex.match?(d.cue, "who manages the platform team")
+      assert Regex.match?(d.cue, "who is Jane Doe")
+      assert Regex.match?(d.cue, "who's in the SRE team")
+      # ...but NOT on ownership (no ownership relation — false-serve guard, both reviewers)
+      refute Regex.match?(d.cue, "who owns the billing service")
+      refute Regex.match?(d.cue, "how do I reset my password")
+    end
+
     test "registry lookup" do
       assert Domain.get(:network).key == :network
+      assert Domain.get(:who).key == :who
       assert Domain.get(:nope) == nil
       assert Enum.any?(Domain.all(), &(&1.key == :network))
+      assert Enum.any?(Domain.all(), &(&1.key == :who))
     end
   end
 

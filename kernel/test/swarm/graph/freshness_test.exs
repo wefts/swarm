@@ -11,7 +11,7 @@ defmodule Swarm.Graph.FreshnessTest do
       assert Freshness.class("contains") == :structural
       assert Freshness.class("has_address") == :configuration
       assert Freshness.class("is_a") == :identity
-      assert Freshness.class("managed_by") == :structural
+      assert Freshness.class("managed_by") == :configuration
       assert Freshness.class("totally_unknown_rel") == :configuration
     end
   end
