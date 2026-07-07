@@ -185,11 +185,15 @@ defmodule Swarm.Enrichment.WhoMap do
           """
           WITH servable AS (
             SELECT n.id, n.key,
-                   (SELECT count(*) FROM unnest($3::text[]) t
-                      WHERE lower(n.key) LIKE t
-                         OR (n.key LIKE 'who:person:%' AND EXISTS (
-                               SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE t))
-                   ) AS overlap
+                   -- a KEY-tail match (the team/role/site actually NAMED X) weighs 2; a mere content
+                   -- mention (a person whose profile happens to name X) weighs 1 — so "who's in the
+                   -- X team" ranks the TEAM node above its members (else it serves 1-of-N as if all).
+                   (SELECT coalesce(sum(
+                             CASE WHEN lower(n.key) LIKE t THEN 2
+                                  WHEN n.key LIKE 'who:person:%' AND EXISTS (
+                                         SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE t) THEN 1
+                                  ELSE 0 END), 0)
+                      FROM unnest($3::text[]) t) AS overlap
               FROM node n
              WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
           )

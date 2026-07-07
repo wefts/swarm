@@ -146,8 +146,12 @@ defmodule Swarm.Enrichment.WhoMapTest do
     test "candidates/2 resolves a person by profile NAME and a team by key" do
       # person by name (keyed by uid — name lives only in content)
       assert "who:person:jdoe" in WhoMap.candidates("who manages Jane Doe", ["group"])
-      # team by canonical key tail
-      assert "who:team:platform" in WhoMap.candidates("who is in the platform team", ["group"])
+      # team by canonical key tail — and it RANKS ABOVE its own members (a key-tail match weighs
+      # more than a member merely mentioning the team in their profile), so "who's in team X"
+      # resolves to the team (full roster) not one member (1-of-N served as if all).
+      cands = WhoMap.candidates("who is in the platform team", ["group"])
+      assert "who:team:platform" in cands
+      assert List.first(cands) == "who:team:platform"
       # scope-fenced
       assert WhoMap.candidates("Jane Doe", ["public"]) == []
     end

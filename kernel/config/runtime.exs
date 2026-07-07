@@ -126,6 +126,15 @@ if System.get_env("SWARM_TIER_GATE_NETWORK_SERVE") == "true" do
   config :swarm, :tier_gate, network_serve: true
 end
 
+# The :who serve path (org-directory who-is-who, E1) — OFF unless explicitly enabled, its OWN
+# go/no-go. Calibrated on `Swarm.WorldMap.Gate.WhoCalibration` (fsr 0.0 / recall 1.0, gemma4:31b).
+# Serves an AUTHORITATIVE single-source directory at min_corroboration 1 — safe because the
+# substrate is kept current by full-state RECONCILIATION (each refresh purges + rebuilds), so a
+# departed/moved person can't be served stale.
+if System.get_env("SWARM_TIER_GATE_WHO_SERVE") == "true" do
+  config :swarm, :tier_gate, who_serve: true
+end
+
 # Corroboration floor for the network serve path (default 2 = only multi-source-confirmed;
 # 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
 # the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
