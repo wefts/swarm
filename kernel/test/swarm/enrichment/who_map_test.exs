@@ -56,6 +56,28 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert node_id("who:person:jdoe") == []
     end
 
+    test "has_employment (person→status) and has_role_family (person→family) are governed relations" do
+      ids =
+        WhoMap.write(anchor(), [
+          fact("jdoe", "person", "has_employment", "contractor", "status"),
+          fact("jdoe", "person", "has_role_family", "developer", "family")
+        ], "p")
+
+      assert [[_]] = node_id("who:status:contractor")
+      assert [[dev]] = node_id("who:family:developer")
+      assert [[jdoe]] = node_id("who:person:jdoe")
+
+      assert [[_]] =
+               Repo.query!(
+                 "SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'has_role_family'",
+                 [jdoe, dev]
+               ).rows
+
+      # a mis-typed family edge (object not a family) is dropped
+      assert WhoMap.write(anchor(), [fact("jdoe", "person", "has_role_family", "bob", "person")], "p") == []
+      refute length(ids) == 0
+    end
+
     test "managed_by person→person is admissible" do
       ids = WhoMap.write(anchor(), [fact("jdoe", "person", "managed_by", "bsmith", "person")], "p")
       assert [[a]] = node_id("who:person:jdoe")
@@ -156,6 +178,35 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert List.first(cands) == "who:team:platform"
       # scope-fenced
       assert WhoMap.candidates("Jane Doe", ["public"]) == []
+    end
+
+    test "candidates/2 resolves role-family + employment despite plurals and 2-char acronyms" do
+      a = anchor()
+      WhoMap.write(a, [
+        fact("jdoe", "person", "has_role_family", "developer", "family"),
+        fact("hsmith", "person", "has_role_family", "hr", "family"),
+        fact("csmith", "person", "has_employment", "contractor", "status")
+      ], "p")
+
+      # plural query → singular family key
+      assert "who:family:developer" in WhoMap.candidates("who are the developers", ["group"])
+      # 2-char acronym family (would be dropped by a ≥3 filter)
+      assert "who:family:hr" in WhoMap.candidates("who works in HR", ["group"])
+      # plural → singular status key
+      assert "who:status:contractor" in WhoMap.candidates("who are the contractors", ["group"])
+    end
+
+    test "candidates/2 maps query-word synonyms to the family (admins→sysadmin, managers→management)" do
+      a = anchor()
+      WhoMap.write(a, [
+        fact("s1", "person", "has_role_family", "sysadmin", "family"),
+        fact("m1", "person", "has_role_family", "management", "family")
+      ], "p")
+
+      # "admins"/"managers" don't share a prefix with sysadmin/management — synonym map bridges them,
+      # and the exact-tier (100) puts the FAMILY first over any look-alike title.
+      assert List.first(WhoMap.candidates("who are the admins", ["group"])) == "who:family:sysadmin"
+      assert List.first(WhoMap.candidates("who are the managers", ["group"])) == "who:family:management"
     end
   end
 end

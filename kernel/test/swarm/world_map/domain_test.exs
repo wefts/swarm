@@ -23,6 +23,8 @@ defmodule Swarm.WorldMap.DomainTest do
       assert d.entail_system =~ "ORG-DIRECTORY"
       assert d.scope == ["group"]
       assert "managed_by" in d.relations
+      assert "has_role_family" in d.relations
+      assert "has_employment" in d.relations
       # cue fires on who-questions...
       assert Regex.match?(d.cue, "who manages the platform team")
       assert Regex.match?(d.cue, "who is Jane Doe")

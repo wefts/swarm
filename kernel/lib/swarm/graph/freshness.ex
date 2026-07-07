@@ -53,7 +53,11 @@ defmodule Swarm.Graph.Freshness do
     # decorrelated review 2026-07-07 flagged 180d as too slow a backstop for org facts).
     "managed_by" => :configuration,
     "works_in" => :configuration,
-    "has_title" => :configuration
+    "has_title" => :configuration,
+    # employment category + clustered role family: stable typing-like facts (change on a
+    # role/contract change) — structural backstop; reconciliation is the primary staleness defense.
+    "has_employment" => :structural,
+    "has_role_family" => :structural
   }
 
   # serve floor: a fact decayed below this factor is too stale to serve (→ escalate). 0.5 = one

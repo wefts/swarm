@@ -48,11 +48,13 @@ defmodule Swarm.Enrichment.WhoMap do
   @evidence_kind "observation"
 
   # Governed who-kinds. Each becomes an `is_a` edge to a `concept:who:kind:<kind>` marker.
-  @kinds ~w(person team role site)
+  # `status` = employment category (employee/contractor); `family` = coarse role family (developer,
+  # sysadmin, hr…) clustered from the messy free-text title — the queryable axes over `has_title`.
+  @kinds ~w(person team role site status family)
 
   # Governed relation vocabulary (closed by discipline — an open relation set drifts into an
   # accidental schema via near-duplicates, NetworkMap's top anti-pattern).
-  @relations ~w(managed_by works_in has_title located_at)
+  @relations ~w(managed_by works_in has_title located_at has_employment has_role_family)
 
   # Relation↔endpoint-kind signatures: a fact whose endpoint kinds don't fit is DROPPED (a mis-typed
   # edge is worse than a missing one). `{subject_kinds, object_kinds}`.
@@ -60,10 +62,25 @@ defmodule Swarm.Enrichment.WhoMap do
     "managed_by" => {~w(person), ~w(person)},
     "works_in" => {~w(person), ~w(team)},
     "has_title" => {~w(person), ~w(role)},
-    "located_at" => {~w(person), ~w(site)}
+    "located_at" => {~w(person), ~w(site)},
+    "has_employment" => {~w(person), ~w(status)},
+    "has_role_family" => {~w(person), ~w(family)}
   }
 
   @segmenter "who-profile-v1"
+
+  # Query-word → role-family synonyms, for common query words that don't share a prefix with the
+  # family key (admin↛sysadmin, manager↛management). A matched term ADDS the family tail so the
+  # exact-tier match fires. Keep curated + small; families themselves are the connector's taxonomy.
+  @family_synonyms %{
+    "admin" => "sysadmin", "administrator" => "sysadmin", "sysadmins" => "sysadmin",
+    "ops" => "sysadmin", "infra" => "sysadmin",
+    "manager" => "management", "boss" => "management", "director" => "management",
+    "dev" => "developer", "programmer" => "developer", "coder" => "developer",
+    "tester" => "qa", "recruiter" => "hr", "rh" => "hr", "designer" => "design",
+    "salesperson" => "sales", "seller" => "sales", "commercial" => "sales",
+    "pm" => "project_mgmt", "trainee" => "intern", "lawyer" => "legal", "accountant" => "finance"
+  }
 
   @typedoc "One org-structure fact: typed subject → relation → typed object (keys, pre-namespacing)."
   @type fact :: %{
@@ -178,20 +195,22 @@ defmodule Swarm.Enrichment.WhoMap do
     if terms == [] do
       []
     else
-      likes = Enum.map(terms, &("%" <> &1 <> "%"))
-
       %{rows: rows} =
         Repo.query!(
           """
           WITH servable AS (
             SELECT n.id, n.key,
-                   -- a KEY-tail match (the team/role/site actually NAMED X) weighs 2; a mere content
-                   -- mention (a person whose profile happens to name X) weighs 1 — so "who's in the
-                   -- X team" ranks the TEAM node above its members (else it serves 1-of-N as if all).
+                   -- 3 tiers so the RIGHT node wins: an EXACT key-tail match (the node literally
+                   -- NAMED t — who:family:qa for "qa") DOMINATES (100), so naming a category/team
+                   -- beats a look-alike raw title matching several terms by substring (2 each) or a
+                   -- member's profile-content mention (1). So "who are the QA engineers" → the qa
+                   -- FAMILY (53), not the raw title "qa engineer 1" (1); "contractors" → the status.
                    (SELECT coalesce(sum(
-                             CASE WHEN lower(n.key) LIKE t THEN 2
+                             CASE WHEN split_part(lower(n.key), ':', 3) = t
+                                       OR t LIKE split_part(lower(n.key), ':', 3) || '%' THEN 100
+                                  WHEN lower(n.key) LIKE '%' || t || '%' THEN 2
                                   WHEN n.key LIKE 'who:person:%' AND EXISTS (
-                                         SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE t) THEN 1
+                                         SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
                                   ELSE 0 END), 0)
                       FROM unnest($3::text[]) t) AS overlap
               FROM node n
@@ -208,7 +227,7 @@ defmodule Swarm.Enrichment.WhoMap do
            ORDER BY s.overlap DESC, s.key
            LIMIT $2
           """,
-          [scopes, limit, likes]
+          [scopes, limit, terms]
         )
 
       Enum.map(rows, fn [key, _o] -> key end)
@@ -217,10 +236,21 @@ defmodule Swarm.Enrichment.WhoMap do
 
   @spec query_terms(String.t()) :: [String.t()]
   defp query_terms(query) do
-    query
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
-    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
+    base =
+      query
+      |> String.downcase()
+      |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+      # ≥2 (not 3): 2-char role-family acronyms — hr, qa, ux, bi — are exactly what we match on.
+      |> Enum.filter(&(String.length(&1) >= 2 and &1 not in @stopwords))
+
+    # add de-pluralized variants (kept ALONGSIDE the original) so "developers"/"contractors"
+    # match the singular family/status keys, then map query-word synonyms to family tails
+    # (admins→sysadmin, managers→management) so the exact-tier match fires.
+    singular = Enum.map(base, &String.replace_suffix(&1, "s", ""))
+    synonyms = for t <- base ++ singular, fam = @family_synonyms[t], do: fam
+
+    (base ++ singular ++ synonyms)
+    |> Enum.filter(&(String.length(&1) >= 2))
     |> Enum.uniq()
   end
 
