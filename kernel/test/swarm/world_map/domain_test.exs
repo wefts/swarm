@@ -27,12 +27,16 @@ defmodule Swarm.WorldMap.DomainTest do
       assert "has_employment" in d.relations
       assert "member_of" in d.relations
       assert "works_in" in d.relations
+      assert "managed_by_team" in d.relations
       # cue fires on who-questions...
       assert Regex.match?(d.cue, "who manages the platform team")
       assert Regex.match?(d.cue, "who is Jane Doe")
       assert Regex.match?(d.cue, "who's in the SRE team")
-      # ...but NOT on ownership (no ownership relation — false-serve guard, both reviewers)
-      refute Regex.match?(d.cue, "who owns the billing service")
+      # ...and now also on service-ownership verbs (E-service P1: services ride this same :who
+      # path; `managed_by_team` is the governed relation that keeps this from over-answering).
+      assert Regex.match?(d.cue, "who owns the keycloak service")
+      assert Regex.match?(d.cue, "who runs gitlab")
+      assert Regex.match?(d.cue, "who is responsible for ldap")
       refute Regex.match?(d.cue, "how do I reset my password")
     end
 

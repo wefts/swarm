@@ -59,7 +59,8 @@ defmodule Swarm.Graph.Freshness do
     # role/contract change) — structural backstop; reconciliation is the primary staleness defense.
     "has_employment" => :structural,
     "has_role_family" => :structural,
-    "in_group" => :structural
+    "in_group" => :structural,
+    "managed_by_team" => :structural
   }
 
   # serve floor: a fact decayed below this factor is too stale to serve (→ escalate). 0.5 = one
