@@ -173,6 +173,15 @@ defmodule Swarm.Enrichment.WhoMap do
 
   def write_profile(_profile, _provenance, _opts), do: :error
 
+  @doc "Upsert a curated group node (who:group:<slug>) with name+aliases as searchable content."
+  @spec write_group(String.t(), String.t(), [String.t()]) :: integer()
+  def write_group(slug, name, aliases) when is_binary(slug) do
+    node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: "group")
+    body = Enum.join([name | List.wrap(aliases)], " · ")
+    put_content(node_id, "group: " <> body)
+    node_id
+  end
+
   # Stopwords + question words stripped from candidate matching (so "who is in the X team" probes on
   # "X"/"team", not "who"/"the"). Kept small + generic.
   @stopwords ~w(who whom whose the a an of in on at to for and or is are was were be whos
@@ -194,6 +203,7 @@ defmodule Swarm.Enrichment.WhoMap do
   def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
+    qnorm = query |> String.downcase() |> String.replace(~r/[^\p{L}\p{N}]+/u, " ") |> String.trim()
 
     if terms == [] do
       []
@@ -215,22 +225,23 @@ defmodule Swarm.Enrichment.WhoMap do
                                   WHEN n.key LIKE 'who:person:%' AND EXISTS (
                                          SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
                                   ELSE 0 END), 0)
-                      FROM unnest($3::text[]) t) AS overlap
+                      FROM unnest($3::text[]) t)
+                   -- group phrase tier: the query CONTAINS a group name/alias phrase (≥ 2 words) → strong
+                   + CASE WHEN n.key LIKE 'who:group:%' AND EXISTS (
+                            SELECT 1 FROM content c, unnest(string_to_array(replace(lower(c.body), 'group: ', ''), ' · ')) phrase
+                             WHERE c.node_id = n.id AND length(phrase) > 3
+                               AND position(' ' in phrase) > 0 AND position(phrase in $4) > 0) THEN 300 ELSE 0 END
+                   AS overlap
               FROM node n
              WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
           )
-          SELECT s.key, s.overlap
-            FROM servable s
+          SELECT s.key, s.overlap FROM servable s
            WHERE s.overlap > 0
-             AND EXISTS (
-                   SELECT 1 FROM edge e
-                    WHERE (e.src = s.id OR e.dst = s.id) AND e.type <> 'is_a' AND e.reward >= 0
-                      AND e.visibility_scope = ANY($1)
-                 )
+             AND EXISTS (SELECT 1 FROM edge e WHERE (e.src = s.id OR e.dst = s.id) AND e.type <> 'is_a' AND e.reward >= 0 AND e.visibility_scope = ANY($1))
            ORDER BY s.overlap DESC, s.key
            LIMIT $2
           """,
-          [scopes, limit, terms]
+          [scopes, limit, terms, qnorm]
         )
 
       Enum.map(rows, fn [key, _o] -> key end)

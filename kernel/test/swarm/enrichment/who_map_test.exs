@@ -231,4 +231,19 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert List.first(WhoMap.candidates("who are the managers", ["group"])) == "who:family:management"
     end
   end
+
+  describe "curated group resolution" do
+    test "a group resolves by alias PHRASE over a broad parent org" do
+      a = anchor()
+      # org AlterWay + a curated group whose alias is the 2-word phrase
+      WhoMap.write(a, [fact("u1", "person", "works_in", "AlterWay", "org")], "p")
+      WhoMap.write(a, [fact("u2", "person", "in_group", "alterway-ops", "group")], "p")
+      WhoMap.write_group("alterway-ops", "AlterWay ops", ["aw ops", "ops alterway"])
+
+      # bare entity query → the org
+      assert List.first(WhoMap.candidates("who works in AlterWay", ["group"])) == "who:org:alterway"
+      # entity + qualifier → the curated group (phrase "alterway ops" in the query)
+      assert List.first(WhoMap.candidates("who is in AlterWay ops", ["group"])) == "who:group:alterway-ops"
+    end
+  end
 end
