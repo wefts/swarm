@@ -199,6 +199,22 @@ message AskRequest {
   // this canonical id (a deployment fact); the kernel uses it to resolve "my X"
   // and to scope. Empty ⇒ anonymous (a first-person query is then limited).
   string viewer = 3;
+  // Conversational memory (chat-thread epic 2, hive/docs/design/chat-thread-ui.md):
+  // entity KEYS the previous turn's AskResponse.citations already resolved
+  // (non-claim citations' `ref` IS the graph node key — the channel echoes them
+  // back here, no new extraction work). Folded into the world-map tier-gate's
+  // candidate keys so a pronoun follow-up ("its dependencies?") can still hit the
+  // fast structured-serve path — deliberately NOT resolved via an LLM rewrite (a
+  // bogus/foreign-scoped key here simply fails to match real structure; the gate's
+  // existing scope/evidence checks are the only validation, so this adds no new
+  // no-leak surface). Empty ⇒ unchanged behavior.
+  repeated string active_keys = 4;
+  // Optional kernel-owned conversation to draw recent history from (ADR-16) — used
+  // ONLY on the escalate/consilium path (an LLM call is already being paid for
+  // there); owner-enforced via the SAME `Swarm.Conversations` predicate as
+  // `GetConversation` — a `viewer` that doesn't own it (or isn't a real actor
+  // uuid) silently yields no history, never an error or a leak. Empty ⇒ no history.
+  string conversation_id = 5;
 }
 
 message Citation {

@@ -37,7 +37,14 @@ defmodule Swarm.Core.Server do
   @spec ask(Swarm.Core.V1.AskRequest.t(), GRPC.Server.Stream.t()) :: AskResponse.t()
   def ask(req, _stream) do
     {viewer, scopes} = ctx(req.viewer, req.scopes)
-    a = Core.ask(req.query, scopes: scopes, viewer: viewer)
+
+    a =
+      Core.ask(req.query,
+        scopes: scopes,
+        viewer: viewer,
+        active_keys: req.active_keys,
+        conversation_id: nz(req.conversation_id)
+      )
 
     %AskResponse{
       answer: a.answer,

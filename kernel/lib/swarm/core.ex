@@ -11,7 +11,7 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
+  alias Swarm.{Activity, Consilium, Conversations, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
 
@@ -434,7 +434,7 @@ defmodule Swarm.Core do
   end
 
   defp deliberate(query, hits, base_status, scopes, profile, opts) do
-    grounding = build_grounding(profile, hits)
+    grounding = build_grounding(profile, hits) |> prepend_history(opts)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -465,9 +465,16 @@ defmodule Swarm.Core do
     if tier_gate_enabled?(opts) do
       # Candidate keys: the query's procedure-shaped entities FIRST (overlap-ranked — a
       # key-only procedure entity ranks poorly in content retrieval, so the gate would
-      # otherwise never see it; ADR-17 #2), then the retrieval hits as fallback. Order matters:
-      # the gate picks the best-matching procedure, so the targeted candidates lead.
-      candidate_keys = Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits))
+      # otherwise never see it; ADR-17 #2), then the retrieval hits, then any
+      # conversational `active_keys` (chat-thread epic 2 — a pronoun follow-up like
+      # "its dependencies?" has NO usable key of its own; the channel echoes back the
+      # previous turn's citation keys here instead of an LLM rewriting the query text).
+      # Order matters: the gate picks the best-matching candidate, so query-derived
+      # keys still lead — active_keys only fill in what the query text alone can't.
+      # No new no-leak surface: a bogus/foreign-scoped key here simply fails the
+      # gate's existing scope+evidence checks below, same as a wrong guess would.
+      candidate_keys =
+        Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits) ++ active_keys(opts))
 
       # Neighborhood serve paths (network, who, …) are registry-driven (E2b): for each domain in
       # `Domain.neighborhood_domains/0`, probe its OWN candidate source (net:<kind>:<name> via
@@ -550,6 +557,19 @@ defmodule Swarm.Core do
   # Candidate entity keys to probe for procedures — the retrieval hits' keys, bounded.
   @spec hit_keys([hit()]) :: [String.t()]
   defp hit_keys(hits), do: hits |> Enum.map(& &1.key) |> Enum.uniq() |> Enum.take(8)
+
+  # Client-supplied (chat-thread epic 2) — sanitize before folding into the gate's
+  # candidate list: drop blanks, cap the count (a buggy/abusive channel sending an
+  # unbounded list is just noise here, never a correctness or leak issue, but still
+  # bounded on principle).
+  @spec active_keys(keyword()) :: [String.t()]
+  defp active_keys(opts) do
+    opts
+    |> Keyword.get(:active_keys, [])
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> Enum.take(20)
+  end
 
   # OFF by default (config `:swarm, :tier_gate, enabled: true`); `opts[:tier_gate]`
   # overrides per-call (tests, shadow measurement). Until the go/no-go council, wiring
@@ -692,6 +712,55 @@ defmodule Swarm.Core do
       |> String.slice(0, @grounding_char_budget)
 
     [facts_block, passages] |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
+  end
+
+  # Chat-thread epic 2: fold recent conversation history into the grounding, ONLY
+  # on the escalate path (an LLM call is already being paid for; the marginal
+  # prompt cost is near-free) and ONLY when it's safe to fetch — reuses the ADR-16
+  # `Conversations` owner-enforcement predicate exactly, so a `viewer` that doesn't
+  # own `conversation_id` (or isn't a real actor uuid — the legacy dual-accept
+  # fallback can hand us a plaintext login here) silently yields no history, never
+  # an error or a leak. No new no-leak surface: this is the SAME check
+  # `GetConversation` already ship-gate-tests.
+  @history_turns 6
+  @spec prepend_history(String.t(), keyword()) :: String.t()
+  defp prepend_history(grounding, opts) do
+    case history_block(opts) do
+      "" -> grounding
+      history -> Enum.join([history, grounding] |> Enum.reject(&(&1 == "")), "\n\n")
+    end
+  end
+
+  # NOTE: deliberately NOT `Ecto.UUID.cast/1` — it accepts any 16-BYTE string as
+  # raw UUID bytes (not just canonical `8-4-4-4-12` hex-dash form), so a plaintext
+  # login that happens to be exactly 16 bytes (e.g. "not-a-uuid-login") casts
+  # "successfully" and then crashes `Ecto.UUID.dump!/1` downstream in
+  # `Conversations` — caught by this epic's own tests. A real actor uuid is
+  # ALWAYS canonical form, so a strict format regex is both correct and safe here.
+  # (The pre-existing `Conversations.valid_uuid?/1` and `Server.guarded_target/2`
+  # share this same cast-based fragility — carded separately, not fixed here:
+  # board/todo/conversations-uuid-cast-fragility.md — out of this epic's scope.)
+  @uuid_re ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  @spec valid_actor_uuid?(term()) :: boolean()
+  defp valid_actor_uuid?(s), do: is_binary(s) and Regex.match?(@uuid_re, s)
+
+  @spec history_block(keyword()) :: String.t()
+  defp history_block(opts) do
+    conversation_id = Keyword.get(opts, :conversation_id)
+    viewer = Keyword.get(opts, :viewer, "")
+
+    with true <- is_binary(conversation_id),
+         true <- valid_actor_uuid?(viewer),
+         {:ok, %{messages: messages}} <- Conversations.get(viewer, conversation_id) do
+      text =
+        messages
+        |> Enum.take(-@history_turns)
+        |> Enum.map_join("\n", &"#{&1.role}: #{&1.body}")
+
+      if text == "", do: "", else: "## recent conversation\n" <> text
+    else
+      _ -> ""
+    end
   end
 
   @spec hit_grounding(hit()) :: String.t()
