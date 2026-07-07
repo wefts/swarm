@@ -122,6 +122,19 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert WhoMap.write(anchor(), [fact("jdoe", "person", "in_group", "bob", "person")], "p") == []
       refute ids == []
     end
+
+    test "service + managed_by_team (service→group) is governed; write_service stores content" do
+      ids = WhoMap.write(anchor(), [fact("keycloak", "service", "managed_by_team", "dsi", "group")], "p")
+      assert [[svc]] = node_id("who:service:keycloak")
+      assert [[grp]] = node_id("who:group:dsi")
+      assert [[_]] = Repo.query!("SELECT id FROM edge WHERE src=$1 AND dst=$2 AND type='managed_by_team'", [svc, grp]).rows
+      # mis-typed: managed_by_team object must be a group
+      assert WhoMap.write(anchor(), [fact("x", "service", "managed_by_team", "bob", "person")], "p") == []
+      # write_service stores searchable name/aliases
+      s = WhoMap.write_service("keycloak", "Keycloak / SSO", ["sso"])
+      assert Repo.query!("SELECT body FROM content WHERE node_id=$1", [s]).rows |> hd() |> hd() =~ "Keycloak"
+      refute ids == []
+    end
   end
 
   describe "write_profile/3 — searchable profile content" do

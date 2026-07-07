@@ -51,11 +51,11 @@ defmodule Swarm.Enrichment.WhoMap do
   # `org` = employing subsidiary/entity (AlterWay, SensioLabs…, from ou); `team` = the finer
   # team/department (from departmentNumber); `status` = employment category (employee/contractor);
   # `family` = coarse role family (developer, sysadmin, hr…) clustered from the messy free-text title.
-  @kinds ~w(person team role site status family org group)
+  @kinds ~w(person team role site status family org group service)
 
   # Governed relation vocabulary (closed by discipline — an open relation set drifts into an
   # accidental schema via near-duplicates, NetworkMap's top anti-pattern).
-  @relations ~w(managed_by works_in member_of has_title located_at has_employment has_role_family in_group)
+  @relations ~w(managed_by works_in member_of has_title located_at has_employment has_role_family in_group managed_by_team)
 
   # Relation↔endpoint-kind signatures: a fact whose endpoint kinds don't fit is DROPPED (a mis-typed
   # edge is worse than a missing one). `{subject_kinds, object_kinds}`. The org hierarchy has two
@@ -68,7 +68,8 @@ defmodule Swarm.Enrichment.WhoMap do
     "located_at" => {~w(person), ~w(site)},
     "has_employment" => {~w(person), ~w(status)},
     "has_role_family" => {~w(person), ~w(family)},
-    "in_group" => {~w(person), ~w(group)}
+    "in_group" => {~w(person), ~w(group)},
+    "managed_by_team" => {~w(service), ~w(group)}
   }
 
   @segmenter "who-profile-v1"
@@ -179,6 +180,14 @@ defmodule Swarm.Enrichment.WhoMap do
     node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: "group")
     body = Enum.join([name | List.wrap(aliases)], " · ")
     put_content(node_id, "group: " <> body)
+    node_id
+  end
+
+  @doc "Upsert a service node (who:service:<slug>) with name+aliases as searchable content."
+  @spec write_service(String.t(), String.t(), [String.t()]) :: integer()
+  def write_service(slug, name, aliases) when is_binary(slug) do
+    node_id = Store.upsert_node(@entity_type, entity_key("service", slug), scope: "group")
+    put_content(node_id, "service: " <> Enum.join([name | List.wrap(aliases)], " · "))
     node_id
   end
 
