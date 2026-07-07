@@ -48,19 +48,22 @@ defmodule Swarm.Enrichment.WhoMap do
   @evidence_kind "observation"
 
   # Governed who-kinds. Each becomes an `is_a` edge to a `concept:who:kind:<kind>` marker.
-  # `status` = employment category (employee/contractor); `family` = coarse role family (developer,
-  # sysadmin, hr…) clustered from the messy free-text title — the queryable axes over `has_title`.
-  @kinds ~w(person team role site status family)
+  # `org` = employing subsidiary/entity (AlterWay, SensioLabs…, from ou); `team` = the finer
+  # team/department (from departmentNumber); `status` = employment category (employee/contractor);
+  # `family` = coarse role family (developer, sysadmin, hr…) clustered from the messy free-text title.
+  @kinds ~w(person team role site status family org)
 
   # Governed relation vocabulary (closed by discipline — an open relation set drifts into an
   # accidental schema via near-duplicates, NetworkMap's top anti-pattern).
-  @relations ~w(managed_by works_in has_title located_at has_employment has_role_family)
+  @relations ~w(managed_by works_in member_of has_title located_at has_employment has_role_family)
 
   # Relation↔endpoint-kind signatures: a fact whose endpoint kinds don't fit is DROPPED (a mis-typed
-  # edge is worse than a missing one). `{subject_kinds, object_kinds}`.
+  # edge is worse than a missing one). `{subject_kinds, object_kinds}`. The org hierarchy has two
+  # levels: `works_in` an ENTITY/subsidiary (ou) ⊃ `member_of` a TEAM/department (departmentNumber).
   @signatures %{
     "managed_by" => {~w(person), ~w(person)},
-    "works_in" => {~w(person), ~w(team)},
+    "works_in" => {~w(person), ~w(org)},
+    "member_of" => {~w(person), ~w(team)},
     "has_title" => {~w(person), ~w(role)},
     "located_at" => {~w(person), ~w(site)},
     "has_employment" => {~w(person), ~w(status)},
@@ -74,7 +77,6 @@ defmodule Swarm.Enrichment.WhoMap do
   # exact-tier match fires. Keep curated + small; families themselves are the connector's taxonomy.
   @family_synonyms %{
     "admin" => "sysadmin", "administrator" => "sysadmin", "sysadmins" => "sysadmin",
-    "ops" => "sysadmin", "infra" => "sysadmin",
     "manager" => "management", "boss" => "management", "director" => "management",
     "dev" => "developer", "programmer" => "developer", "coder" => "developer",
     "tester" => "qa", "recruiter" => "hr", "rh" => "hr", "designer" => "design",
@@ -206,9 +208,9 @@ defmodule Swarm.Enrichment.WhoMap do
                    -- member's profile-content mention (1). So "who are the QA engineers" → the qa
                    -- FAMILY (53), not the raw title "qa engineer 1" (1); "contractors" → the status.
                    (SELECT coalesce(sum(
-                             CASE WHEN split_part(lower(n.key), ':', 3) = t
-                                       OR t LIKE split_part(lower(n.key), ':', 3) || '%' THEN 100
-                                  WHEN lower(n.key) LIKE '%' || t || '%' THEN 2
+                             CASE WHEN replace(split_part(lower(n.key), ':', 3), ' ', '') = t
+                                       OR t LIKE replace(split_part(lower(n.key), ':', 3), ' ', '') || '%' THEN 100
+                                  WHEN replace(lower(n.key), ' ', '') LIKE '%' || t || '%' THEN 2
                                   WHEN n.key LIKE 'who:person:%' AND EXISTS (
                                          SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
                                   ELSE 0 END), 0)

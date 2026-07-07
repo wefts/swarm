@@ -17,25 +17,32 @@ defmodule Swarm.Enrichment.WhoMapTest do
   defp node_id(key), do: Repo.query!("SELECT id FROM node WHERE key = $1", [key]).rows
 
   describe "write/4 — namespaced entities, is_a markers, governed relations" do
-    test "writes uid-keyed person + team nodes, an is_a marker each, and a works_in edge" do
-      ids = WhoMap.write(anchor(), [fact("jdoe", "person", "works_in", "Engineering", "team")], "p")
+    test "models the 2-level org hierarchy: works_in ENTITY (org) + member_of TEAM" do
+      ids =
+        WhoMap.write(anchor(), [
+          fact("jdoe", "person", "works_in", "AlterWay", "org"),
+          fact("jdoe", "person", "member_of", "France / AlterWay / ops", "team")
+        ], "p")
 
-      # namespaced keys (team canonicalized: downcased)
       assert [[person]] = node_id("who:person:jdoe")
-      assert [[team]] = node_id("who:team:engineering")
+      assert [[org]] = node_id("who:org:alterway")
+      assert [[team]] = node_id("who:team:france / alterway / ops")
 
-      # a works_in edge person→team exists
       assert [[_]] =
                Repo.query!(
                  "SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'works_in'",
+                 [person, org]
+               ).rows
+
+      assert [[_]] =
+               Repo.query!(
+                 "SELECT id FROM edge WHERE src = $1 AND dst = $2 AND type = 'member_of'",
                  [person, team]
                ).rows
 
-      # is_a markers minted (person + team)
-      assert node_id("who:kind:person") != []
-      assert node_id("who:kind:team") != []
-      # returned ids include the two is_a edges + the works_in edge
-      assert length(ids) == 3
+      # works_in with a team-kind object is now mis-typed (entity level is org) → dropped
+      assert WhoMap.write(anchor(), [fact("x", "person", "works_in", "T", "team")], "p") == []
+      refute ids == []
     end
 
     test "keys persons by uid — two same-named people (distinct uids) never collide" do
@@ -95,7 +102,7 @@ defmodule Swarm.Enrichment.WhoMapTest do
     test "who nodes/edges are clamped to group scope (no-leak — never public)" do
       # even a public source anchor yields group-scoped who data
       pub_anchor = %{id: Store.upsert_node("source", "ldap:directory", scope: "public"), scope: "public"}
-      WhoMap.write(pub_anchor, [fact("jdoe", "person", "works_in", "Eng", "team")], "p")
+      WhoMap.write(pub_anchor, [fact("jdoe", "person", "works_in", "Eng", "org")], "p")
 
       assert Repo.query!("SELECT scope FROM node WHERE key = 'who:person:jdoe'").rows == [["group"]]
 
@@ -137,9 +144,9 @@ defmodule Swarm.Enrichment.WhoMapTest do
   describe "neighborhood/3 — bidirectional, name-resolved serve traversal" do
     setup do
       a = anchor()
-      # jdoe works_in platform, managed_by bsmith
+      # jdoe member_of the platform team, managed_by bsmith
       WhoMap.write(a, [
-        fact("jdoe", "person", "works_in", "Platform", "team"),
+        fact("jdoe", "person", "member_of", "Platform", "team"),
         fact("jdoe", "person", "managed_by", "bsmith", "person")
       ], "p")
       # profiles give the resolvable display names
@@ -152,15 +159,15 @@ defmodule Swarm.Enrichment.WhoMapTest do
       facts = WhoMap.neighborhood("who:person:jdoe", ["group"])
       by_rel = Map.new(facts, &{&1.relation, &1})
 
-      assert by_rel["works_in"].object == "platform"
-      assert by_rel["works_in"].object_kind == "team"
+      assert by_rel["member_of"].object == "platform"
+      assert by_rel["member_of"].object_kind == "team"
       assert by_rel["managed_by"].object == "Bob Smith"
       assert by_rel["managed_by"].object_kind == "person"
     end
 
     test "INCOMING to a team surfaces its members by NAME (not uid)" do
       facts = WhoMap.neighborhood("who:team:platform", ["group"])
-      assert [%{relation: "works_in", object: "Jane Doe", object_kind: "person"}] = facts
+      assert [%{relation: "member_of", object: "Jane Doe", object_kind: "person"}] = facts
     end
 
     test "is scope-fenced — nothing served outside the viewer's scopes" do
@@ -176,6 +183,9 @@ defmodule Swarm.Enrichment.WhoMapTest do
       cands = WhoMap.candidates("who is in the platform team", ["group"])
       assert "who:team:platform" in cands
       assert List.first(cands) == "who:team:platform"
+      # the entity/subsidiary level ("who works in AlterWay") resolves to who:org:*
+      WhoMap.write(anchor(), [fact("k", "person", "works_in", "AlterWay", "org")], "p")
+      assert List.first(WhoMap.candidates("who works in AlterWay", ["group"])) == "who:org:alterway"
       # scope-fenced
       assert WhoMap.candidates("Jane Doe", ["public"]) == []
     end
