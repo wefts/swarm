@@ -69,6 +69,12 @@ defmodule Swarm.WorldMap.Coverage do
               procedure_variants: [],
               entity_groups: [],
               neighborhood_subject: nil,
+              # The RAW resolved graph key (e.g. "who:service:keycloak") behind
+              # `neighborhood_subject`'s human-readable label (e.g. "keycloak", or a
+              # person's `cn` — `WhoMap.display_subject/1` is NOT invertible). Chat-thread
+              # epic 2: this, not the display label, is what a NEXT turn's active_keys
+              # must echo back — `dom.neighborhood_fun` only resolves real graph keys.
+              neighborhood_key: nil,
               neighborhood_facts: [],
               blockers: []
 
@@ -80,6 +86,7 @@ defmodule Swarm.WorldMap.Coverage do
             procedure_variants: [map()],
             entity_groups: [map()],
             neighborhood_subject: String.t() | nil,
+            neighborhood_key: String.t() | nil,
             neighborhood_facts: [map()],
             blockers: [Swarm.WorldMap.Coverage.blocker()]
           }
@@ -93,7 +100,7 @@ defmodule Swarm.WorldMap.Coverage do
     opaque, leak-free source references.
     """
     @enforce_keys [:query, :intent, :atoms, :citations]
-    defstruct [:query, :intent, :atoms, :citations, name: nil, domain: nil]
+    defstruct [:query, :intent, :atoms, :citations, name: nil, key: nil, domain: nil]
 
     @type t :: %__MODULE__{
             query: String.t(),
@@ -101,6 +108,9 @@ defmodule Swarm.WorldMap.Coverage do
             atoms: [map()],
             citations: [String.t()],
             name: String.t() | nil,
+            # The raw graph key behind `name`'s display label — see `Descriptor.neighborhood_key`.
+            # Equal to `name` for :procedure (no display transform there); nil for :entity_profile.
+            key: String.t() | nil,
             domain: atom() | nil
           }
   end
@@ -192,6 +202,7 @@ defmodule Swarm.WorldMap.Coverage do
        query: q,
        intent: :procedure,
        name: d.procedure_name,
+       key: d.procedure_name,
        atoms: variant.steps,
        citations: [variant.citation]
      }}
@@ -207,13 +218,16 @@ defmodule Swarm.WorldMap.Coverage do
      }}
   end
 
-  def validate(%Descriptor{intent: :neighborhood, neighborhood_facts: [_ | _] = facts, query: q} = d) do
+  def validate(
+        %Descriptor{intent: :neighborhood, neighborhood_facts: [_ | _] = facts, query: q} = d
+      ) do
     {:ok,
      %Validated{
        query: q,
        intent: :neighborhood,
        domain: d.domain,
        name: d.neighborhood_subject,
+       key: d.neighborhood_key,
        atoms: facts,
        citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
      }}
@@ -305,31 +319,44 @@ defmodule Swarm.WorldMap.Coverage do
     min_corr = Keyword.get(opts, :"#{dom.key}_min_corroboration", dom.min_corroboration)
 
     case first_neighborhood(keys, scopes, fun, min_corr, dom.subject_fun) do
-      {subject, facts} ->
+      {subject, key, facts} ->
         %Descriptor{
           query: query,
           intent: :neighborhood,
           domain: dom.key,
           neighborhood_subject: subject,
+          neighborhood_key: key,
           neighborhood_facts: facts
         }
 
       :none when keys == [] ->
-        %Descriptor{query: query, intent: :neighborhood, domain: dom.key, blockers: [:no_candidate]}
+        %Descriptor{
+          query: query,
+          intent: :neighborhood,
+          domain: dom.key,
+          blockers: [:no_candidate]
+        }
 
       :none ->
-        %Descriptor{query: query, intent: :neighborhood, domain: dom.key, blockers: [:no_corroboration]}
+        %Descriptor{
+          query: query,
+          intent: :neighborhood,
+          domain: dom.key,
+          blockers: [:no_corroboration]
+        }
     end
   end
 
   # First candidate (ranked) whose neighborhood (facts ≥ `min_corr` distinct origins/lineage) is
-  # non-empty; its subject label is the domain's `subject_fun` applied to the resolved key.
+  # non-empty; its subject label is the domain's `subject_fun` applied to the resolved key — the
+  # raw key itself is ALSO returned (chat-thread epic 2: `subject_fun` is a display transform, not
+  # invertible — a served answer's active_keys must echo the raw key, never the display label).
   defp first_neighborhood([], _scopes, _fun, _min_corr, _subject_fun), do: :none
 
   defp first_neighborhood([key | rest], scopes, fun, min_corr, subject_fun) do
     case fun.(key, scopes, min_corroboration: min_corr) do
       [] -> first_neighborhood(rest, scopes, fun, min_corr, subject_fun)
-      facts -> {subject_fun.(key), facts}
+      facts -> {subject_fun.(key), key, facts}
     end
   end
 

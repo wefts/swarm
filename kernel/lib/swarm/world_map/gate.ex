@@ -233,6 +233,7 @@ defmodule Swarm.WorldMap.Gate do
         atoms: facts,
         citations: cits,
         name: subject,
+        key: key,
         domain: domain_key
       }) do
     body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
@@ -243,7 +244,7 @@ defmodule Swarm.WorldMap.Gate do
       citations: cits,
       intent: :neighborhood,
       domain: domain_key,
-      key: subject
+      key: key
     }
   end
 end
