@@ -52,6 +52,15 @@ defmodule Swarm.WorldMap.Gate.WhoCalibration do
       facts: [{"located_at", "Paris"}],
       serve: true
     },
+    %{
+      # "who is <person>" profile lookup — the person's profile facts ARE the answer (the flagship
+      # query that escalated to the consilium before the entail-prompt profile clause).
+      id: "serve-person-profile",
+      query: "who is Jane Doe",
+      subject: "Jane Doe",
+      facts: [{"has_title", "Senior Engineer"}, {"works_in", "Platform"}, {"managed_by", "Carol Lead"}],
+      serve: true
+    },
     # SHOULD VETO — wrong relation / wrong person / a fact the grounding LACKS
     %{
       id: "veto-title-vs-manager",
@@ -72,6 +81,15 @@ defmodule Swarm.WorldMap.Gate.WhoCalibration do
       query: "who manages Jane Doe",
       subject: "Bob Smith",
       facts: [{"managed_by", "Dan Other"}],
+      serve: false
+    },
+    %{
+      # "who is Jane Doe" but the grounding is a DIFFERENT person's profile → veto (the profile
+      # clause must not serve someone else's facts for a named-person identity question).
+      id: "veto-profile-wrong-person",
+      query: "who is Jane Doe",
+      subject: "Bob Smith",
+      facts: [{"has_title", "Senior Engineer"}, {"works_in", "Platform"}],
       serve: false
     },
     %{
