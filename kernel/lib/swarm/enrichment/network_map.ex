@@ -203,8 +203,11 @@ defmodule Swarm.Enrichment.NetworkMap do
     origin = Keyword.get(opts, :origin) || "enrich:origin:node:#{node.id}"
     reliability = Keyword.get(opts, :reliability, @reliability)
     evidence_kind = Keyword.get(opts, :evidence_kind, @evidence_kind)
+    # S1: explicit upstream lineage (nil → Store derives from origin). Wiki-derived callers pass
+    # "wiki:page:#{page_node}" so prose + table + api of the SAME page count as ONE vote.
+    lineage = Keyword.get(opts, :lineage)
     scope = net_scope(node.scope)
-    edge_opts = {reliability, evidence_kind}
+    edge_opts = {reliability, evidence_kind, lineage}
 
     facts
     |> Enum.filter(&admissible?/1)
@@ -247,9 +250,9 @@ defmodule Swarm.Enrichment.NetworkMap do
           map(),
           String.t(),
           String.t(),
-          {float(), String.t()}
+          {float(), String.t(), String.t() | nil}
         ) :: {:ok, integer(), [integer()]} | :error
-  defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind}) do
+  defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind, lineage}) do
     key = entity_key(kind, name)
     ent = Store.upsert_node(@entity_type, key, scope: scope)
     # Kind markers are generic type labels (non-sensitive) — pinned at `group` so the is_a edge's
@@ -259,6 +262,7 @@ defmodule Swarm.Enrichment.NetworkMap do
     case Store.add_edge(ent, marker, "is_a", provenance,
            scope: scope,
            origin: origin,
+           lineage: lineage,
            reliability: reliability,
            evidence_kind: evidence_kind,
            source_node_id: node.id
@@ -278,15 +282,16 @@ defmodule Swarm.Enrichment.NetworkMap do
           map(),
           String.t(),
           String.t(),
-          {float(), String.t()}
+          {float(), String.t(), String.t() | nil}
         ) :: [integer()]
-  defp emit_relation(src, dst, relation, scope, node, origin, provenance, {reliability, evidence_kind}) do
+  defp emit_relation(src, dst, relation, scope, node, origin, provenance, {reliability, evidence_kind, lineage}) do
     directed = [{src, dst} | if(relation in @symmetric, do: [{dst, src}], else: [])]
 
     Enum.flat_map(directed, fn {s, d} ->
       case Store.add_edge(s, d, relation, provenance,
              scope: scope,
              origin: origin,
+             lineage: lineage,
              reliability: reliability,
              evidence_kind: evidence_kind,
              source_node_id: node.id
