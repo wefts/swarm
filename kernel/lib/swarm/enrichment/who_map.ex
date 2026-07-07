@@ -35,8 +35,9 @@ defmodule Swarm.Enrichment.WhoMap do
   """
 
   alias Swarm.Graph.Contract
-  alias Swarm.Ingest.Content
+  alias Swarm.Graph.Freshness
   alias Swarm.Graph.Store
+  alias Swarm.Ingest.Content
   alias Swarm.Repo
 
   @entity_type "entity"
@@ -145,22 +146,104 @@ defmodule Swarm.Enrichment.WhoMap do
       :error
     else
       node_id = Store.upsert_node(@entity_type, key, scope: scope)
-      body = profile_body(profile)
-
-      Repo.query!(
-        """
-        INSERT INTO content (node_id, body, body_hash, segmenter)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (node_id) DO UPDATE SET body = EXCLUDED.body, body_hash = EXCLUDED.body_hash
-        """,
-        [node_id, body, Content.body_hash(body), @segmenter]
-      )
-
+      put_content(node_id, profile_body(profile))
       node_id
     end
   end
 
   def write_profile(_profile, _provenance, _opts), do: :error
+
+  @doc """
+  The who neighborhood of a subject `key` (a `who:<kind>:<canonical>` node): the org-directory facts
+  directly incident to it, in BOTH directions — "who manages X" is X's OUTGOING `managed_by`; "who's
+  in team Y" is Y's INCOMING `works_in`. Each fact resolves its OTHER endpoint's display NAME
+  (persons from their profile content `cn`; teams/roles/sites from the key), so a served answer names
+  people, never bare uids. Applies the S2 freshness serve gate + effective-reliability ranking, same
+  as the network path. `opts`: `:min_corroboration` (default 1), `:freshness` (default true).
+  """
+  @spec neighborhood(String.t(), [String.t()], keyword()) :: [map()]
+  def neighborhood(key, scopes, opts \\ [])
+  def neighborhood(_key, [], _opts), do: []
+
+  def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
+    min_corr = Keyword.get(opts, :min_corroboration, 1)
+    freshness? = Keyword.get(opts, :freshness, true)
+
+    # Both directions in one pass: `dir` marks whether `key` was the src (outgoing) or dst
+    # (incoming); `other` is always the OTHER endpoint (the answer). `cn` is the other endpoint's
+    # profile name (NULL for non-persons / no profile) — resolved from the first `name:` line.
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT e.type, other.key, e.seen_count, e.reliability::float8,
+               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec,
+               substring(c.body from 'name: ([^\n]*)') AS cn
+          FROM node self0
+          JOIN edge e ON (e.src = self0.id OR e.dst = self0.id)
+          JOIN node other ON other.id = CASE WHEN e.src = self0.id THEN e.dst ELSE e.src END
+          LEFT JOIN content c ON c.node_id = other.id
+         WHERE self0.key = $1 AND e.type <> 'is_a' AND e.reward >= 0
+           AND e.visibility_scope = ANY($2) AND other.scope = ANY($2) AND self0.scope = ANY($2)
+           AND e.seen_count >= $3
+        """,
+        [key, scopes, min_corr]
+      )
+
+    rows
+    |> Enum.map(fn [type, okey, seen, rel, age, cn] ->
+      age = age || 0.0
+
+      %{
+        relation: type,
+        object: display_object(okey, cn),
+        object_kind: who_kind(okey),
+        corroboration: seen,
+        effective_reliability: Freshness.effective_reliability(rel || 0.0, age, type),
+        fresh?: Freshness.fresh?(age, type)
+      }
+    end)
+    |> then(fn facts -> if freshness?, do: Enum.filter(facts, & &1.fresh?), else: facts end)
+    |> Enum.sort_by(&{&1.effective_reliability, &1.corroboration}, :desc)
+    |> Enum.map(&Map.delete(&1, :fresh?))
+  end
+
+  @doc "The display name for a who key: a person's `cn` if known, else the canonicalized key tail."
+  @spec display_object(String.t(), String.t() | nil) :: String.t()
+  def display_object(key, cn) do
+    case {who_kind(key), cn} do
+      {"person", name} when is_binary(name) and name != "" -> name
+      _ -> who_tail(key)
+    end
+  end
+
+  @doc "The kind segment of a who key (`who:team:platform` → `team`), or `entity` if malformed."
+  @spec who_kind(String.t()) :: String.t()
+  def who_kind(key) do
+    case String.split(key, ":", parts: 3) do
+      ["who", kind, _] -> kind
+      _ -> "entity"
+    end
+  end
+
+  # The canonical tail of a who key (`who:team:platform` → `platform`), or the raw key if malformed.
+  defp who_tail(key) do
+    case String.split(key, ":", parts: 3) do
+      ["who", _kind, tail] -> tail
+      _ -> key
+    end
+  end
+
+  # Upsert a node's content body (1:1 per node). Shared by profile + label writes.
+  defp put_content(node_id, body) do
+    Repo.query!(
+      """
+      INSERT INTO content (node_id, body, body_hash, segmenter)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (node_id) DO UPDATE SET body = EXCLUDED.body, body_hash = EXCLUDED.body_hash
+      """,
+      [node_id, body, Content.body_hash(body), @segmenter]
+    )
+  end
 
   @doc "Is a directly-fed fact well-typed (vocab + relation↔kind signature)?"
   @spec admissible?(fact()) :: boolean()
@@ -190,6 +273,10 @@ defmodule Swarm.Enrichment.WhoMap do
         ) :: {:ok, integer(), [integer()]} | :error
   defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind, lineage}) do
     ent = Store.upsert_node(@entity_type, entity_key(kind, name), scope: scope)
+    # Non-person nodes (team/role/site) get a searchable LABEL as content so retrieval can resolve a
+    # named team/role/site to its node ("who's in the platform team"). Persons get richer content via
+    # write_profile/3 (their cn/title/…). Idempotent (1:1 content per node).
+    if kind != "person", do: put_content(ent, "#{kind}: #{name}")
     # Kind markers are generic, non-sensitive type labels — pinned at `group` so the is_a edge's
     # visibility invariant (edge scope ≤ min endpoints) holds for the group-scoped entity.
     marker = Store.upsert_node(@marker_type, "who:kind:" <> kind, scope: "group")

@@ -109,4 +109,38 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert WhoMap.write_profile(%{"uid" => "  "}, "p") == :error
     end
   end
+
+  describe "neighborhood/3 — bidirectional, name-resolved serve traversal" do
+    setup do
+      a = anchor()
+      # jdoe works_in platform, managed_by bsmith
+      WhoMap.write(a, [
+        fact("jdoe", "person", "works_in", "Platform", "team"),
+        fact("jdoe", "person", "managed_by", "bsmith", "person")
+      ], "p")
+      # profiles give the resolvable display names
+      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p")
+      WhoMap.write_profile(%{"uid" => "bsmith", "cn" => "Bob Smith"}, "p")
+      :ok
+    end
+
+    test "OUTGOING from a person resolves object names (team by label, manager by cn)" do
+      facts = WhoMap.neighborhood("who:person:jdoe", ["group"])
+      by_rel = Map.new(facts, &{&1.relation, &1})
+
+      assert by_rel["works_in"].object == "platform"
+      assert by_rel["works_in"].object_kind == "team"
+      assert by_rel["managed_by"].object == "Bob Smith"
+      assert by_rel["managed_by"].object_kind == "person"
+    end
+
+    test "INCOMING to a team surfaces its members by NAME (not uid)" do
+      facts = WhoMap.neighborhood("who:team:platform", ["group"])
+      assert [%{relation: "works_in", object: "Jane Doe", object_kind: "person"}] = facts
+    end
+
+    test "is scope-fenced — nothing served outside the viewer's scopes" do
+      assert WhoMap.neighborhood("who:person:jdoe", ["public"]) == []
+    end
+  end
 end

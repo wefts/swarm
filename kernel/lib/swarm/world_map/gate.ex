@@ -57,7 +57,7 @@ defmodule Swarm.WorldMap.Gate do
     @type t :: %__MODULE__{
             text: String.t(),
             citations: [String.t()],
-            intent: :procedure | :entity_profile | :network
+            intent: :procedure | :entity_profile | :network | :who
           }
   end
 
@@ -138,10 +138,18 @@ defmodule Swarm.WorldMap.Gate do
     header <> Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
   end
 
+  defp grounding(%Validated{intent: :who, atoms: facts, name: subject}) do
+    header = if subject, do: "Directory — #{subject}:\n", else: ""
+    header <> Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
+  end
+
   # The default cheap-LLM veto, with the intent-appropriate system prompt. Strict YES/NO; anything
   # but a confident `sufficient:true` escalates. Grounding is fenced as untrusted data.
   defp default_entail(:network, query, grounding),
     do: entail(query, grounding, system: Swarm.WorldMap.Domain.network().entail_system)
+
+  defp default_entail(:who, query, grounding),
+    do: entail(query, grounding, system: Swarm.WorldMap.Domain.who().entail_system)
 
   defp default_entail(_intent, query, grounding), do: entail(query, grounding, [])
 
@@ -213,5 +221,11 @@ defmodule Swarm.WorldMap.Gate do
     body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
     head = if subject, do: "#{subject}:\n", else: "Network:\n"
     %Answer{text: head <> body, citations: cits, intent: :network}
+  end
+
+  def render(%Validated{intent: :who, atoms: facts, citations: cits, name: subject}) do
+    body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
+    head = if subject, do: "#{subject}:\n", else: "Directory:\n"
+    %Answer{text: head <> body, citations: cits, intent: :who}
   end
 end

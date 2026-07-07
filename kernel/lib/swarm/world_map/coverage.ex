@@ -31,13 +31,14 @@ defmodule Swarm.WorldMap.Coverage do
   (Aggregation already emits only counts).
   """
 
+  alias Swarm.Enrichment.WhoMap
   alias Swarm.Graph.Aggregation
   alias Swarm.Graph.Network
   alias Swarm.Graph.Procedure
   alias Swarm.WorldMap.Domain
 
   @typedoc "What kind of structure, if any, cleanly covers the query."
-  @type intent :: :procedure | :entity_profile | :network | :unknown
+  @type intent :: :procedure | :entity_profile | :network | :who | :unknown
 
   @typedoc "Why the structure is insufficient to serve — any blocker ⇒ escalate."
   @type blocker ::
@@ -66,6 +67,8 @@ defmodule Swarm.WorldMap.Coverage do
               entity_groups: [],
               network_subject: nil,
               network_facts: [],
+              who_subject: nil,
+              who_facts: [],
               blockers: []
 
     @type t :: %__MODULE__{
@@ -76,6 +79,8 @@ defmodule Swarm.WorldMap.Coverage do
             entity_groups: [map()],
             network_subject: String.t() | nil,
             network_facts: [map()],
+            who_subject: String.t() | nil,
+            who_facts: [map()],
             blockers: [Swarm.WorldMap.Coverage.blocker()]
           }
   end
@@ -92,7 +97,7 @@ defmodule Swarm.WorldMap.Coverage do
 
     @type t :: %__MODULE__{
             query: String.t(),
-            intent: :procedure | :entity_profile | :network,
+            intent: :procedure | :entity_profile | :network | :who,
             atoms: [map()],
             citations: [String.t()],
             name: String.t() | nil
@@ -128,6 +133,15 @@ defmodule Swarm.WorldMap.Coverage do
     # (wider — leans on the Stage-2 entail veto). Tunable per deploy.
     network_min_corr = Keyword.get(opts, :network_min_corroboration, 2)
     net_cue? = Regex.match?(Domain.network().cue, query)
+    # The WHO (org-directory) serve path — same posture as network: OFF by default until calibrated
+    # (its own false-serve~0 go/no-go), opted in with `who_serve: true`. `who_keys` are the retrieval
+    # hits' who: entity keys; the subject's neighborhood is resolved bidirectionally + name-mapped by
+    # `WhoMap.neighborhood`. min_corroboration 1 (a directory is authoritative — Domain.who()).
+    who_serve = Keyword.get(opts, :who_serve, false)
+    who_keys = Keyword.get(opts, :who_keys, [])
+    who_fun = Keyword.get(opts, :who_fun, &WhoMap.neighborhood/3)
+    who_min_corr = Keyword.get(opts, :who_min_corroboration, Domain.who().min_corroboration)
+    who_cue? = Regex.match?(Domain.who().cue, query)
     # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
     # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
     # query and serves the wrong facts. Only the (validated-safe) PROCEDURE path serves until
@@ -152,6 +166,11 @@ defmodule Swarm.WorldMap.Coverage do
       # entity facts about X would be a category mismatch. Honor the intent split.
       cue? ->
         %Descriptor{query: query, intent: :procedure, blockers: [:no_candidate]}
+
+      # WHO before NETWORK: a "who <verb>" question is a person/team ask even if it names network
+      # gear ("who manages the firewall"); network questions rarely open with a who-cue.
+      who_serve and who_cue? ->
+        who_descriptor(query, who_keys, scopes, who_fun, who_min_corr)
 
       network_serve and net_cue? ->
         network_descriptor(query, network_keys, scopes, network_fun, network_min_corr)
@@ -199,6 +218,17 @@ defmodule Swarm.WorldMap.Coverage do
        query: q,
        intent: :network,
        name: d.network_subject,
+       atoms: facts,
+       citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
+     }}
+  end
+
+  def validate(%Descriptor{intent: :who, who_facts: [_ | _] = facts, query: q} = d) do
+    {:ok,
+     %Validated{
+       query: q,
+       intent: :who,
+       name: d.who_subject,
        atoms: facts,
        citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
      }}
@@ -302,6 +332,32 @@ defmodule Swarm.WorldMap.Coverage do
     case fun.(key, scopes, min_corroboration: min_corr) do
       [] -> first_neighborhood(rest, scopes, fun, min_corr)
       facts -> {display_name(key), facts}
+    end
+  end
+
+  # The who-neighborhood descriptor (mirrors network_descriptor). Resolves the FIRST (best-ranked)
+  # who: subject whose directory neighborhood is non-empty (facts ≥ min_corr distinct lineage; 1 for
+  # the authoritative directory) and serves those facts. `:no_candidate` / `:no_corroboration` ⇒
+  # escalate. Subject label is namespace-stripped (never the raw key).
+  defp who_descriptor(query, who_keys, scopes, who_fun, min_corr) do
+    case first_who(who_keys, scopes, who_fun, min_corr) do
+      {subject, facts} ->
+        %Descriptor{query: query, intent: :who, who_subject: subject, who_facts: facts}
+
+      :none when who_keys == [] ->
+        %Descriptor{query: query, intent: :who, blockers: [:no_candidate]}
+
+      :none ->
+        %Descriptor{query: query, intent: :who, blockers: [:no_corroboration]}
+    end
+  end
+
+  defp first_who([], _scopes, _fun, _min_corr), do: :none
+
+  defp first_who([key | rest], scopes, fun, min_corr) do
+    case fun.(key, scopes, min_corroboration: min_corr) do
+      [] -> first_who(rest, scopes, fun, min_corr)
+      facts -> {WhoMap.display_object(key, nil), facts}
     end
   end
 

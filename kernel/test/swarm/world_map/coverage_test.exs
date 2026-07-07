@@ -265,4 +265,48 @@ defmodule Swarm.WorldMap.CoverageTest do
       assert d.blockers == [:no_candidate]
     end
   end
+
+  describe "describe/3 + validate/1 — who intent (E1 org directory)" do
+    defp who_fun(facts), do: fn _key, _scopes, _opts -> facts end
+    defp who_fact(rel, obj, corr \\ 1), do: %{relation: rel, object: obj, object_kind: "person", corroboration: corr}
+
+    test "OFF by default: a who query without who_serve escalates (unknown intent)" do
+      d = Coverage.describe("who manages the platform team", ["group"],
+            who_keys: ["who:team:platform"], who_fun: who_fun([who_fact("managed_by", "Jane Doe")]))
+      assert d.intent == :unknown
+    end
+
+    test "serves a directory neighborhood when who_serve is on (names resolved, not uids)" do
+      facts = [who_fact("works_in", "Jane Doe"), who_fact("works_in", "Bob Smith")]
+
+      d = Coverage.describe("who is in the platform team", ["group"],
+            who_serve: true, who_keys: ["who:team:platform"], who_fun: who_fun(facts))
+
+      assert d.intent == :who
+      assert d.who_subject == "platform"
+      assert {:ok, %Validated{intent: :who, atoms: ^facts, name: "platform"}} = Coverage.validate(d)
+    end
+
+    test "no candidate → :no_candidate → escalate" do
+      d = Coverage.describe("who manages the platform team", ["group"],
+            who_serve: true, who_keys: [], who_fun: who_fun([]))
+      assert d.blockers == [:no_candidate]
+      assert {:error, [:no_candidate]} = Coverage.validate(d)
+    end
+
+    test "candidate but empty neighborhood → :no_corroboration → escalate (fail-closed)" do
+      d = Coverage.describe("who manages the platform team", ["group"],
+            who_serve: true, who_keys: ["who:person:jdoe"], who_fun: who_fun([]))
+      assert d.blockers == [:no_corroboration]
+      assert {:error, [:no_corroboration]} = Coverage.validate(d)
+    end
+
+    test "a who-cue wins over a network-cue (who manages the firewall → person answer, not topology)" do
+      # both who and network serve are on; "who manages the firewall" is a who ask → :who, not :network
+      d = Coverage.describe("who manages the firewall", ["group"],
+            who_serve: true, who_keys: ["who:person:admin"], who_fun: who_fun([who_fact("managed_by", "Ann Ops")]),
+            network_serve: true, network_keys: ["net:firewall:edge"], network_fun: net_fun([net_fact("protected_by", "x")]))
+      assert d.intent == :who
+    end
+  end
 end

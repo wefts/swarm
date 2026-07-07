@@ -139,4 +139,40 @@ defmodule Swarm.WorldMap.GateTest do
                Gate.sufficient?(d, entail_fun: always(true))
     end
   end
+
+  describe "who intent (E1 org directory)" do
+    defp who_desc(subject, facts) do
+      %Descriptor{
+        query: "who is in #{subject}",
+        intent: :who,
+        who_subject: subject,
+        who_facts:
+          Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "person", corroboration: 1} end),
+        blockers: []
+      }
+    end
+
+    test "serves a directory neighborhood when the entail veto passes (names, not uids)" do
+      d = who_desc("platform", [{"works_in", "Jane Doe"}, {"works_in", "Bob Smith"}])
+
+      assert {:serve, %Answer{intent: :who, text: text, citations: cits}, %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "platform"
+      assert text =~ "works_in Jane Doe"
+      assert cits == ["corroboration:1"]
+    end
+
+    test "entail veto escalates (never serves a different person/relation)" do
+      d = who_desc("billing", [{"managed_by", "Wrong Person"}])
+      assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
+               Gate.sufficient?(d, entail_fun: always(false))
+    end
+
+    test "an empty directory neighborhood cannot mint a Validated (fail-closed)" do
+      d = %Descriptor{query: "q", intent: :who, who_facts: [], blockers: [:no_corroboration]}
+      assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
 end
