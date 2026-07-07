@@ -421,6 +421,7 @@ defmodule Swarm.Enrichment.WhoMap do
       {"location", profile["l"]},
       {"mail", profile["mail"]},
       {"room", profile["room"]},
+      {"employment", profile["employment"]},
       {"uid", profile["uid"]}
     ]
     |> Enum.filter(fn {_k, v} -> is_binary(v) and String.trim(v) != "" end)

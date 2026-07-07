@@ -85,12 +85,14 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
   describe "write_profile/3 — searchable profile content" do
     test "stores allowlisted attrs as the person node's content body (name searchable)" do
-      profile = %{"uid" => "jdoe", "cn" => "Jane Doe", "title" => "Engineer", "ou" => "Platform"}
+      profile = %{"uid" => "jdoe", "cn" => "Jane Doe", "title" => "Engineer", "ou" => "Platform", "employment" => "contractor"}
       person = WhoMap.write_profile(profile, "p")
 
       assert [[body]] = Repo.query!("SELECT body FROM content WHERE node_id = $1", [person]).rows
       assert body =~ "Jane Doe"
       assert body =~ "Engineer"
+      # employment category is searchable (distinguishes contractors/externals from staff)
+      assert body =~ "employment: contractor"
       # keyed by uid
       assert Repo.query!("SELECT key FROM node WHERE id = $1", [person]).rows == [["who:person:jdoe"]]
     end
