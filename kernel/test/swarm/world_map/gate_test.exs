@@ -108,9 +108,10 @@ defmodule Swarm.WorldMap.GateTest do
     defp net_desc(subject, facts) do
       %Descriptor{
         query: "what subnets does #{subject} carry",
-        intent: :network,
-        network_subject: subject,
-        network_facts:
+        intent: :neighborhood,
+        domain: :network,
+        neighborhood_subject: subject,
+        neighborhood_facts:
           Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "subnet", corroboration: 2} end),
         blockers: []
       }
@@ -119,7 +120,8 @@ defmodule Swarm.WorldMap.GateTest do
     test "serves a network neighborhood when the entail veto passes" do
       d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}, {"carries", "10.129.0.0/16"}])
 
-      assert {:serve, %Answer{intent: :network, text: text, citations: cits}, %Audit{decision: :serve}} =
+      assert {:serve, %Answer{intent: :neighborhood, domain: :network, text: text, citations: cits},
+              %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "tunnel orbit"
@@ -134,7 +136,7 @@ defmodule Swarm.WorldMap.GateTest do
     end
 
     test "an empty network neighborhood cannot mint a Validated (fail-closed)" do
-      d = %Descriptor{query: "q", intent: :network, network_facts: [], blockers: [:no_corroboration]}
+      d = %Descriptor{query: "q", intent: :neighborhood, domain: :network, neighborhood_facts: [], blockers: [:no_corroboration]}
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
     end
@@ -144,9 +146,10 @@ defmodule Swarm.WorldMap.GateTest do
     defp who_desc(subject, facts) do
       %Descriptor{
         query: "who is in #{subject}",
-        intent: :who,
-        who_subject: subject,
-        who_facts:
+        intent: :neighborhood,
+        domain: :who,
+        neighborhood_subject: subject,
+        neighborhood_facts:
           Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "person", corroboration: 1} end),
         blockers: []
       }
@@ -155,7 +158,8 @@ defmodule Swarm.WorldMap.GateTest do
     test "serves a directory neighborhood when the entail veto passes (names, not uids)" do
       d = who_desc("platform", [{"works_in", "Jane Doe"}, {"works_in", "Bob Smith"}])
 
-      assert {:serve, %Answer{intent: :who, text: text, citations: cits}, %Audit{decision: :serve}} =
+      assert {:serve, %Answer{intent: :neighborhood, domain: :who, text: text, citations: cits},
+              %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "platform"
@@ -170,7 +174,7 @@ defmodule Swarm.WorldMap.GateTest do
     end
 
     test "an empty directory neighborhood cannot mint a Validated (fail-closed)" do
-      d = %Descriptor{query: "q", intent: :who, who_facts: [], blockers: [:no_corroboration]}
+      d = %Descriptor{query: "q", intent: :neighborhood, domain: :who, neighborhood_facts: [], blockers: [:no_corroboration]}
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
     end

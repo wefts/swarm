@@ -468,22 +468,27 @@ defmodule Swarm.Core do
       # otherwise never see it; ADR-17 #2), then the retrieval hits as fallback. Order matters:
       # the gate picks the best-matching procedure, so the targeted candidates lead.
       candidate_keys = Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits))
-      # Network-neighborhood candidates (net:<kind>:<name> entities matching the query) for the
-      # :network serve path — probed directly, like procedure candidates (ADR-17 world-map).
-      network_keys = Swarm.Graph.Network.candidates(query, scopes)
-      # Who-neighborhood candidates (who:<kind>:<name> — persons by profile content, teams/roles/
-      # sites by key) for the :who serve path (E1). Probed directly like network candidates.
-      who_keys = Swarm.Enrichment.WhoMap.candidates(query, scopes)
+
+      # Neighborhood serve paths (network, who, …) are registry-driven (E2b): for each domain in
+      # `Domain.neighborhood_domains/0`, probe its OWN candidate source (net:<kind>:<name> via
+      # Network.candidates; who:<kind>:<name> — persons by profile content, teams/roles/sites by key
+      # — via WhoMap.candidates), and read its serve flag + corroboration floor from config. A new
+      # neighborhood domain = one Domain registry entry, no wiring here. Flat `<key>_*` opts are what
+      # Coverage.describe/3 expects.
+      neighborhood_opts =
+        Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
+          [
+            {:"#{dom.key}_keys", dom.candidates_fun.(query, scopes)},
+            {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
+            {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
+          ]
+        end)
 
       descriptor =
-        WorldMap.Coverage.describe(query, scopes,
-          candidate_keys: candidate_keys,
-          network_keys: network_keys,
-          network_serve: network_serve?(opts),
-          network_min_corroboration: network_min_corroboration(),
-          who_keys: who_keys,
-          who_serve: who_serve?(opts),
-          profile: profile
+        WorldMap.Coverage.describe(
+          query,
+          scopes,
+          [candidate_keys: candidate_keys, profile: profile] ++ neighborhood_opts
         )
 
       run_gate(descriptor, opts)
@@ -554,34 +559,21 @@ defmodule Swarm.Core do
     Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
   end
 
-  # The :network serve path is OFF by default (like entity_serve) — it needs its own calibration
-  # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. Config `:swarm, :tier_gate,
-  # network_serve: true` or `opts[:network_serve]` enables it.
-  @spec network_serve?(keyword()) :: boolean()
-  defp network_serve?(opts) do
-    Keyword.get(
-      opts,
-      :network_serve,
-      Application.get_env(:swarm, :tier_gate, [])[:network_serve] == true
-    )
+  # A neighborhood domain's serve flag. Each path is OFF by default (like entity_serve) until it is
+  # calibrated (its own `Gate.*Calibration`, false-serve ~0). `opts[<domain>_serve]` (tests / shadow
+  # measurement) overrides the config `:swarm, :tier_gate, <domain>_serve` — e.g. `SWARM_TIER_GATE_
+  # NETWORK_SERVE`/`_WHO_SERVE` → the network/who domain's serve flag.
+  @spec neighborhood_serve?(WorldMap.Domain.t(), keyword()) :: boolean()
+  defp neighborhood_serve?(%WorldMap.Domain{serve_opt: serve_opt}, opts) do
+    Keyword.get(opts, serve_opt, Application.get_env(:swarm, :tier_gate, [])[serve_opt] == true)
   end
 
-  # Corroboration floor for the network serve path (config, default 2 = safe/narrow; staging runs
-  # 1 = wider, entail-veto-guarded). See `Coverage.describe`.
-  @spec network_min_corroboration() :: pos_integer()
-  defp network_min_corroboration do
-    Application.get_env(:swarm, :tier_gate, [])[:network_min_corroboration] || 2
-  end
-
-  # The :who serve path is OFF by default until calibrated (`Gate.WhoCalibration`, false-serve ~0).
-  # Config `:swarm, :tier_gate, who_serve: true` or `opts[:who_serve]` enables it.
-  @spec who_serve?(keyword()) :: boolean()
-  defp who_serve?(opts) do
-    Keyword.get(
-      opts,
-      :who_serve,
-      Application.get_env(:swarm, :tier_gate, [])[:who_serve] == true
-    )
+  # A neighborhood domain's corroboration floor: config `:swarm, :tier_gate, <domain>_min_corroboration`
+  # overrides the registry default (network 2 = safe/narrow, staging runs 1 = wider entail-veto-guarded;
+  # who is authoritative at 1). See `Coverage.describe`.
+  @spec neighborhood_min_corroboration(WorldMap.Domain.t()) :: pos_integer()
+  defp neighborhood_min_corroboration(%WorldMap.Domain{key: key, min_corroboration: default}) do
+    Application.get_env(:swarm, :tier_gate, [])[:"#{key}_min_corroboration"] || default
   end
 
   @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok

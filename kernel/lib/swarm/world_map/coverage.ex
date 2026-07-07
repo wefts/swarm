@@ -31,14 +31,12 @@ defmodule Swarm.WorldMap.Coverage do
   (Aggregation already emits only counts).
   """
 
-  alias Swarm.Enrichment.WhoMap
   alias Swarm.Graph.Aggregation
-  alias Swarm.Graph.Network
   alias Swarm.Graph.Procedure
   alias Swarm.WorldMap.Domain
 
   @typedoc "What kind of structure, if any, cleanly covers the query."
-  @type intent :: :procedure | :entity_profile | :network | :who | :unknown
+  @type intent :: :procedure | :entity_profile | :neighborhood | :unknown
 
   @typedoc "Why the structure is insufficient to serve — any blocker ⇒ escalate."
   @type blocker ::
@@ -53,34 +51,36 @@ defmodule Swarm.WorldMap.Coverage do
   # necessary but NOT sufficient — a clean procedure variant must also exist in structure.
   @procedure_cue ~r/\b(how\s+(do|to|can|would|should)|steps?|procedure|reset|configure|set\s?up|install|enable|disable|troubleshoot|provision|deploy|restart|rotate)\b/i
 
-  # The NETWORK-neighborhood cue now lives in the serve-domain CONTRACT (`Swarm.WorldMap.Domain`,
-  # master-plan S3) — one source per domain, so a new domain can't drift. Checked AFTER the
+  # The neighborhood-domain cues (network / who / …) live in the serve-domain CONTRACT
+  # (`Swarm.WorldMap.Domain`) — one source per domain, so a new domain can't drift. Checked AFTER the
   # procedure branch, so a how-to about network gear ("configure the firewall") stays a procedure ask.
 
   defmodule Descriptor do
-    @moduledoc "Raw (unvalidated) coverage. Deterministic output of `Coverage.describe/3`."
+    @moduledoc """
+    Raw (unvalidated) coverage. Deterministic output of `Coverage.describe/3`. A `:neighborhood`
+    descriptor (network / who / …) carries the immutable matched `domain` key (E2b council #2) — the
+    generic validate/render/entail path refetches that domain's invariants BY KEY, never loosely.
+    """
     @enforce_keys [:query, :intent]
     defstruct query: nil,
               intent: :unknown,
+              domain: nil,
               procedure_name: nil,
               procedure_variants: [],
               entity_groups: [],
-              network_subject: nil,
-              network_facts: [],
-              who_subject: nil,
-              who_facts: [],
+              neighborhood_subject: nil,
+              neighborhood_facts: [],
               blockers: []
 
     @type t :: %__MODULE__{
             query: String.t(),
             intent: Swarm.WorldMap.Coverage.intent(),
+            domain: atom() | nil,
             procedure_name: String.t() | nil,
             procedure_variants: [map()],
             entity_groups: [map()],
-            network_subject: String.t() | nil,
-            network_facts: [map()],
-            who_subject: String.t() | nil,
-            who_facts: [map()],
+            neighborhood_subject: String.t() | nil,
+            neighborhood_facts: [map()],
             blockers: [Swarm.WorldMap.Coverage.blocker()]
           }
   end
@@ -93,14 +93,15 @@ defmodule Swarm.WorldMap.Coverage do
     opaque, leak-free source references.
     """
     @enforce_keys [:query, :intent, :atoms, :citations]
-    defstruct [:query, :intent, :atoms, :citations, name: nil]
+    defstruct [:query, :intent, :atoms, :citations, name: nil, domain: nil]
 
     @type t :: %__MODULE__{
             query: String.t(),
-            intent: :procedure | :entity_profile | :network | :who,
+            intent: :procedure | :entity_profile | :neighborhood,
             atoms: [map()],
             citations: [String.t()],
-            name: String.t() | nil
+            name: String.t() | nil,
+            domain: atom() | nil
           }
   end
 
@@ -122,26 +123,7 @@ defmodule Swarm.WorldMap.Coverage do
   def describe(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     procedure_fun = Keyword.get(opts, :procedure_fun, &Procedure.steps/3)
     candidate_keys = Keyword.get(opts, :candidate_keys, [])
-    network_keys = Keyword.get(opts, :network_keys, [])
-    network_fun = Keyword.get(opts, :network_fun, &Network.neighborhood/3)
     profile = Keyword.get(opts, :profile) || Aggregation.entity_profile(query, scopes)
-    # The network serve path is OFF by default (like entity_serve): it must be calibrated
-    # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. `network_serve: true` enables.
-    network_serve = Keyword.get(opts, :network_serve, false)
-    # Corroboration floor for the network serve path: min distinct origins a fact needs to be
-    # servable. 2 = only multi-source-confirmed (safe-but-narrow); 1 = any ground-truth fact
-    # (wider — leans on the Stage-2 entail veto). Tunable per deploy.
-    network_min_corr = Keyword.get(opts, :network_min_corroboration, 2)
-    net_cue? = Regex.match?(Domain.network().cue, query)
-    # The WHO (org-directory) serve path — same posture as network: OFF by default until calibrated
-    # (its own false-serve~0 go/no-go), opted in with `who_serve: true`. `who_keys` are the retrieval
-    # hits' who: entity keys; the subject's neighborhood is resolved bidirectionally + name-mapped by
-    # `WhoMap.neighborhood`. min_corroboration 1 (a directory is authoritative — Domain.who()).
-    who_serve = Keyword.get(opts, :who_serve, false)
-    who_keys = Keyword.get(opts, :who_keys, [])
-    who_fun = Keyword.get(opts, :who_fun, &WhoMap.neighborhood/3)
-    who_min_corr = Keyword.get(opts, :who_min_corroboration, Domain.who().min_corroboration)
-    who_cue? = Regex.match?(Domain.who().cue, query)
     # The entity_profile serve path is OFF by default: live validation (2026-07-06) showed it
     # FALSE-SERVES — aggregation matches loosely-related claims to a "what is X"/"who owns X"
     # query and serves the wrong facts. Only the (validated-safe) PROCEDURE path serves until
@@ -156,6 +138,13 @@ defmodule Swarm.WorldMap.Coverage do
     # chosen procedure (handled in procedure_descriptor), never multiple distinct procedures.
     chosen = if cue?, do: first_procedure(candidate_keys, scopes, procedure_fun), else: :none
 
+    # The FIRST neighborhood domain (network / who / …) whose serve flag is on AND cue matches, in
+    # the registry's precedence order (`Domain.neighborhood_domains/0` — who before network). Each
+    # domain is OFF by default until calibrated (false-serve ~0); its serve flag / candidate keys /
+    # neighborhood fn / corroboration floor stay injectable as flat `<key>_serve/_keys/_fun/
+    # _min_corroboration` opts (defaults from the registry). `nil` ⇒ no neighborhood domain covers it.
+    neighborhood = active_neighborhood(query, opts)
+
     cond do
       match?({_name, [_ | _]}, chosen) ->
         {name, variants} = chosen
@@ -163,17 +152,13 @@ defmodule Swarm.WorldMap.Coverage do
 
       # A procedure cue with NO clean variant must ESCALATE — it is NOT reclassified as
       # an entity ask (codex review): "how do I reset X" wants the PROCESS; serving
-      # entity facts about X would be a category mismatch. Honor the intent split.
+      # entity facts about X would be a category mismatch. Honor the intent split. Checked
+      # BEFORE any neighborhood domain (a how-to about gear stays a procedure ask).
       cue? ->
         %Descriptor{query: query, intent: :procedure, blockers: [:no_candidate]}
 
-      # WHO before NETWORK: a "who <verb>" question is a person/team ask even if it names network
-      # gear ("who manages the firewall"); network questions rarely open with a who-cue.
-      who_serve and who_cue? ->
-        who_descriptor(query, who_keys, scopes, who_fun, who_min_corr)
-
-      network_serve and net_cue? ->
-        network_descriptor(query, network_keys, scopes, network_fun, network_min_corr)
+      neighborhood != nil ->
+        neighborhood_descriptor(query, neighborhood, scopes, opts)
 
       entity_serve and profile.groups != [] ->
         entity_descriptor(query, profile)
@@ -181,6 +166,16 @@ defmodule Swarm.WorldMap.Coverage do
       true ->
         %Descriptor{query: query, intent: :unknown, blockers: [:unknown_intent]}
     end
+  end
+
+  # The first registered neighborhood domain whose serve flag is on AND whose cue matches, in the
+  # registry's precedence ORDER (who before network — E2b council #1, reproduces the pre-E2b branch
+  # order exactly). `nil` ⇒ no neighborhood domain covers the query.
+  @spec active_neighborhood(String.t(), keyword()) :: Domain.t() | nil
+  defp active_neighborhood(query, opts) do
+    Enum.find(Domain.neighborhood_domains(), fn dom ->
+      Keyword.get(opts, dom.serve_opt, false) and Regex.match?(dom.cue, query)
+    end)
   end
 
   @doc """
@@ -212,23 +207,13 @@ defmodule Swarm.WorldMap.Coverage do
      }}
   end
 
-  def validate(%Descriptor{intent: :network, network_facts: [_ | _] = facts, query: q} = d) do
+  def validate(%Descriptor{intent: :neighborhood, neighborhood_facts: [_ | _] = facts, query: q} = d) do
     {:ok,
      %Validated{
        query: q,
-       intent: :network,
-       name: d.network_subject,
-       atoms: facts,
-       citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
-     }}
-  end
-
-  def validate(%Descriptor{intent: :who, who_facts: [_ | _] = facts, query: q} = d) do
-    {:ok,
-     %Validated{
-       query: q,
-       intent: :who,
-       name: d.who_subject,
+       intent: :neighborhood,
+       domain: d.domain,
+       name: d.neighborhood_subject,
        atoms: facts,
        citations: facts |> Enum.map(&"corroboration:#{&1.corroboration}") |> Enum.uniq()
      }}
@@ -306,66 +291,45 @@ defmodule Swarm.WorldMap.Coverage do
   # An object is citable iff asserted by ≥1 evidential source (corroboration ≥ 1).
   defp citable?(object), do: Map.get(object, :corroboration, 0) >= 1
 
-  # The network-neighborhood descriptor. Resolves the FIRST (best-ranked) candidate net entity
-  # that has a CORROBORATED neighborhood (≥2 distinct origins — wiki∩IaC / cross-repo / live), and
-  # serves only those multi-source-confirmed facts. This corroboration floor is the fail-closed
-  # safety choice (the entity_profile path false-served on single, loosely-matched claims):
-  # uncorroborated topology escalates to the consilium. `:no_candidate` (no subject resolves) /
-  # `:no_corroboration` (subject found but no ≥2-source facts) ⇒ escalate.
-  defp network_descriptor(query, network_keys, scopes, network_fun, min_corr) do
-    case first_neighborhood(network_keys, scopes, network_fun, min_corr) do
-      {subject, facts} ->
-        %Descriptor{query: query, intent: :network, network_subject: subject, network_facts: facts}
+  # The GENERIC neighborhood descriptor (network / who / …; E2b collapse). Resolves the FIRST
+  # (best-ranked) candidate whose neighborhood is non-empty — facts ≥ the domain's min_corroboration
+  # distinct origins/lineage (2 = multi-source-confirmed topology; 1 = the authoritative directory) —
+  # and serves those facts, carrying the immutable matched `domain` key (council #2). This
+  # corroboration floor is the fail-closed safety choice (the entity_profile path false-served on
+  # single, loosely-matched claims): uncorroborated evidence escalates to the consilium.
+  # `:no_candidate` (no subject resolves) / `:no_corroboration` (subject found, no floor-meeting
+  # facts) ⇒ escalate. The subject label comes from the domain's `subject_fun` (never the raw key).
+  defp neighborhood_descriptor(query, %Domain{} = dom, scopes, opts) do
+    keys = Keyword.get(opts, :"#{dom.key}_keys", [])
+    fun = Keyword.get(opts, :"#{dom.key}_fun", dom.neighborhood_fun)
+    min_corr = Keyword.get(opts, :"#{dom.key}_min_corroboration", dom.min_corroboration)
 
-      :none when network_keys == [] ->
-        %Descriptor{query: query, intent: :network, blockers: [:no_candidate]}
+    case first_neighborhood(keys, scopes, fun, min_corr, dom.subject_fun) do
+      {subject, facts} ->
+        %Descriptor{
+          query: query,
+          intent: :neighborhood,
+          domain: dom.key,
+          neighborhood_subject: subject,
+          neighborhood_facts: facts
+        }
+
+      :none when keys == [] ->
+        %Descriptor{query: query, intent: :neighborhood, domain: dom.key, blockers: [:no_candidate]}
 
       :none ->
-        %Descriptor{query: query, intent: :network, blockers: [:no_corroboration]}
+        %Descriptor{query: query, intent: :neighborhood, domain: dom.key, blockers: [:no_corroboration]}
     end
   end
 
-  # First candidate (ranked) whose neighborhood (facts ≥ `min_corr` distinct origins) is non-empty.
-  defp first_neighborhood([], _scopes, _fun, _min_corr), do: :none
+  # First candidate (ranked) whose neighborhood (facts ≥ `min_corr` distinct origins/lineage) is
+  # non-empty; its subject label is the domain's `subject_fun` applied to the resolved key.
+  defp first_neighborhood([], _scopes, _fun, _min_corr, _subject_fun), do: :none
 
-  defp first_neighborhood([key | rest], scopes, fun, min_corr) do
+  defp first_neighborhood([key | rest], scopes, fun, min_corr, subject_fun) do
     case fun.(key, scopes, min_corroboration: min_corr) do
-      [] -> first_neighborhood(rest, scopes, fun, min_corr)
-      facts -> {display_name(key), facts}
-    end
-  end
-
-  # The who-neighborhood descriptor (mirrors network_descriptor). Resolves the FIRST (best-ranked)
-  # who: subject whose directory neighborhood is non-empty (facts ≥ min_corr distinct lineage; 1 for
-  # the authoritative directory) and serves those facts. `:no_candidate` / `:no_corroboration` ⇒
-  # escalate. Subject label is namespace-stripped (never the raw key).
-  defp who_descriptor(query, who_keys, scopes, who_fun, min_corr) do
-    case first_who(who_keys, scopes, who_fun, min_corr) do
-      {subject, facts} ->
-        %Descriptor{query: query, intent: :who, who_subject: subject, who_facts: facts}
-
-      :none when who_keys == [] ->
-        %Descriptor{query: query, intent: :who, blockers: [:no_candidate]}
-
-      :none ->
-        %Descriptor{query: query, intent: :who, blockers: [:no_corroboration]}
-    end
-  end
-
-  defp first_who([], _scopes, _fun, _min_corr), do: :none
-
-  defp first_who([key | rest], scopes, fun, min_corr) do
-    case fun.(key, scopes, min_corroboration: min_corr) do
-      [] -> first_who(rest, scopes, fun, min_corr)
-      facts -> {WhoMap.display_object(key, nil), facts}
-    end
-  end
-
-  # `net:<kind>:<name>` → "<kind> <name>" for the served subject label (no raw key leak).
-  defp display_name(key) do
-    case String.split(key, ":", parts: 3) do
-      ["net", kind, name] -> kind <> " " <> name
-      _ -> key
+      [] -> first_neighborhood(rest, scopes, fun, min_corr, subject_fun)
+      facts -> {subject_fun.(key), facts}
     end
   end
 

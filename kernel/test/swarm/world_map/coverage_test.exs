@@ -237,9 +237,12 @@ defmodule Swarm.WorldMap.CoverageTest do
       d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
             network_serve: true, network_keys: ["net:tunnel:orbit"], network_fun: net_fun(facts))
 
-      assert d.intent == :network
-      assert d.network_subject == "tunnel orbit"
-      assert {:ok, %Validated{intent: :network, atoms: ^facts, name: "tunnel orbit"}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+      assert d.neighborhood_subject == "tunnel orbit"
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :network, atoms: ^facts, name: "tunnel orbit"}} =
+               Coverage.validate(d)
     end
 
     test "no candidate → :no_candidate → escalate" do
@@ -282,9 +285,12 @@ defmodule Swarm.WorldMap.CoverageTest do
       d = Coverage.describe("who is in the platform team", ["group"],
             who_serve: true, who_keys: ["who:team:platform"], who_fun: who_fun(facts))
 
-      assert d.intent == :who
-      assert d.who_subject == "platform"
-      assert {:ok, %Validated{intent: :who, atoms: ^facts, name: "platform"}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :who
+      assert d.neighborhood_subject == "platform"
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who, atoms: ^facts, name: "platform"}} =
+               Coverage.validate(d)
     end
 
     test "no candidate → :no_candidate → escalate" do
@@ -306,7 +312,8 @@ defmodule Swarm.WorldMap.CoverageTest do
       d = Coverage.describe("who manages the firewall", ["group"],
             who_serve: true, who_keys: ["who:person:admin"], who_fun: who_fun([who_fact("managed_by", "Ann Ops")]),
             network_serve: true, network_keys: ["net:firewall:edge"], network_fun: net_fun([net_fact("protected_by", "x")]))
-      assert d.intent == :who
+      assert d.intent == :neighborhood
+      assert d.domain == :who
     end
   end
 end

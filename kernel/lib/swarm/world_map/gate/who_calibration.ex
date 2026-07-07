@@ -130,9 +130,10 @@ defmodule Swarm.WorldMap.Gate.WhoCalibration do
   defp build_descriptor(%{query: q, subject: subject, facts: facts}) do
     %Descriptor{
       query: q,
-      intent: :who,
-      who_subject: subject,
-      who_facts:
+      intent: :neighborhood,
+      domain: :who,
+      neighborhood_subject: subject,
+      neighborhood_facts:
         Enum.map(facts, fn {rel, obj} ->
           %{relation: rel, object: obj, object_kind: "person", corroboration: 1}
         end),

@@ -31,6 +31,7 @@ defmodule Swarm.WorldMap.Gate do
   alias Swarm.WorldMap.Coverage
   alias Swarm.WorldMap.Coverage.Descriptor
   alias Swarm.WorldMap.Coverage.Validated
+  alias Swarm.WorldMap.Domain
 
   # Judge SAME-OPERATION, not perfection. The false-serve risk is a near-miss where the topic
   # matches but the OPERATION is opposite/different (uninstall vs install, restore vs backup);
@@ -52,12 +53,13 @@ defmodule Swarm.WorldMap.Gate do
   defmodule Answer do
     @moduledoc "The evidence-closed served answer (rendered from a `%Validated{}` only)."
     @enforce_keys [:text, :citations, :intent]
-    defstruct [:text, :citations, :intent]
+    defstruct [:text, :citations, :intent, :domain]
 
     @type t :: %__MODULE__{
             text: String.t(),
             citations: [String.t()],
-            intent: :procedure | :entity_profile | :network | :who
+            intent: :procedure | :entity_profile | :neighborhood,
+            domain: atom() | nil
           }
   end
 
@@ -104,8 +106,8 @@ defmodule Swarm.WorldMap.Gate do
   defp entailed(%Validated{} = v, entail_fun) do
     ok =
       case entail_fun do
-        # Default path: pick the intent-appropriate entail system (procedure vs network).
-        :default -> default_entail(v.intent, v.query, grounding(v))
+        # Default path: pick the intent-appropriate entail system (procedure vs neighborhood domain).
+        :default -> default_entail(v, grounding(v))
         fun when is_function(fun, 2) -> fun.(v.query, grounding(v))
       end
 
@@ -133,25 +135,19 @@ defmodule Swarm.WorldMap.Gate do
     end)
   end
 
-  defp grounding(%Validated{intent: :network, atoms: facts, name: subject}) do
-    header = if subject, do: "Network — #{subject}:\n", else: ""
-    header <> Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
-  end
-
-  defp grounding(%Validated{intent: :who, atoms: facts, name: subject}) do
-    header = if subject, do: "Directory — #{subject}:\n", else: ""
+  defp grounding(%Validated{intent: :neighborhood, atoms: facts, name: subject, domain: domain_key}) do
+    label = Domain.get(domain_key).display_label
+    header = if subject, do: "#{label} — #{subject}:\n", else: ""
     header <> Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
   end
 
   # The default cheap-LLM veto, with the intent-appropriate system prompt. Strict YES/NO; anything
-  # but a confident `sufficient:true` escalates. Grounding is fenced as untrusted data.
-  defp default_entail(:network, query, grounding),
-    do: entail(query, grounding, system: Swarm.WorldMap.Domain.network().entail_system)
+  # but a confident `sufficient:true` escalates. Grounding is fenced as untrusted data. A neighborhood
+  # domain's entail_system is fetched from the registry BY the immutable matched `domain` key (#2).
+  defp default_entail(%Validated{intent: :neighborhood, domain: domain_key, query: query}, grounding),
+    do: entail(query, grounding, system: Domain.get(domain_key).entail_system)
 
-  defp default_entail(:who, query, grounding),
-    do: entail(query, grounding, system: Swarm.WorldMap.Domain.who().entail_system)
-
-  defp default_entail(_intent, query, grounding), do: entail(query, grounding, [])
+  defp default_entail(%Validated{query: query}, grounding), do: entail(query, grounding, [])
 
   @doc """
   The Stage-2 entailment check (public seam for the go/no-go calibration eval,
@@ -217,15 +213,9 @@ defmodule Swarm.WorldMap.Gate do
     %Answer{text: body, citations: cits, intent: :entity_profile}
   end
 
-  def render(%Validated{intent: :network, atoms: facts, citations: cits, name: subject}) do
+  def render(%Validated{intent: :neighborhood, atoms: facts, citations: cits, name: subject, domain: domain_key}) do
     body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
-    head = if subject, do: "#{subject}:\n", else: "Network:\n"
-    %Answer{text: head <> body, citations: cits, intent: :network}
-  end
-
-  def render(%Validated{intent: :who, atoms: facts, citations: cits, name: subject}) do
-    body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
-    head = if subject, do: "#{subject}:\n", else: "Directory:\n"
-    %Answer{text: head <> body, citations: cits, intent: :who}
+    head = if subject, do: "#{subject}:\n", else: "#{Domain.get(domain_key).display_label}:\n"
+    %Answer{text: head <> body, citations: cits, intent: :neighborhood, domain: domain_key}
   end
 end

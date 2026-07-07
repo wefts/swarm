@@ -19,7 +19,22 @@ defmodule Swarm.WorldMap.Domain do
   """
 
   @enforce_keys [:key, :cue, :entail_system, :min_corroboration]
-  defstruct [:key, :cue, :entail_system, :min_corroboration, relations: [], scope: ["group"]]
+  defstruct [
+    :key,
+    :cue,
+    :entail_system,
+    :min_corroboration,
+    relations: [],
+    scope: ["group"],
+    # --- neighborhood-domain fields (E2b): everything the GENERIC serve pipeline needs so a
+    # neighborhood domain (network / who / …) is ONE registry entry, zero Coverage/Gate edits.
+    neighborhood_fun: nil,
+    subject_fun: nil,
+    candidates_fun: nil,
+    serve_opt: nil,
+    display_label: nil,
+    order: nil
+  ]
 
   @type t :: %__MODULE__{
           key: atom(),
@@ -27,7 +42,14 @@ defmodule Swarm.WorldMap.Domain do
           entail_system: String.t(),
           min_corroboration: pos_integer(),
           relations: [String.t()],
-          scope: [String.t()]
+          scope: [String.t()],
+          # neighborhood-domain fields (nil for non-neighborhood domains)
+          neighborhood_fun: (String.t(), [String.t()], keyword() -> [map()]) | nil,
+          subject_fun: (String.t() -> String.t()) | nil,
+          candidates_fun: (String.t(), [String.t()] -> [String.t()]) | nil,
+          serve_opt: atom() | nil,
+          display_label: String.t() | nil,
+          order: pos_integer() | nil
         }
 
   # --- the NETWORK domain (first contract instance; extracted from Coverage/Gate) ------------
@@ -75,6 +97,17 @@ defmodule Swarm.WorldMap.Domain do
   @spec all() :: [t()]
   def all, do: [network(), who()]
 
+  @doc """
+  The registered NEIGHBORHOOD serve domains (subject + relation-facts shape), in cue-precedence
+  ORDER (E2b council must-do #1). The generic serve pipeline iterates this list and takes the FIRST
+  domain whose serve flag is on AND whose cue matches — so the order here IS the routing precedence.
+  `who` is ordered BEFORE `network`: "who manages the firewall" is a person ask, not a topology ask
+  (reproduces the pre-E2b hardcoded `who → network` branch order exactly). The procedure cue is still
+  checked before ANY neighborhood domain (in `Coverage.describe/3`).
+  """
+  @spec neighborhood_domains() :: [t()]
+  def neighborhood_domains, do: Enum.sort_by([network(), who()], & &1.order)
+
   @doc "The domain for `key`, or nil."
   @spec get(atom()) :: t() | nil
   def get(:network), do: network()
@@ -90,7 +123,13 @@ defmodule Swarm.WorldMap.Domain do
       entail_system: @network_entail_system,
       min_corroboration: 2,
       relations: @network_relations,
-      scope: ["group", "public"]
+      scope: ["group", "public"],
+      neighborhood_fun: &Swarm.Graph.Network.neighborhood/3,
+      subject_fun: &network_subject/1,
+      candidates_fun: &Swarm.Graph.Network.candidates/2,
+      serve_opt: :network_serve,
+      display_label: "Network",
+      order: 2
     }
   end
 
@@ -109,8 +148,24 @@ defmodule Swarm.WorldMap.Domain do
       entail_system: @who_entail_system,
       min_corroboration: 1,
       relations: @who_relations,
-      scope: ["group"]
+      scope: ["group"],
+      neighborhood_fun: &Swarm.Enrichment.WhoMap.neighborhood/3,
+      subject_fun: &Swarm.Enrichment.WhoMap.display_object(&1, nil),
+      candidates_fun: &Swarm.Enrichment.WhoMap.candidates/2,
+      serve_opt: :who_serve,
+      display_label: "Directory",
+      order: 1
     }
+  end
+
+  # `net:<kind>:<name>` → "<kind> <name>" for the served subject label (no raw key leak). The who
+  # domain's subject label is `WhoMap.display_object/2` (person cn, else namespace-stripped tail).
+  @spec network_subject(String.t()) :: String.t()
+  defp network_subject(key) do
+    case String.split(key, ":", parts: 3) do
+      ["net", kind, name] -> kind <> " " <> name
+      _ -> key
+    end
   end
 
   @doc """

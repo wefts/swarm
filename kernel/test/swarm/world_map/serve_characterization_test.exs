@@ -82,9 +82,10 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           network_fun: net_fun([net_fact("protected_by", "edge-fw")])
         )
 
-      assert d.intent == :who
-      assert d.who_subject != nil
-      assert {:ok, %Validated{intent: :who}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :who
+      assert d.neighborhood_subject != nil
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who}} = Coverage.validate(d)
     end
 
     test "a bare network query (no procedure/who cue) routes to :network" do
@@ -95,9 +96,10 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
-      assert d.intent == :network
-      assert d.network_subject == "tunnel orbit"
-      assert {:ok, %Validated{intent: :network}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+      assert d.neighborhood_subject == "tunnel orbit"
+      assert {:ok, %Validated{intent: :neighborhood, domain: :network}} = Coverage.validate(d)
     end
   end
 
@@ -125,8 +127,9 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           who_fun: who_fun([who_fact("managed_by", "Jane Doe")])
         )
 
-      assert d.intent == :who
-      assert {:ok, %Validated{intent: :who}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :who
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who}} = Coverage.validate(d)
     end
 
     test "network_serve false (default) ⇒ a matching network query is :unknown / escalate" do
@@ -148,8 +151,9 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
-      assert d.intent == :network
-      assert {:ok, %Validated{intent: :network}} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+      assert {:ok, %Validated{intent: :neighborhood, domain: :network}} = Coverage.validate(d)
     end
   end
 
@@ -220,8 +224,9 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           who_fun: who_fun([who_fact("managed_by_team", "Platform Team")])
         )
 
-      assert d.intent == :who
-      assert {:ok, %Validated{intent: :who} = validated} = Coverage.validate(d)
+      assert d.intent == :neighborhood
+      assert d.domain == :who
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who} = validated} = Coverage.validate(d)
       assert Enum.any?(validated.atoms, &(&1.relation == "managed_by_team" and &1.object == "Platform Team"))
     end
 
@@ -233,7 +238,8 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
           who_fun: who_fun([who_fact("managed_by_team", "Platform Team")])
         )
 
-      assert {:serve, %Answer{intent: :who, text: text, citations: cits}, %Audit{decision: :serve}} =
+      assert {:serve, %Answer{intent: :neighborhood, domain: :who, text: text, citations: cits},
+              %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "managed_by_team Platform Team"
