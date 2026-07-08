@@ -87,7 +87,7 @@ defmodule Swarm.Identity do
       Repo.transaction(fn ->
         user_id = find_or_create_user(claims)
         sync_emails(user_id, Map.get(claims, :emails, []))
-        sync_groups(user_id, Map.get(claims, :groups, []))
+        sync_groups(user_id, Map.get(claims, :provider), Map.get(claims, :groups, []))
         user_id
       end)
 
@@ -258,27 +258,43 @@ defmodule Swarm.Identity do
     :ok
   end
 
-  @spec sync_groups(String.t(), [String.t()]) :: :ok
-  defp sync_groups(user_id, groups) do
-    Enum.each(groups, fn g ->
-      Repo.query!(
-        "INSERT INTO access_group (id, source) VALUES ($1, 'idp') ON CONFLICT (id) DO NOTHING",
-        [g]
-      )
+  @spec sync_groups(String.t(), String.t() | nil, [String.t()] | nil) :: :ok
+  defp sync_groups(user_id, provider, incoming) do
+    incoming = incoming || []
 
+    mapped_groups =
       Repo.query!(
         """
-        INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'idp')
+        SELECT DISTINCT our_group_id
+          FROM sso_group_map
+         WHERE provider = $1
+           AND incoming_group = ANY($2::text[])
+         ORDER BY our_group_id
+        """,
+        [provider, incoming]
+      ).rows
+      |> List.flatten()
+
+    Enum.each(mapped_groups, fn group_id ->
+      Repo.query!(
+        """
+        INSERT INTO user_group (user_id, group_id, source)
+        VALUES ($1, $2, 'idp')
         ON CONFLICT (user_id, group_id) DO NOTHING
         """,
-        [cast_to_uuid(user_id), g]
+        [cast_to_uuid(user_id), group_id]
       )
     end)
 
-    # Revoke memberships no longer asserted (default-deny).
+    # Revoke IdP memberships no longer asserted through the kernel-owned map.
     Repo.query!(
-      "DELETE FROM user_group WHERE user_id = $1 AND NOT (group_id = ANY($2))",
-      [cast_to_uuid(user_id), groups]
+      """
+      DELETE FROM user_group
+       WHERE user_id = $1
+         AND source = 'idp'
+         AND NOT (group_id = ANY($2::text[]))
+      """,
+      [cast_to_uuid(user_id), mapped_groups]
     )
 
     :ok
@@ -472,6 +488,56 @@ defmodule Swarm.Identity do
       %{rows: [[1]]} -> true
       %{rows: []} -> false
     end
+  end
+
+  @doc """
+  Map an incoming SSO group claim to a kernel-owned access group.
+
+  The target group must already exist; unmapped incoming groups grant nothing.
+  """
+  @spec put_sso_group_map(String.t(), String.t(), String.t()) :: :ok | {:error, :unknown_group}
+  def put_sso_group_map(provider, incoming, our_group_id) do
+    if group_exists?(our_group_id) do
+      Repo.query!(
+        """
+        INSERT INTO sso_group_map (provider, incoming_group, our_group_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (provider, incoming_group) DO UPDATE
+          SET our_group_id = EXCLUDED.our_group_id
+        """,
+        [provider, incoming, our_group_id]
+      )
+
+      :ok
+    else
+      {:error, :unknown_group}
+    end
+  end
+
+  @doc "Delete an SSO group mapping if present."
+  @spec delete_sso_group_map(String.t(), String.t()) :: :ok
+  def delete_sso_group_map(provider, incoming) do
+    Repo.query!(
+      "DELETE FROM sso_group_map WHERE provider = $1 AND incoming_group = $2",
+      [provider, incoming]
+    )
+
+    :ok
+  end
+
+  @doc "List SSO group mappings ordered by provider and incoming group."
+  @spec list_sso_group_map() :: [
+          %{provider: String.t(), incoming_group: String.t(), our_group_id: String.t()}
+        ]
+  def list_sso_group_map do
+    Repo.query!("""
+    SELECT provider, incoming_group, our_group_id
+      FROM sso_group_map
+     ORDER BY provider, incoming_group
+    """).rows
+    |> Enum.map(fn [provider, incoming_group, our_group_id] ->
+      %{provider: provider, incoming_group: incoming_group, our_group_id: our_group_id}
+    end)
   end
 
   @doc "Remove a user from a group."

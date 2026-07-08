@@ -214,6 +214,8 @@ defmodule Swarm.AdminTest do
 
     test "get_user returns the aggregated detail view with emails" do
       admin = admin_user("detail-admin")
+      :ok = Identity.create_group("staff", "staff", nil)
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
       u =
         user("detail-target", %{

@@ -58,6 +58,7 @@ defmodule Swarm.NoLeakShipGateTest do
   # group-scoped read, not the trivial empty-scope case). Council (codex re-review).
   defp group_user(login) do
     Identity.put_group_scopes("staff", ["group"])
+    :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
     {:ok, u} =
       Identity.upsert_from_claims(%{
@@ -297,6 +298,7 @@ defmodule Swarm.NoLeakShipGateTest do
       # even if the scope map is CORRUPTED under the boundary (raw SQL), the derived
       # scopes clamp private out — the belt behind the boundary
       Identity.put_group_scopes("staff", ["group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
       {:ok, eve} =
         Identity.upsert_from_claims(%{
