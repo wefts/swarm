@@ -249,11 +249,15 @@ defmodule Swarm.AdminTest do
       assert {:ok, groups} = Admin.list_groups(admin.id)
 
       members_only = Enum.find(groups, &(&1.id == "members-only"))
+      assert members_only.name == nil
+      assert members_only.description == nil
       assert members_only.member_count == 2
       assert members_only.granted_scopes == []
       assert members_only.granted_roles == []
 
       scopes_only = Enum.find(groups, &(&1.id == "scopes-only"))
+      assert scopes_only.name == nil
+      assert scopes_only.description == nil
       assert scopes_only.member_count == 0
       assert scopes_only.granted_scopes == ["public"]
       assert scopes_only.granted_roles == []

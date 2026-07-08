@@ -375,6 +375,105 @@ defmodule Swarm.Identity do
     :ok
   end
 
+  @doc """
+  Create or update a first-class local group. The group id is immutable; existing
+  rows keep their source while `name` and `description` are replaced.
+  """
+  @spec create_group(String.t(), String.t() | nil, String.t() | nil) :: :ok
+  def create_group(id, name, description) do
+    Repo.query!(
+      """
+      INSERT INTO access_group (id, source, name, description)
+      VALUES ($1, 'local', $2, $3)
+      ON CONFLICT (id) DO UPDATE
+        SET name = EXCLUDED.name,
+            description = EXCLUDED.description
+      """,
+      [id, name, description]
+    )
+
+    :ok
+  end
+
+  @doc "Rename a group without changing its immutable id."
+  @spec rename_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
+  def rename_group(id, name) do
+    case Repo.query!("UPDATE access_group SET name = $2 WHERE id = $1", [id, name]) do
+      %{num_rows: 0} -> {:error, :not_found}
+      _ -> :ok
+    end
+  end
+
+  @doc "Replace a group's description."
+  @spec describe_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
+  def describe_group(id, description) do
+    case Repo.query!(
+           "UPDATE access_group SET description = $2 WHERE id = $1",
+           [id, description]
+         ) do
+      %{num_rows: 0} -> {:error, :not_found}
+      _ -> :ok
+    end
+  end
+
+  @doc """
+  Delete a group. Foreign keys cascade membership, scope-map and group-role rows.
+  """
+  @spec delete_group(String.t()) :: :ok
+  def delete_group(id) do
+    Repo.query!("DELETE FROM access_group WHERE id = $1", [id])
+    :ok
+  end
+
+  @grantable_group_roles ~w(admin superadmin)
+
+  @doc """
+  Add a role conferred by group membership. `user` is implicit and is rejected as
+  a stored group role.
+  """
+  @spec set_group_role(String.t(), String.t()) :: :ok | {:error, :invalid_role}
+  def set_group_role(id, role) do
+    if role in @grantable_group_roles do
+      Repo.query!(
+        """
+        INSERT INTO group_role (group_id, role)
+        VALUES ($1, $2)
+        ON CONFLICT (group_id, role) DO NOTHING
+        """,
+        [id, role]
+      )
+
+      :ok
+    else
+      {:error, :invalid_role}
+    end
+  end
+
+  @doc "Remove one group-conferred role."
+  @spec clear_group_role(String.t(), String.t()) :: :ok
+  def clear_group_role(id, role) do
+    Repo.query!("DELETE FROM group_role WHERE group_id = $1 AND role = $2", [id, role])
+    :ok
+  end
+
+  @doc "Count current members of a group."
+  @spec group_member_count(String.t()) :: non_neg_integer()
+  def group_member_count(id) do
+    [[count]] =
+      Repo.query!("SELECT count(*)::int FROM user_group WHERE group_id = $1", [id]).rows
+
+    count
+  end
+
+  @doc "Whether a group exists in the first-class group registry."
+  @spec group_exists?(String.t()) :: boolean()
+  def group_exists?(id) do
+    case Repo.query!("SELECT 1 FROM access_group WHERE id = $1", [id]) do
+      %{rows: [[1]]} -> true
+      %{rows: []} -> false
+    end
+  end
+
   @doc "Remove a user from a group."
   @spec remove_from_group(String.t(), String.t()) :: :ok
   def remove_from_group(user_id, group_id) do
@@ -580,12 +679,14 @@ defmodule Swarm.Identity do
   @doc """
   Read-only group registry for the admin console. Includes every group known from
   the registry, membership rows, or scope-map rows; groups without members or
-  scopes are preserved. `granted_roles` is intentionally empty until a group→role
-  binding exists.
+  scopes are preserved. First-class group metadata comes from `access_group`;
+  group roles come from `group_role`.
   """
   @spec list_groups() :: [
           %{
             id: String.t(),
+            name: String.t() | nil,
+            description: String.t() | nil,
             member_count: non_neg_integer(),
             granted_scopes: [String.t()],
             granted_roles: [String.t()]
@@ -605,23 +706,35 @@ defmodule Swarm.Identity do
         SELECT group_id, count(*)::int AS member_count
           FROM user_group
          GROUP BY group_id
+      ),
+      role_grants AS (
+        SELECT group_id, array_agg(DISTINCT role ORDER BY role) AS granted_roles
+          FROM group_role
+         GROUP BY group_id
       )
       SELECT g.group_id,
+             ag.name,
+             ag.description,
              coalesce(mc.member_count, 0),
-             coalesce(m.scopes, '{}'::text[])
+             coalesce(m.scopes, '{}'::text[]),
+             coalesce(rg.granted_roles, '{}'::text[])
         FROM groups g
+        LEFT JOIN access_group ag ON ag.id = g.group_id
         LEFT JOIN member_counts mc ON mc.group_id = g.group_id
         LEFT JOIN group_scope_map m ON m.group_id = g.group_id
+        LEFT JOIN role_grants rg ON rg.group_id = g.group_id
        ORDER BY g.group_id
       """,
       []
     ).rows
-    |> Enum.map(fn [id, member_count, granted_scopes] ->
+    |> Enum.map(fn [id, name, description, member_count, granted_scopes, granted_roles] ->
       %{
         id: id,
+        name: name,
+        description: description,
         member_count: member_count,
         granted_scopes: granted_scopes,
-        granted_roles: []
+        granted_roles: granted_roles
       }
     end)
   end
@@ -780,11 +893,24 @@ defmodule Swarm.Identity do
     Enum.uniq(["public" | derived])
   end
 
-  @doc "The roles a user holds (default-deny — `[]` when none granted)."
+  @doc """
+  The roles a user holds from direct grants and group-role membership
+  (default-deny — `[]` when none granted).
+  """
   @spec roles_for(String.t()) :: [String.t()]
   def roles_for(id) do
     Repo.query!(
-      "SELECT DISTINCT role FROM role_grant WHERE user_id = $1 ORDER BY role",
+      """
+      SELECT DISTINCT role FROM (
+        SELECT role FROM role_grant WHERE user_id = $1
+        UNION
+        SELECT gr.role
+          FROM group_role gr
+          JOIN user_group ug ON ug.group_id = gr.group_id
+         WHERE ug.user_id = $1
+      ) t
+      ORDER BY role
+      """,
       [cast_to_uuid(id)]
     ).rows
     |> List.flatten()

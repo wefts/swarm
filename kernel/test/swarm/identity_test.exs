@@ -189,5 +189,79 @@ defmodule Swarm.IdentityTest do
       {:ok, u} = Identity.upsert_from_claims(claims())
       assert Identity.roles_for(u.id) == []
     end
+
+    test "group-role membership confers roles and capabilities without direct grants" do
+      :ok = Identity.create_group("ops", "Operations", "Operators")
+      :ok = Identity.set_group_role("ops", "admin")
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
+
+      :ok = Identity.add_to_group(u.id, "ops")
+
+      assert "admin" in Identity.roles_for(u.id)
+      assert "manage_access" in Identity.caps_for(u.id)
+      assert "invite_users" in Identity.caps_for(u.id)
+      assert "manage_users" in Identity.caps_for(u.id)
+    end
+
+    test "set_group_role rejects bad roles and clear_group_role removes a role" do
+      :ok = Identity.create_group("ops", "Operations", nil)
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
+      :ok = Identity.add_to_group(u.id, "ops")
+
+      assert Identity.set_group_role("ops", "root") == {:error, :invalid_role}
+      assert Identity.set_group_role("ops", "user") == {:error, :invalid_role}
+
+      assert :ok = Identity.set_group_role("ops", "admin")
+      assert Identity.roles_for(u.id) == ["admin"]
+
+      assert :ok = Identity.clear_group_role("ops", "admin")
+      assert Identity.roles_for(u.id) == []
+    end
+  end
+
+  describe "groups (first-class metadata + group-role grants)" do
+    test "delete_group cascades memberships, scopes and roles" do
+      :ok = Identity.create_group("ops", "Operations", "Operators")
+      :ok = Identity.put_group_scopes("ops", ["group"])
+      :ok = Identity.set_group_role("ops", "admin")
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
+      :ok = Identity.add_to_group(u.id, "ops")
+
+      assert Identity.group_exists?("ops")
+      assert Identity.group_member_count("ops") == 1
+      assert Identity.groups_for(u.id) == ["ops"]
+      assert Identity.roles_for(u.id) == ["admin"]
+      assert "group" in Identity.scopes_for(u.id)
+
+      assert :ok = Identity.delete_group("ops")
+
+      refute Identity.group_exists?("ops")
+      assert Identity.group_member_count("ops") == 0
+      assert Identity.groups_for(u.id) == []
+      assert Identity.roles_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
+      refute Enum.any?(Identity.list_groups(), &(&1.id == "ops"))
+    end
+
+    test "rename_group keeps id and membership; list_groups includes metadata and roles" do
+      :ok = Identity.create_group("ops", "Operations", "Operators")
+      :ok = Identity.set_group_role("ops", "admin")
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
+      :ok = Identity.add_to_group(u.id, "ops")
+
+      assert :ok = Identity.rename_group("ops", "Platform Ops")
+      assert :ok = Identity.describe_group("ops", "Platform operations cohort")
+      assert Identity.rename_group("missing", "Missing") == {:error, :not_found}
+      assert Identity.describe_group("missing", "Missing") == {:error, :not_found}
+
+      assert Identity.groups_for(u.id) == ["ops"]
+
+      group = Enum.find(Identity.list_groups(), &(&1.id == "ops"))
+      assert group.name == "Platform Ops"
+      assert group.description == "Platform operations cohort"
+      assert group.member_count == 1
+      assert group.granted_scopes == []
+      assert group.granted_roles == ["admin"]
+    end
   end
 end
