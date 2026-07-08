@@ -219,7 +219,10 @@ defmodule Swarm.Repo.Migrations.PerSourceScope do
   end
 
   defp equal_time?(%DateTime{} = a, %DateTime{} = b), do: DateTime.compare(a, b) == :eq
-  defp equal_time?(%NaiveDateTime{} = a, %NaiveDateTime{} = b), do: NaiveDateTime.compare(a, b) == :eq
+
+  defp equal_time?(%NaiveDateTime{} = a, %NaiveDateTime{} = b),
+    do: NaiveDateTime.compare(a, b) == :eq
+
   defp equal_time?(a, b), do: a == b
 
   defp inherit_fixpoint(group_ids, initial_assignments, inherit_edges) do
@@ -287,7 +290,11 @@ defmodule Swarm.Repo.Migrations.PerSourceScope do
        SET scopes = coalesce((
          SELECT array_agg(DISTINCT x)
            FROM unnest(
-             array_remove(scopes, 'group') ||
+             -- KEEP `group` (transitional): unattributable nodes stay `group`, so an admin cohort
+             -- that granted `group` must still see them. `group` is dropped only in a future cleanup
+             -- once no node is left at `group`. A new cohort (Everyone) gets a src-only grant and
+             -- never inherits `group`, so the per-source goal is unaffected.
+             scopes ||
              coalesce((SELECT array_agg(DISTINCT scope) FROM node WHERE scope ~ '^src:'), '{}'::text[])
            ) x
        ), '{}'::text[])

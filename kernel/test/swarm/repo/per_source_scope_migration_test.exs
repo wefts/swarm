@@ -38,7 +38,9 @@ defmodule Swarm.Repo.PerSourceScopeMigrationTest do
     rewritten_group_scopes = group_scopes()
     assert "src:wiki" in rewritten_group_scopes
     assert "src:ldap" in rewritten_group_scopes
-    refute "group" in rewritten_group_scopes
+
+    # `group` is KEPT (transitional) so an admin cohort still sees unattributable left-group nodes.
+    assert "group" in rewritten_group_scopes
 
     assert :ok = PerSourceScope.apply_down!(Repo)
 
