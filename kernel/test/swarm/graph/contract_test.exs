@@ -181,7 +181,12 @@ defmodule Swarm.Graph.ContractTest do
     test "add_node rejects an unknown scope (changeset)" do
       assert {:error, cs} = Graph.add_node(%{type: "file", scope: "secret"})
       refute cs.valid?
-      assert {"is invalid", _} = cs.errors[:scope]
+      # ADR-18: scope validated via Contract.valid_scope?/1 (base vocab OR src:* shape).
+      assert {"is not an admissible scope", _} = cs.errors[:scope]
+    end
+
+    test "add_node accepts a well-formed src:* scope (changeset; ADR-18)" do
+      assert {:ok, _} = Graph.add_node(%{type: "file", key: "src-scope-ok", scope: "src:wiki"})
     end
 
     test "add_node rejects a malformed type (changeset)" do
