@@ -18,22 +18,21 @@ defmodule Swarm.Ingest do
     reinforce an edge once, not N times. Absent ⇒ defaults to `provenance`.
 
   **Visibility on ingest (ADR-5).** Node scope comes from the event; default-deny
-  is `private`. An edge inherits the **narrowest** scope of its two endpoints
-  (deny-ordering `private < group < public`). The gate (Task 06) is the single
-  enforcement point and pins which is authoritative.
+  is `private`. An edge inherits the greatest lower bound of its two endpoints
+  in the Contract scope lattice. The gate (Task 06) is the single enforcement
+  point and pins which is authoritative.
 
   Performance: one transaction per event; node upserts and edge writes are each
   O(1) indexed-row ops — O(entities + relations) per event, no scan.
   """
 
+  alias Swarm.Graph.Contract
   alias Swarm.Graph.Store
   alias Swarm.Ingest.Content
   alias Swarm.Ingest.DeadLetter
   alias Swarm.Ingest.Dedup
 
   require Logger
-
-  @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
 
   @doc """
   Ingest one normalized event map. Returns `{:ok, :written}`, `{:ok, :duplicate}`
@@ -244,11 +243,7 @@ defmodule Swarm.Ingest do
     end
   end
 
-  # Narrowest (deny-ordering) of two endpoint scopes; defaults to private.
+  # The edge's scope is the greatest lower bound of its two endpoint scopes (lattice; ADR-18 F1).
   @spec narrowest(String.t() | nil, String.t() | nil) :: String.t()
-  defp narrowest(a, b) do
-    a = a || "private"
-    b = b || "private"
-    if Map.get(@scope_rank, a, 0) <= Map.get(@scope_rank, b, 0), do: a, else: b
-  end
+  defp narrowest(a, b), do: Contract.glb(a || "private", b || "private")
 end

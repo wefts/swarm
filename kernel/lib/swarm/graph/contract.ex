@@ -78,6 +78,28 @@ defmodule Swarm.Graph.Contract do
   def valid_scope?(_), do: false
 
   @doc """
+  Map an ingest `origin` to its source scope (`src:<name>`), or `:inherit` for DERIVED-fact origins
+  (enrichment / synonymy — the fact takes the anchor node's scope, operator 2026-07-08), or `:unknown`
+  for an unrecognized origin (the migration flags these; never silently public). Single source of truth
+  for the origin→src derivation.
+  """
+  @spec origin_to_src(String.t()) :: String.t() | :inherit | :unknown
+  def origin_to_src(origin) when is_binary(origin) do
+    origin |> String.split(":", parts: 2) |> hd() |> segment_to_src()
+  end
+
+  def origin_to_src(_), do: :unknown
+
+  # First origin segment → source scope. `enrich`/`synonymy` are DERIVED-fact origins → `:inherit`
+  # (the fact takes its anchor node's scope). Unrecognized → `:unknown` (migration flags; never public).
+  defp segment_to_src(seg) when seg in ~w(wiki mediawiki wikipedia), do: "src:wiki"
+  defp segment_to_src("confluence"), do: "src:confluence"
+  defp segment_to_src("iac"), do: "src:iac"
+  defp segment_to_src("ldap"), do: "src:ldap"
+  defp segment_to_src(seg) when seg in ~w(enrich synonymy), do: :inherit
+  defp segment_to_src(_), do: :unknown
+
+  @doc """
   Lattice partial order: `private` ≤ everything, everything ≤ `public`, else only equal scopes are ≤.
   """
   @spec lattice_leq(String.t(), String.t()) :: boolean()

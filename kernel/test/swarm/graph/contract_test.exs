@@ -49,6 +49,20 @@ defmodule Swarm.Graph.ContractTest do
       refute Contract.valid_scope?("")
       refute Contract.valid_scope?(123)
     end
+
+    test "origin_to_src/1 maps known origins to source scopes" do
+      assert Contract.origin_to_src("wiki:page:1") == "src:wiki"
+      assert Contract.origin_to_src("mediawiki:x") == "src:wiki"
+      assert Contract.origin_to_src("wikipedia:Page") == "src:wiki"
+      assert Contract.origin_to_src("confluence:y") == "src:confluence"
+      assert Contract.origin_to_src("iac:repo") == "src:iac"
+      assert Contract.origin_to_src("ldap:directory") == "src:ldap"
+      assert Contract.origin_to_src("enrich:origin:node:42") == :inherit
+      assert Contract.origin_to_src("synonymy") == :inherit
+      assert Contract.origin_to_src("synonymy:concept") == :inherit
+      assert Contract.origin_to_src("weird:thing") == :unknown
+      assert Contract.origin_to_src(123) == :unknown
+    end
   end
 
   describe "visibility invariant (ADR-5) enforced at the write boundary" do

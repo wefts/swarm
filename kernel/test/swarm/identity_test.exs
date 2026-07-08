@@ -138,6 +138,15 @@ defmodule Swarm.IdentityTest do
       assert Identity.scopes_for(u.id) == ["public"]
     end
 
+    test "put_group_scopes accepts source scopes but still rejects private" do
+      assert Identity.put_group_scopes("nebula", ["src:wiki", "public"]) == :ok
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["nebula"]}))
+      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
+
+      assert Identity.put_group_scopes("nebula", ["private"]) ==
+               {:error, :ungrantable_scope}
+    end
+
     test "put_group_scopes rejects out-of-vocabulary scopes (Contract check)" do
       assert Identity.put_group_scopes("nebula", ["group", "secret"]) ==
                {:error, :ungrantable_scope}

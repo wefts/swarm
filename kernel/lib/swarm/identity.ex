@@ -845,15 +845,14 @@ defmodule Swarm.Identity do
   Ensure a group exists and set its conferred scopes (the config-seeding
   primitive; the audited admin-mutable path is ADR-16 step 5). Idempotent.
 
-  Validates at this — the deepest — grant boundary: every scope must be in
-  `grantable_scopes/0` (Contract vocabulary, `private` hard-denied); on
-  violation nothing is written. Seeding callers must pattern-match `:ok =` so
-  a rejected seed fails loud rather than leaving the group scopeless (council
-  gemini).
+  Validates at this — the deepest — grant boundary: every scope must be any valid
+  scope except `private`; on violation nothing is written. Seeding callers must
+  pattern-match `:ok =` so a rejected seed fails loud rather than leaving the
+  group scopeless (council gemini).
   """
   @spec put_group_scopes(String.t(), [String.t()]) :: :ok | {:error, :ungrantable_scope}
   def put_group_scopes(group_id, scopes) do
-    if Enum.all?(scopes, &(&1 in grantable_scopes())) do
+    if Enum.all?(scopes, &(Contract.valid_scope?(&1) and &1 != "private")) do
       Repo.query!(
         "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
         [group_id]
