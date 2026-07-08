@@ -64,6 +64,9 @@ service Core {
   // Success is NOT audited (a roster read on every admin page load would drown
   // admin_action_audit); DENIALS are audited like every other admin op.
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  // One user's full view for the detail page — avoids scanning the roster at scale.
+  // Same admin-cap gate as ListUsers; NOT_FOUND for an unknown/tombstoned uuid.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
 }
 
 // Outcome of an identity/privacy call. UNAUTHENTICATED (no/invalid assertion) is
@@ -201,6 +204,10 @@ message ListUsersRequest {
   // Bounded by contract (council: gemini's must-fix): server clamps to [1..500];
   // 0 means the server default (500). Deterministic order: login, id.
   int32 limit = 3;
+  // Case-insensitive substring over login + first/last/nickname (server-side ILIKE).
+  string query = 4;
+  // Page offset (>= 0); clamped to >= 0 by the server. limit stays the page size.
+  int32 offset = 5;
 }
 
 message UserView {
@@ -214,11 +221,24 @@ message UserView {
   repeated string groups = 8;
   repeated string providers = 9; // identity_link providers (keycloak | local | …)
   string last_login_at = 10;     // ISO8601, "" when never
+  repeated string emails = 11;   // admin-visible PII; populated ONLY by GetUser
 }
 
 message ListUsersResponse {
   CallStatus status = 1;
   repeated UserView users = 2;
+  // Count of rows matching the filter, BEFORE limit/offset — for the pager.
+  int32 total = 3;
+}
+
+message GetUserRequest {
+  string assertion = 1;
+  string user_id = 2;
+}
+
+message GetUserResponse {
+  CallStatus status = 1;   // OK | NOT_FOUND | NOT_AUTHORIZED | UNAUTHENTICATED
+  UserView user = 2;
 }
 
 message AdminActionResponse {

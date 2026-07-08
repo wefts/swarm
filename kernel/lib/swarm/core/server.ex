@@ -20,6 +20,8 @@ defmodule Swarm.Core.Server do
     DeliberationResponse,
     EdgeView,
     GetConversationResponse,
+    GetUserRequest,
+    GetUserResponse,
     ListConversationsResponse,
     LogConversationResponse,
     MessageView,
@@ -338,34 +340,59 @@ defmodule Swarm.Core.Server do
   @spec list_users(Swarm.Core.V1.ListUsersRequest.t(), GRPC.Server.Stream.t()) ::
           Swarm.Core.V1.ListUsersResponse.t()
   def list_users(req, _stream) do
-    alias Swarm.Core.V1.{ListUsersResponse, UserView}
+    alias Swarm.Core.V1.ListUsersResponse
 
     with_actor(req.assertion, %ListUsersResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
-      case Admin.list_users(a.uuid, include_deleted: req.include_deleted, limit: req.limit) do
-        {:ok, users} ->
+      case Admin.list_users(a.uuid,
+             include_deleted: req.include_deleted,
+             limit: req.limit,
+             query: req.query,
+             offset: req.offset
+           ) do
+        {:ok, {users, total}} ->
           %ListUsersResponse{
             status: :CALL_OK,
-            users:
-              Enum.map(users, fn u ->
-                %UserView{
-                  id: u.id,
-                  login: u.login,
-                  first_name: u.first_name || "",
-                  last_name: u.last_name || "",
-                  nickname: u.nickname || "",
-                  status: u.status,
-                  roles: u.roles,
-                  groups: u.groups,
-                  providers: u.providers,
-                  last_login_at: iso(u.last_login_at)
-                }
-              end)
+            users: Enum.map(users, &to_user_view/1),
+            total: total
           }
 
         :not_authorized ->
           %ListUsersResponse{status: :CALL_NOT_AUTHORIZED}
       end
     end)
+  end
+
+  @spec get_user(GetUserRequest.t(), GRPC.Server.Stream.t()) :: GetUserResponse.t()
+  def get_user(req, _stream) do
+    with_actor(req.assertion, %GetUserResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.get_user(a.uuid, req.user_id) do
+        {:ok, v} ->
+          %GetUserResponse{status: :CALL_OK, user: to_user_view(v, emails: v.emails)}
+
+        :not_found ->
+          %GetUserResponse{status: :CALL_NOT_FOUND}
+
+        :not_authorized ->
+          %GetUserResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec to_user_view(map(), keyword()) :: Swarm.Core.V1.UserView.t()
+  defp to_user_view(view, opts \\ []) do
+    %Swarm.Core.V1.UserView{
+      id: view.id,
+      login: view.login,
+      first_name: view.first_name || "",
+      last_name: view.last_name || "",
+      nickname: view.nickname || "",
+      status: view.status,
+      roles: view.roles,
+      groups: view.groups,
+      providers: view.providers,
+      last_login_at: iso(view.last_login_at),
+      emails: opts[:emails] || []
+    }
   end
 
   @spec manage_access(Swarm.Core.V1.ManageAccessRequest.t(), GRPC.Server.Stream.t()) ::

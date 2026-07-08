@@ -10,14 +10,19 @@ defmodule Swarm.AdminTest do
 
   alias Swarm.{Admin, Audit, Conversations}
 
-  defp user(login) do
+  defp user(login, overrides \\ %{}) do
     {:ok, u} =
-      Identity.upsert_from_claims(%{
-        provider: "keycloak",
-        subject: "sub-#{login}",
-        login: login,
-        groups: []
-      })
+      Identity.upsert_from_claims(
+        Map.merge(
+          %{
+            provider: "keycloak",
+            subject: "sub-#{login}",
+            login: login,
+            groups: []
+          },
+          overrides
+        )
+      )
 
     u
   end
@@ -115,9 +120,10 @@ defmodule Swarm.AdminTest do
       _u = user("bravo")
       _u2 = user("alpha")
 
-      assert {:ok, users} = Admin.list_users(admin.id)
+      assert {:ok, {users, total}} = Admin.list_users(admin.id)
       logins = Enum.map(users, & &1.login)
       assert "alpha" in logins and "bravo" in logins
+      assert total == length(users)
       # deterministic order (login, id)
       assert logins == Enum.sort(logins)
 
@@ -132,10 +138,16 @@ defmodule Swarm.AdminTest do
     test "a plain user is denied AND the denial is audited; success is NOT audited" do
       plain = user("nobody")
       assert Admin.list_users(plain.id) == :not_authorized
+      assert Admin.get_user(plain.id, plain.id) == :not_authorized
 
       assert Enum.any?(
                Audit.for_actor(plain.id),
                &(&1.action == "list_users" and &1.decision == "denied")
+             )
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "get_user" and &1.decision == "denied")
              )
 
       admin = admin_user("quiet")
@@ -150,12 +162,77 @@ defmodule Swarm.AdminTest do
       ghost = user("ghost")
       :ok = Admin.delete_user(root, ghost.id)
 
-      assert {:ok, users} = Admin.list_users(root)
+      assert {:ok, {users, _total}} = Admin.list_users(root)
       refute Enum.any?(users, &(&1.login == "ghost"))
 
-      assert {:ok, all} = Admin.list_users(root, include_deleted: true)
+      assert {:ok, {all, _total}} = Admin.list_users(root, include_deleted: true)
       g = Enum.find(all, &(&1.login == "ghost"))
       assert g && g.status == "deleted"
+    end
+
+    test "search filters server-side and total reflects the filtered count" do
+      admin = admin_user("lister")
+      _u = user("haystack")
+      _u2 = user("needle", %{first_name: "Ariadne"})
+      _u3 = user("another")
+
+      assert {:ok, {users, 1}} = Admin.list_users(admin.id, query: "ARI")
+      assert Enum.map(users, & &1.login) == ["needle"]
+    end
+
+    test "limit and offset page the filtered roster while total stays pre-page" do
+      admin = admin_user("pager")
+      _u = user("page-alpha")
+      _u2 = user("page-bravo")
+
+      assert {:ok, {first_page, 2}} = Admin.list_users(admin.id, query: "page-", limit: 1)
+      assert Enum.map(first_page, & &1.login) == ["page-alpha"]
+
+      assert {:ok, {second_page, 2}} =
+               Admin.list_users(admin.id, query: "page-", limit: 1, offset: 1)
+
+      assert Enum.map(second_page, & &1.login) == ["page-bravo"]
+    end
+
+    test "LIKE metacharacters in search are treated literally" do
+      admin = admin_user("literal")
+      _u = user("under_score")
+      _u2 = user("underXscore")
+
+      assert {:ok, {users, 1}} = Admin.list_users(admin.id, query: "_")
+      assert Enum.map(users, & &1.login) == ["under_score"]
+    end
+
+    test "get_user returns the aggregated detail view with emails" do
+      admin = admin_user("detail-admin")
+
+      u =
+        user("detail-target", %{
+          emails: [
+            %{email: "target-secondary@example.test", verified: true, primary: false},
+            %{email: "target@example.test", verified: true, primary: true}
+          ],
+          groups: ["staff"]
+        })
+
+      assert {:ok, view} = Admin.get_user(admin.id, u.id)
+      assert view.id == u.id
+      assert view.login == "detail-target"
+      assert view.groups == ["staff"]
+      assert view.providers == ["keycloak"]
+      # Order is DB-collation dependent (not a contract) — assert the set.
+      assert Enum.sort(view.emails) ==
+               Enum.sort(["target-secondary@example.test", "target@example.test"])
+    end
+
+    test "get_user returns :not_found for unknown and tombstoned users" do
+      root = superadmin()
+      ghost = user("detail-ghost")
+
+      assert Admin.get_user(root, Identity.uuid7()) == :not_found
+
+      :ok = Admin.delete_user(root, ghost.id)
+      assert Admin.get_user(root, ghost.id) == :not_found
     end
   end
 

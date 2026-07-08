@@ -504,48 +504,100 @@ defmodule Swarm.Identity do
   The user roster for an admin console (admin-cleanup epic): each row aggregates
   roles, groups and identity-link providers. Tombstones (status=deleted) are
   excluded unless `include_deleted: true` (council: normal operator workflows must
-  not act on deleted identities). Deterministic order (login, id), SQL-bounded.
+  not act on deleted identities). Supports literal case-insensitive substring
+  search over names/login and offset paging. Deterministic order (login, id),
+  SQL-bounded. Returns `{rows, total}` where `total` is pre-page count.
   """
-  @spec list_users(keyword()) :: [map()]
+  @spec list_users(keyword()) :: {[map()], non_neg_integer()}
   def list_users(opts \\ []) do
     include_deleted = Keyword.get(opts, :include_deleted, false)
     limit = opts |> Keyword.get(:limit, 0) |> clamp_limit()
+    offset = opts |> Keyword.get(:offset, 0) |> clamp_offset()
+    query = opts |> Keyword.get(:query) |> query_pattern()
+    query_absent? = is_nil(query)
 
-    Repo.query!(
-      """
-      SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
-             coalesce(array_agg(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL), '{}'),
-             coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
-             coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}')
-        FROM app_user u
-        LEFT JOIN role_grant r ON r.user_id = u.id
-        LEFT JOIN user_group g ON g.user_id = u.id
-        LEFT JOIN identity_link l ON l.user_id = u.id
-       WHERE ($1 OR u.status <> 'deleted')
-       GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at
-       ORDER BY u.login, u.id
-       LIMIT $2
-      """,
-      [include_deleted, limit]
-    ).rows
-    |> Enum.map(fn [id, login, first, last, nick, status, last_login, roles, groups, providers] ->
-      %{
-        id: cast_uuid(id),
-        login: login,
-        first_name: first,
-        last_name: last,
-        nickname: nick,
-        status: status,
-        last_login_at: last_login,
-        roles: roles,
-        groups: groups,
-        providers: providers
-      }
-    end)
+    rows =
+      Repo.query!(
+        """
+        SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
+               coalesce(array_agg(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL), '{}'),
+               coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
+               coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}'),
+               count(*) OVER()
+          FROM app_user u
+          LEFT JOIN role_grant r ON r.user_id = u.id
+          LEFT JOIN user_group g ON g.user_id = u.id
+          LEFT JOIN identity_link l ON l.user_id = u.id
+         WHERE ($1 OR u.status <> 'deleted')
+           AND ($2 OR u.login ILIKE $3 ESCAPE '\\'
+                   OR u.first_name ILIKE $3 ESCAPE '\\'
+                   OR u.last_name ILIKE $3 ESCAPE '\\'
+                   OR u.nickname ILIKE $3 ESCAPE '\\')
+         GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at
+         ORDER BY u.login, u.id
+         LIMIT $4 OFFSET $5
+        """,
+        [include_deleted, query_absent?, query || "%", limit, offset]
+      ).rows
+
+    users =
+      Enum.map(rows, fn [
+                          id,
+                          login,
+                          first,
+                          last,
+                          nick,
+                          status,
+                          last_login,
+                          roles,
+                          groups,
+                          providers,
+                          _total
+                        ] ->
+        %{
+          id: cast_uuid(id),
+          login: login,
+          first_name: first,
+          last_name: last,
+          nickname: nick,
+          status: status,
+          last_login_at: last_login,
+          roles: roles,
+          groups: groups,
+          providers: providers
+        }
+      end)
+
+    total =
+      case rows do
+        [[_, _, _, _, _, _, _, _, _, _, n] | _] -> n
+        [] -> 0
+      end
+
+    {users, total}
   end
 
   defp clamp_limit(n) when is_integer(n) and n > 0 and n <= @list_users_cap, do: n
   defp clamp_limit(_), do: @list_users_cap
+
+  defp clamp_offset(n) when is_integer(n) and n > 0, do: n
+  defp clamp_offset(_), do: 0
+
+  defp query_pattern(q) when is_binary(q) do
+    case String.trim(q) do
+      "" -> nil
+      trimmed -> "%" <> escape_like(trimmed) <> "%"
+    end
+  end
+
+  defp query_pattern(_), do: nil
+
+  defp escape_like(q) do
+    q
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
+  end
 
   @doc "Emails on record for a user (each `%{email, verified_at, is_primary}`)."
   @spec emails_for(String.t()) :: [
@@ -569,6 +621,46 @@ defmodule Swarm.Identity do
       [cast_to_uuid(id)]
     ).rows
     |> List.flatten()
+  end
+
+  @doc "Identity providers linked to a user."
+  @spec providers_for(String.t()) :: [String.t()]
+  def providers_for(id) do
+    Repo.query!(
+      "SELECT DISTINCT provider FROM identity_link WHERE user_id = $1 ORDER BY provider",
+      [cast_to_uuid(id)]
+    ).rows
+    |> List.flatten()
+  end
+
+  @doc """
+  Full admin-visible view for one active/non-deleted user, including emails.
+  Returns `nil` for an unknown or tombstoned user.
+  """
+  @spec get_user_view(String.t()) :: map() | nil
+  def get_user_view(id) do
+    case get_user(id) do
+      nil ->
+        nil
+
+      %{status: "deleted"} ->
+        nil
+
+      user ->
+        %{
+          id: user.id,
+          login: user.login,
+          first_name: user.first_name,
+          last_name: user.last_name,
+          nickname: user.nickname,
+          status: user.status,
+          last_login_at: user.last_login_at,
+          roles: roles_for(user.id),
+          groups: groups_for(user.id),
+          providers: providers_for(user.id),
+          emails: user.id |> emails_for() |> Enum.map(& &1.email)
+        }
+    end
   end
 
   @doc """

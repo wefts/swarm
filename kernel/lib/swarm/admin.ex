@@ -124,12 +124,29 @@ defmodule Swarm.Admin do
   DENIED attempt is audited like every other admin op.
   """
   @admin_caps ~w(invite_users manage_users manage_access)
-  @spec list_users(String.t(), keyword()) :: {:ok, [map()]} | :not_authorized
+  @spec list_users(String.t(), keyword()) :: {:ok, {[map()], non_neg_integer()}} | :not_authorized
   def list_users(actor_id, opts \\ []) do
     if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
       {:ok, Identity.list_users(opts)}
     else
       audit(actor_id, "list_users", "denied")
+      :not_authorized
+    end
+  end
+
+  @doc """
+  Full user detail for the admin console. Same broad admin-cap gate as the
+  roster; successful detail reads are not audited, denied reads are.
+  """
+  @spec get_user(String.t(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
+  def get_user(actor_id, target_id) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+      case Identity.get_user_view(target_id) do
+        nil -> :not_found
+        view -> {:ok, view}
+      end
+    else
+      audit(actor_id, "get_user", "denied")
       :not_authorized
     end
   end
