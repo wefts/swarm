@@ -8,7 +8,13 @@ defmodule Swarm.AdminTest do
   """
   use Swarm.IdentityCase, async: false
 
-  alias Swarm.{Admin, Audit, Conversations}
+  alias Swarm.{Actor, Admin, Audit, Conversations}
+  alias Swarm.Core.Server
+
+  alias Swarm.Core.V1.{
+    ListGroupsRequest,
+    ManageGroupRequest
+  }
 
   defp user(login, overrides \\ %{}) do
     {:ok, u} =
@@ -36,6 +42,9 @@ defmodule Swarm.AdminTest do
 
     u.id
   end
+
+  defp assertion(login), do: Actor.sign(%{"sub" => "sub-#{login}", "provider" => "keycloak"})
+  defp local_assertion(login), do: Actor.sign(%{"sub" => login, "provider" => "local"})
 
   defp admin_user(login) do
     u = user(login)
@@ -272,6 +281,164 @@ defmodule Swarm.AdminTest do
                Audit.for_actor(plain.id),
                &(&1.action == "list_groups" and &1.decision == "denied")
              )
+    end
+  end
+
+  describe "manage_group — first-class group lifecycle" do
+    test "create and rename surface through ListGroups with name and description; scopes confer" do
+      admin = admin_user("group-manager")
+      token = assertion("group-manager")
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: token,
+                 op: :GROUP_CREATE,
+                 group_id: "ops",
+                 name: "Operations",
+                 description: "Operational access"
+               },
+               nil
+             ).status == :CALL_OK
+
+      listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
+      assert listed.status == :CALL_OK
+      created = Enum.find(listed.groups, &(&1.id == "ops"))
+      assert created.name == "Operations"
+      assert created.description == "Operational access"
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: token,
+                 op: :GROUP_RENAME,
+                 group_id: "ops",
+                 name: "Platform Ops"
+               },
+               nil
+             ).status == :CALL_OK
+
+      renamed =
+        Server.list_groups(%ListGroupsRequest{assertion: token}, nil).groups
+        |> Enum.find(&(&1.id == "ops"))
+
+      assert renamed.name == "Platform Ops"
+      assert renamed.description == "Operational access"
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: token,
+                 op: :GROUP_SET_SCOPES,
+                 group_id: "ops",
+                 scopes: ["public", "src:wiki"]
+               },
+               nil
+             ).status == :CALL_OK
+
+      u = user("ops-member")
+      assert :ok = Admin.grant_group(admin.id, u.id, "ops")
+      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
+    end
+
+    test "a group-conferred admin role gives a plain member admin capabilities" do
+      root = superadmin()
+      u = user("group-role-member")
+
+      assert :ok = Admin.create_group(root, "operators", "Operators", nil)
+      assert :ok = Admin.set_group_role(root, "operators", "admin")
+      assert :ok = Admin.grant_group(root, u.id, "operators")
+
+      assert "admin" in Identity.roles_for(u.id)
+      assert "manage_access" in Identity.caps_for(u.id)
+      assert "invite_users" in Identity.caps_for(u.id)
+      assert "manage_users" in Identity.caps_for(u.id)
+    end
+
+    test "group role operations are superadmin-only and denials are audited" do
+      root = superadmin()
+      admin = admin_user("group-role-admin")
+
+      assert :ok = Admin.create_group(root, "privileged", "Privileged", nil)
+      assert Admin.set_group_role(admin.id, "privileged", "admin") == :not_authorized
+      assert Admin.clear_group_role(admin.id, "privileged", "admin") == :not_authorized
+
+      rows = Audit.for_actor(admin.id)
+      assert Enum.any?(rows, &(&1.action == "set_group_role" and &1.decision == "denied"))
+      assert Enum.any?(rows, &(&1.action == "clear_group_role" and &1.decision == "denied"))
+    end
+
+    test "non-empty delete requires confirm, and confirmed delete cascades membership" do
+      admin = admin_user("group-delete-admin")
+      u = user("group-delete-member")
+
+      assert :ok = Admin.create_group(admin.id, "doomed", "Doomed", nil)
+      assert :ok = Admin.set_group_scopes(admin.id, "doomed", ["src:wiki"])
+      assert :ok = Admin.grant_group(admin.id, u.id, "doomed")
+
+      assert Admin.delete_group(admin.id, "doomed", false) == :not_confirmed
+
+      assert Enum.any?(
+               Audit.for_actor(admin.id),
+               &(&1.action == "delete_group" and &1.decision == "denied" and
+                   &1.reason == "not_confirmed")
+             )
+
+      assert Identity.group_exists?("doomed")
+
+      assert Admin.delete_group(admin.id, "doomed", true) == :ok
+      refute Identity.group_exists?("doomed")
+      refute "doomed" in Identity.groups_for(u.id)
+    end
+
+    test "a non-admin ManageGroup request is NOT_AUTHORIZED and audited" do
+      plain = user("group-rpc-denied")
+
+      resp =
+        Server.manage_group(
+          %ManageGroupRequest{
+            assertion: assertion("group-rpc-denied"),
+            op: :GROUP_CREATE,
+            group_id: "blocked",
+            name: "Blocked"
+          },
+          nil
+        )
+
+      assert resp.status == :CALL_NOT_AUTHORIZED
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "create_group" and &1.decision == "denied")
+             )
+
+      refute Identity.group_exists?("blocked")
+    end
+
+    test "ListGroups includes granted_roles after ManageGroup SET_ROLE" do
+      root = superadmin()
+      token = local_assertion(Identity.get_user(root).login)
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: token,
+                 op: :GROUP_CREATE,
+                 group_id: "role-backed",
+                 name: "Role-backed"
+               },
+               nil
+             ).status == :CALL_OK
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: token,
+                 op: :GROUP_SET_ROLE,
+                 group_id: "role-backed",
+                 role: "admin"
+               },
+               nil
+             ).status == :CALL_OK
+
+      listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
+      group = Enum.find(listed.groups, &(&1.id == "role-backed"))
+      assert group.granted_roles == ["admin"]
     end
   end
 

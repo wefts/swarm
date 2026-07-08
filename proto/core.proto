@@ -71,6 +71,7 @@ service Core {
   rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
   // Read-only role list with derived capabilities + holder counts. Any admin cap.
   rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc ManageGroup(ManageGroupRequest) returns (AdminActionResponse);
 }
 
 // Outcome of an identity/privacy call. UNAUTHENTICATED (no/invalid assertion) is
@@ -252,6 +253,8 @@ message GroupView {
   int32 member_count = 2;
   repeated string granted_scopes = 3;
   repeated string granted_roles = 4; // stays [] until a group->role binding exists (forward-compat)
+  string name = 5;
+  string description = 6;
 }
 
 message ListGroupsResponse {
@@ -270,6 +273,27 @@ message RoleView {
 message ListRolesResponse {
   CallStatus status = 1;             // OK | NOT_AUTHORIZED | UNAUTHENTICATED
   repeated RoleView roles = 2;
+}
+
+enum GroupOp {
+  GROUP_OP_UNSPECIFIED = 0;
+  GROUP_CREATE = 1;      // manage_access
+  GROUP_RENAME = 2;      // manage_access
+  GROUP_DELETE = 3;      // manage_access; non-empty needs confirm
+  GROUP_SET_ROLE = 4;    // superadmin (privilege)
+  GROUP_CLEAR_ROLE = 5;  // superadmin
+  GROUP_SET_SCOPES = 6;  // manage_access
+}
+
+message ManageGroupRequest {
+  string assertion = 1;
+  GroupOp op = 2;
+  string group_id = 3;
+  string name = 4;             // CREATE/RENAME
+  string description = 5;      // CREATE (optional)
+  string role = 6;             // SET_ROLE/CLEAR_ROLE ("admin"|"superadmin")
+  repeated string scopes = 7;  // SET_SCOPES (src:* / public; never private)
+  bool confirm = 8;            // DELETE of a non-empty group
 }
 
 message AdminActionResponse {

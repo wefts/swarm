@@ -63,19 +63,85 @@ defmodule Swarm.Admin do
   """
   @spec set_group_scopes(String.t(), String.t(), [String.t()]) :: scopes_result()
   def set_group_scopes(actor_id, group_id, scopes) do
-    if "manage_access" in Identity.caps_for(actor_id) do
-      case Identity.put_group_scopes(group_id, scopes) do
-        :ok ->
-          audit(actor_id, "grant", "allowed")
-          :ok
+    gate_cap(actor_id, "manage_access", "grant", nil, fn ->
+      Identity.put_group_scopes(group_id, scopes)
+    end)
+  end
 
-        {:error, :ungrantable_scope} = err ->
-          audit(actor_id, "grant", "denied")
-          err
+  # ── manage_access — group lifecycle ─────────────────────────────────────
+
+  @doc "Create a first-class local group (`manage_access`)."
+  @spec create_group(String.t(), String.t(), String.t() | nil, String.t() | nil) :: result()
+  def create_group(actor_id, id, name, desc) do
+    gate_cap(actor_id, "manage_access", "create_group", nil, fn ->
+      Identity.create_group(id, name, desc)
+    end)
+  end
+
+  @doc "Rename a first-class group (`manage_access`)."
+  @spec rename_group(String.t(), String.t(), String.t() | nil) :: result() | :not_found
+  def rename_group(actor_id, id, name) do
+    case gate_cap(actor_id, "manage_access", "rename_group", nil, fn ->
+           Identity.rename_group(id, name)
+         end) do
+      {:error, :not_found} -> :not_found
+      other -> other
+    end
+  end
+
+  @doc "Delete a first-class group (`manage_access`); non-empty groups require confirmation."
+  @spec delete_group(String.t(), String.t(), boolean()) :: result() | :not_found | :not_confirmed
+  def delete_group(actor_id, id, confirm) do
+    if "manage_access" in Identity.caps_for(actor_id) do
+      cond do
+        not Identity.group_exists?(id) ->
+          audit(actor_id, "delete_group", "denied")
+          :not_found
+
+        Identity.group_member_count(id) > 0 and not confirm ->
+          audit(actor_id, "delete_group", "denied", reason: "not_confirmed")
+          :not_confirmed
+
+        true ->
+          Identity.delete_group(id)
+          audit(actor_id, "delete_group", "allowed")
+          :ok
       end
     else
-      audit(actor_id, "grant", "denied")
+      audit(actor_id, "delete_group", "denied")
       :not_authorized
+    end
+  end
+
+  # ── group role grants (superadmin-only) ─────────────────────────────────
+
+  @doc "Set a role conferred by group membership (superadmin-only)."
+  @spec set_group_role(String.t(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_role}
+  def set_group_role(actor_id, id, role) do
+    gate_superadmin(actor_id, "set_group_role", nil, fn ->
+      validated_group_role(id, role, fn -> Identity.set_group_role(id, role) end)
+    end)
+  end
+
+  @doc "Clear a role conferred by group membership (superadmin-only)."
+  @spec clear_group_role(String.t(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_role}
+  def clear_group_role(actor_id, id, role) do
+    gate_superadmin(actor_id, "clear_group_role", nil, fn ->
+      validated_group_role(id, role, fn -> Identity.clear_group_role(id, role) end)
+    end)
+  end
+
+  # Validate a group-role op before applying: bad role → {:error, :invalid_role}; missing group →
+  # :not_found; else run `apply_fn`. Extracted so set/clear stay shallow (credo nesting).
+  @spec validated_group_role(String.t(), String.t(), (-> any())) ::
+          any() | :not_found | {:error, :invalid_role}
+  defp validated_group_role(id, role, apply_fn) do
+    cond do
+      role not in ["admin", "superadmin"] -> {:error, :invalid_role}
+      not Identity.group_exists?(id) -> :not_found
+      true -> apply_fn.()
     end
   end
 
@@ -181,24 +247,38 @@ defmodule Swarm.Admin do
 
   # ── gates ────────────────────────────────────────────────────────────────
 
-  @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) :: result()
+  @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::
+          result() | {:error, atom()}
   defp gate_cap(actor_id, cap, action, target_id, fun) do
     if cap in Identity.caps_for(actor_id) do
-      fun.()
-      audit(actor_id, action, "allowed", target_user_id: target_id)
-      :ok
+      case fun.() do
+        {:error, _reason} = err ->
+          audit(actor_id, action, "denied", target_user_id: target_id)
+          err
+
+        result ->
+          audit(actor_id, action, "allowed", target_user_id: target_id)
+          result
+      end
     else
       audit(actor_id, action, "denied", target_user_id: target_id)
       :not_authorized
     end
   end
 
-  @spec gate_superadmin(String.t(), String.t(), String.t() | nil, (-> any())) :: result()
+  @spec gate_superadmin(String.t(), String.t(), String.t() | nil, (-> any())) ::
+          result() | {:error, atom()}
   defp gate_superadmin(actor_id, action, target_id, fun) do
     if "superadmin" in Identity.roles_for(actor_id) do
-      fun.()
-      audit(actor_id, action, "allowed", target_user_id: target_id)
-      :ok
+      case fun.() do
+        {:error, _reason} = err ->
+          audit(actor_id, action, "denied", target_user_id: target_id)
+          err
+
+        result ->
+          audit(actor_id, action, "allowed", target_user_id: target_id)
+          result
+      end
     else
       audit(actor_id, action, "denied", target_user_id: target_id)
       :not_authorized
@@ -211,6 +291,7 @@ defmodule Swarm.Admin do
       actor_id: actor_id,
       action: action,
       target_user_id: Keyword.get(opts, :target_user_id),
+      reason: Keyword.get(opts, :reason),
       decision: decision,
       data_returned: false
     })

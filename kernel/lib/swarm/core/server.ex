@@ -29,6 +29,7 @@ defmodule Swarm.Core.Server do
     ListRolesRequest,
     ListRolesResponse,
     LogConversationResponse,
+    ManageGroupRequest,
     MessageView,
     NamespaceStamp,
     NeighborhoodResponse,
@@ -422,7 +423,9 @@ defmodule Swarm.Core.Server do
       id: view.id,
       member_count: view.member_count,
       granted_scopes: view.granted_scopes,
-      granted_roles: view.granted_roles
+      granted_roles: view.granted_roles,
+      name: view.name || "",
+      description: view.description || ""
     }
   end
 
@@ -495,6 +498,64 @@ defmodule Swarm.Core.Server do
     do: action_response(Admin.set_group_scopes(actor_id, req.group_id, req.scopes))
 
   defp manage_access_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+
+  @spec manage_group(ManageGroupRequest.t(), GRPC.Server.Stream.t()) :: AdminActionResponse.t()
+  def manage_group(req, _stream) do
+    with_actor(req.assertion, %AdminActionResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      manage_group_op(a.uuid, req)
+    end)
+  end
+
+  @spec manage_group_op(String.t(), ManageGroupRequest.t()) :: AdminActionResponse.t()
+  defp manage_group_op(actor_id, %{op: :GROUP_CREATE} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.create_group(actor_id, id, nz(req.name), nz(req.description))
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_RENAME} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.rename_group(actor_id, id, nz(req.name))
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_DELETE} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.delete_group(actor_id, id, req.confirm)
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: op, role: role} = req)
+       when op in [:GROUP_SET_ROLE, :GROUP_CLEAR_ROLE] do
+    cond do
+      role not in ["admin", "superadmin"] ->
+        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+      op == :GROUP_SET_ROLE ->
+        action_response(guarded_group_id(req.group_id, &Admin.set_group_role(actor_id, &1, role)))
+
+      true ->
+        action_response(
+          guarded_group_id(req.group_id, &Admin.clear_group_role(actor_id, &1, role))
+        )
+    end
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_SET_SCOPES} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.set_group_scopes(actor_id, id, req.scopes)
+      end)
+    )
+  end
+
+  defp manage_group_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
 
   @spec manage_user(Swarm.Core.V1.ManageUserRequest.t(), GRPC.Server.Stream.t()) ::
           AdminActionResponse.t()
@@ -573,6 +634,14 @@ defmodule Swarm.Core.Server do
     end
   end
 
+  @spec guarded_group_id(String.t(), (String.t() -> term())) :: term() | {:error, :bad_group_id}
+  defp guarded_group_id(group_id, fun) do
+    case nz(group_id) do
+      nil -> {:error, :bad_group_id}
+      id -> fun.(id)
+    end
+  end
+
   @spec conversation_response(
           {:ok, %{conversation: map(), messages: [map()]}}
           | :not_found
@@ -590,14 +659,28 @@ defmodule Swarm.Core.Server do
 
   defp conversation_response(:not_found), do: %GetConversationResponse{status: :CALL_NOT_FOUND}
 
-  @spec action_response(:ok | :not_authorized | {:error, :ungrantable_scope}) ::
+  @spec action_response(
+          :ok
+          | :not_authorized
+          | :not_found
+          | :not_confirmed
+          | {:error, :ungrantable_scope | :invalid_role | :bad_group_id}
+        ) ::
           AdminActionResponse.t()
   defp action_response(:ok), do: %AdminActionResponse{status: :CALL_OK}
   defp action_response(:not_authorized), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+  defp action_response(:not_found), do: %AdminActionResponse{status: :CALL_NOT_FOUND}
+  defp action_response(:not_confirmed), do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   # A grant of an ungrantable scope (private / out-of-vocabulary) is a caller
   # error, not an authz outcome (person-scope-leak-guard).
   defp action_response({:error, :ungrantable_scope}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  defp action_response({:error, :invalid_role}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  defp action_response({:error, :bad_group_id}),
     do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   @spec conv_view(map()) :: ConversationView.t()
