@@ -577,6 +577,87 @@ defmodule Swarm.Identity do
     {users, total}
   end
 
+  @doc """
+  Read-only group registry for the admin console. Includes every group known from
+  the registry, membership rows, or scope-map rows; groups without members or
+  scopes are preserved. `granted_roles` is intentionally empty until a group→role
+  binding exists.
+  """
+  @spec list_groups() :: [
+          %{
+            id: String.t(),
+            member_count: non_neg_integer(),
+            granted_scopes: [String.t()],
+            granted_roles: [String.t()]
+          }
+        ]
+  def list_groups do
+    Repo.query!(
+      """
+      WITH groups AS (
+        SELECT id AS group_id FROM access_group
+        UNION
+        SELECT group_id FROM user_group
+        UNION
+        SELECT group_id FROM group_scope_map
+      ),
+      member_counts AS (
+        SELECT group_id, count(*)::int AS member_count
+          FROM user_group
+         GROUP BY group_id
+      )
+      SELECT g.group_id,
+             coalesce(mc.member_count, 0),
+             coalesce(m.scopes, '{}'::text[])
+        FROM groups g
+        LEFT JOIN member_counts mc ON mc.group_id = g.group_id
+        LEFT JOIN group_scope_map m ON m.group_id = g.group_id
+       ORDER BY g.group_id
+      """,
+      []
+    ).rows
+    |> Enum.map(fn [id, member_count, granted_scopes] ->
+      %{
+        id: id,
+        member_count: member_count,
+        granted_scopes: granted_scopes,
+        granted_roles: []
+      }
+    end)
+  end
+
+  @known_roles ~w(user admin superadmin)
+
+  @doc """
+  Read-only role list for the admin console. Roles are ordered by ascending
+  privilege; capabilities are derived from the same role policy as `caps_for/1`.
+  `user` is implicit and is never stored in `role_grant`, so its holder count is 0.
+  """
+  @spec list_roles() :: [
+          %{name: String.t(), capabilities: [String.t()], holder_count: non_neg_integer()}
+        ]
+  def list_roles do
+    counts =
+      Repo.query!(
+        """
+        SELECT role, count(DISTINCT user_id)::int
+          FROM role_grant
+         WHERE role = ANY($1)
+         GROUP BY role
+        """,
+        [@known_roles]
+      ).rows
+      |> Map.new(fn [role, count] -> {role, count} end)
+
+    Enum.map(@known_roles, fn role ->
+      %{
+        name: role,
+        capabilities: role |> caps_for_role() |> Enum.uniq() |> Enum.sort(),
+        holder_count: Map.get(counts, role, 0)
+      }
+    end)
+  end
+
   defp clamp_limit(n) when is_integer(n) and n > 0 and n <= @list_users_cap, do: n
   defp clamp_limit(_), do: @list_users_cap
 
@@ -714,6 +795,11 @@ defmodule Swarm.Identity do
   @admin_caps ~w(manage_access invite_users manage_users)
   @superadmin_caps @admin_caps ++ ~w(read_any_conversation)
 
+  @spec caps_for_role(String.t()) :: [String.t()]
+  defp caps_for_role("superadmin"), do: @superadmin_caps
+  defp caps_for_role("admin"), do: @admin_caps
+  defp caps_for_role(_), do: []
+
   @doc """
   The capabilities a user holds, **derived** from their roles (default-deny — `[]`
   when no role is granted). superadmin ⊃ admin + `read_any_conversation`.
@@ -722,11 +808,7 @@ defmodule Swarm.Identity do
   def caps_for(id) do
     id
     |> roles_for()
-    |> Enum.flat_map(fn
-      "superadmin" -> @superadmin_caps
-      "admin" -> @admin_caps
-      _ -> []
-    end)
+    |> Enum.flat_map(&caps_for_role/1)
     |> Enum.uniq()
     |> Enum.sort()
   end

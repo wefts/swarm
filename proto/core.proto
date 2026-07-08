@@ -67,6 +67,10 @@ service Core {
   // One user's full view for the detail page — avoids scanning the roster at scale.
   // Same admin-cap gate as ListUsers; NOT_FOUND for an unknown/tombstoned uuid.
   rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  // Read-only group list for the admin console (E3-read). Any admin cap.
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  // Read-only role list with derived capabilities + holder counts. Any admin cap.
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
 }
 
 // Outcome of an identity/privacy call. UNAUTHENTICATED (no/invalid assertion) is
@@ -239,6 +243,33 @@ message GetUserRequest {
 message GetUserResponse {
   CallStatus status = 1;   // OK | NOT_FOUND | NOT_AUTHORIZED | UNAUTHENTICATED
   UserView user = 2;
+}
+
+message ListGroupsRequest { string assertion = 1; }
+
+message GroupView {
+  string id = 1;
+  int32 member_count = 2;
+  repeated string granted_scopes = 3;
+  repeated string granted_roles = 4; // stays [] until a group->role binding exists (forward-compat)
+}
+
+message ListGroupsResponse {
+  CallStatus status = 1;             // OK | NOT_AUTHORIZED | UNAUTHENTICATED
+  repeated GroupView groups = 2;
+}
+
+message ListRolesRequest { string assertion = 1; }
+
+message RoleView {
+  string name = 1;
+  repeated string capabilities = 2;
+  int32 holder_count = 3;
+}
+
+message ListRolesResponse {
+  CallStatus status = 1;             // OK | NOT_AUTHORIZED | UNAUTHENTICATED
+  repeated RoleView roles = 2;
 }
 
 message AdminActionResponse {

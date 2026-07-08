@@ -135,6 +135,34 @@ defmodule Swarm.Admin do
   end
 
   @doc """
+  Read-only group list for the admin console. Same broad admin-cap gate as the
+  roster; successful reads are not audited, denied reads are.
+  """
+  @spec list_groups(String.t()) :: {:ok, [map()]} | :not_authorized
+  def list_groups(actor_id) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+      {:ok, Identity.list_groups()}
+    else
+      audit(actor_id, "list_groups", "denied")
+      :not_authorized
+    end
+  end
+
+  @doc """
+  Read-only role list for the admin console. Same broad admin-cap gate as the
+  roster; successful reads are not audited, denied reads are.
+  """
+  @spec list_roles(String.t()) :: {:ok, [map()]} | :not_authorized
+  def list_roles(actor_id) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+      {:ok, Identity.list_roles()}
+    else
+      audit(actor_id, "list_roles", "denied")
+      :not_authorized
+    end
+  end
+
+  @doc """
   Full user detail for the admin console. Same broad admin-cap gate as the
   roster; successful detail reads are not audited, denied reads are.
   """

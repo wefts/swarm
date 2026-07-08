@@ -236,6 +236,75 @@ defmodule Swarm.AdminTest do
     end
   end
 
+  describe "list_groups — the admin-console group read model" do
+    test "members-only and scopes-only groups both appear with counts, scopes, and empty roles" do
+      admin = admin_user("group-reader")
+      u1 = user("group-member-a")
+      u2 = user("group-member-b")
+
+      :ok = Identity.add_to_group(u1.id, "members-only")
+      :ok = Identity.add_to_group(u2.id, "members-only")
+      :ok = Identity.put_group_scopes("scopes-only", ["public"])
+
+      assert {:ok, groups} = Admin.list_groups(admin.id)
+
+      members_only = Enum.find(groups, &(&1.id == "members-only"))
+      assert members_only.member_count == 2
+      assert members_only.granted_scopes == []
+      assert members_only.granted_roles == []
+
+      scopes_only = Enum.find(groups, &(&1.id == "scopes-only"))
+      assert scopes_only.member_count == 0
+      assert scopes_only.granted_scopes == ["public"]
+      assert scopes_only.granted_roles == []
+    end
+
+    test "a plain user is denied and the denial is audited" do
+      plain = user("group-denied")
+
+      assert Admin.list_groups(plain.id) == :not_authorized
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "list_groups" and &1.decision == "denied")
+             )
+    end
+  end
+
+  describe "list_roles — the admin-console role read model" do
+    test "known roles include derived capabilities and distinct explicit holder counts" do
+      admin = admin_user("role-reader")
+      admin_two = user("admin-two")
+      root = superadmin()
+      :ok = Admin.grant_role(root, admin_two.id, "admin")
+
+      assert {:ok, roles} = Admin.list_roles(admin.id)
+
+      user_role = Enum.find(roles, &(&1.name == "user"))
+      assert user_role.capabilities == []
+      assert user_role.holder_count == 0
+
+      admin_role = Enum.find(roles, &(&1.name == "admin"))
+      assert admin_role.capabilities == Identity.caps_for(admin.id)
+      assert admin_role.holder_count == 2
+
+      superadmin_role = Enum.find(roles, &(&1.name == "superadmin"))
+      assert "read_any_conversation" in superadmin_role.capabilities
+      assert superadmin_role.holder_count == 2
+    end
+
+    test "a plain user is denied and the denial is audited" do
+      plain = user("role-denied")
+
+      assert Admin.list_roles(plain.id) == :not_authorized
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "list_roles" and &1.decision == "denied")
+             )
+    end
+  end
+
   describe "manage_users — deactivate / delete (auth dies, learned content persists)" do
     test "deactivate disables login and strips role grants; learned content stays" do
       admin = admin_user("adm")

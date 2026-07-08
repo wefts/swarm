@@ -22,7 +22,12 @@ defmodule Swarm.Core.Server do
     GetConversationResponse,
     GetUserRequest,
     GetUserResponse,
+    GroupView,
     ListConversationsResponse,
+    ListGroupsRequest,
+    ListGroupsResponse,
+    ListRolesRequest,
+    ListRolesResponse,
     LogConversationResponse,
     MessageView,
     NamespaceStamp,
@@ -30,6 +35,7 @@ defmodule Swarm.Core.Server do
     NodeView,
     PanelTake,
     ResolveActorResponse,
+    RoleView,
     SearchHit,
     SearchResponse,
     StatusResponse,
@@ -376,6 +382,57 @@ defmodule Swarm.Core.Server do
           %GetUserResponse{status: :CALL_NOT_AUTHORIZED}
       end
     end)
+  end
+
+  @spec list_groups(ListGroupsRequest.t(), GRPC.Server.Stream.t()) :: ListGroupsResponse.t()
+  def list_groups(req, _stream) do
+    with_actor(req.assertion, %ListGroupsResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_groups(a.uuid) do
+        {:ok, groups} ->
+          %ListGroupsResponse{
+            status: :CALL_OK,
+            groups: Enum.map(groups, &to_group_view/1)
+          }
+
+        :not_authorized ->
+          %ListGroupsResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec list_roles(ListRolesRequest.t(), GRPC.Server.Stream.t()) :: ListRolesResponse.t()
+  def list_roles(req, _stream) do
+    with_actor(req.assertion, %ListRolesResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_roles(a.uuid) do
+        {:ok, roles} ->
+          %ListRolesResponse{
+            status: :CALL_OK,
+            roles: Enum.map(roles, &to_role_view/1)
+          }
+
+        :not_authorized ->
+          %ListRolesResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec to_group_view(map()) :: GroupView.t()
+  defp to_group_view(view) do
+    %GroupView{
+      id: view.id,
+      member_count: view.member_count,
+      granted_scopes: view.granted_scopes,
+      granted_roles: view.granted_roles
+    }
+  end
+
+  @spec to_role_view(map()) :: RoleView.t()
+  defp to_role_view(view) do
+    %RoleView{
+      name: view.name,
+      capabilities: view.capabilities,
+      holder_count: view.holder_count
+    }
   end
 
   @spec to_user_view(map(), keyword()) :: Swarm.Core.V1.UserView.t()
