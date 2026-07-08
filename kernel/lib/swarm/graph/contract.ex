@@ -10,10 +10,11 @@ defmodule Swarm.Graph.Contract do
 
   Rules:
 
-  - **Scope** is a closed, ordered vocabulary: `private < group < public`.
-  - **Visibility invariant (ADR-5 workspace):** an edge's scope may be no wider
-    than the narrowest of its two endpoints. Enforced here, at the boundary —
-    not by individual callers.
+  - **Scope** is a lattice: `private` is bottom, `public` is top, and `src:*`
+    plus legacy `group` are incomparable mid-band tags.
+  - **Visibility invariant (ADR-5 workspace):** an edge's scope must be less
+    than or equal to the greatest lower bound of its endpoints. Enforced here,
+    at the boundary — not by individual callers.
   - **Node type** is drawn from a **closed, kernel-owned vocabulary** (`types/0`),
     the identity/entity-kind axis (swarm ADR-14 §3.1). Connectors *map into* it;
     an out-of-vocabulary node type fails the write fail-loud, exactly as an
@@ -40,6 +41,7 @@ defmodule Swarm.Graph.Contract do
   @schema_version 9
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
+  @src_format ~r/^src:[a-z0-9_-]+$/
   @type_format ~r/^[a-z][a-z0-9_]*$/
   # The closed node-type vocabulary (swarm ADR-14 §3.1) — the entity-kind/identity
   # axis. Connectors map their source units onto exactly one of these; a node with
@@ -64,6 +66,39 @@ defmodule Swarm.Graph.Contract do
   @doc "Deny-ordering rank of a scope (`private` = 0, widest = highest), or nil."
   @spec scope_rank(String.t()) :: non_neg_integer() | nil
   def scope_rank(scope), do: Map.get(@scope_rank, scope)
+
+  @doc """
+  True if a scope is admissible: the closed base vocab OR a well-formed `src:<name>`.
+  """
+  @spec valid_scope?(String.t()) :: boolean()
+  def valid_scope?(scope) when is_binary(scope) do
+    scope in @scopes or scope =~ @src_format
+  end
+
+  def valid_scope?(_), do: false
+
+  @doc """
+  Lattice partial order: `private` ≤ everything, everything ≤ `public`, else only equal scopes are ≤.
+  """
+  @spec lattice_leq(String.t(), String.t()) :: boolean()
+  def lattice_leq(a, b) when is_binary(a) and is_binary(b) do
+    a == b or a == "private" or b == "public"
+  end
+
+  @doc """
+  Greatest lower bound in the scope lattice — the write-time clamp for an edge's endpoints.
+  Two DIFFERENT mid-band tags (src:* or group) have GLB `private`.
+  """
+  @spec glb(String.t(), String.t()) :: String.t()
+  def glb(a, b) when is_binary(a) and is_binary(b) do
+    cond do
+      a == b -> a
+      a == "private" or b == "private" -> "private"
+      a == "public" -> b
+      b == "public" -> a
+      true -> "private"
+    end
+  end
 
   @doc "Allowed `type` format (non-empty lowercase identifier)."
   @spec type_format() :: Regex.t()
@@ -172,7 +207,7 @@ defmodule Swarm.Graph.Contract do
   defp check_node_type(_), do: {:error, :missing_type}
 
   defp check_scope(scope) when is_binary(scope) do
-    if scope in @scopes, do: :ok, else: {:error, :unknown_scope}
+    if valid_scope?(scope), do: :ok, else: {:error, :unknown_scope}
   end
 
   defp check_scope(_), do: {:error, :unknown_scope}
@@ -225,10 +260,11 @@ defmodule Swarm.Graph.Contract do
 
   defp check_evidence_kind(_), do: {:error, :unknown_evidence_kind}
 
-  # The visibility invariant: rank(edge) <= min(rank(src), rank(dst)).
+  # The visibility invariant: edge scope <= GLB(src scope, dst scope).
   defp check_visibility(scope, src_scope, dst_scope) do
-    narrowest = min(@scope_rank[src_scope], @scope_rank[dst_scope])
-    if @scope_rank[scope] <= narrowest, do: :ok, else: {:error, :scope_wider_than_endpoints}
+    if lattice_leq(scope, glb(src_scope, dst_scope)),
+      do: :ok,
+      else: {:error, :scope_wider_than_endpoints}
   end
 
   defp get(attrs, key) do

@@ -18,6 +18,39 @@ defmodule Swarm.Graph.ContractTest do
     n
   end
 
+  describe "scope lattice helpers" do
+    test "glb/2 returns the write-time clamp for endpoint scopes" do
+      assert Contract.glb("public", "public") == "public"
+      assert Contract.glb("src:wiki", "public") == "src:wiki"
+      assert Contract.glb("src:wiki", "src:wiki") == "src:wiki"
+      assert Contract.glb("src:wiki", "src:ldap") == "private"
+      assert Contract.glb("private", "src:wiki") == "private"
+      assert Contract.glb("group", "src:wiki") == "private"
+    end
+
+    test "lattice_leq/2 implements the partial order" do
+      assert Contract.lattice_leq("private", "src:wiki")
+      assert Contract.lattice_leq("src:wiki", "public")
+      refute Contract.lattice_leq("src:wiki", "src:ldap")
+      assert Contract.lattice_leq("src:wiki", "src:wiki")
+      refute Contract.lattice_leq("public", "src:wiki")
+    end
+
+    test "valid_scope?/1 accepts base scopes and well-formed source scopes" do
+      assert Contract.valid_scope?("private")
+      assert Contract.valid_scope?("public")
+      assert Contract.valid_scope?("group")
+      assert Contract.valid_scope?("src:wiki")
+      assert Contract.valid_scope?("src:a-b_1")
+
+      refute Contract.valid_scope?("src:BAD")
+      refute Contract.valid_scope?("src:")
+      refute Contract.valid_scope?("wiki")
+      refute Contract.valid_scope?("")
+      refute Contract.valid_scope?(123)
+    end
+  end
+
   describe "visibility invariant (ADR-5) enforced at the write boundary" do
     test "rejects an edge whose scope is wider than an endpoint — the leak path" do
       a = add_node!(%{type: "file", scope: "private"})
@@ -56,6 +89,32 @@ defmodule Swarm.Graph.ContractTest do
                Graph.add_edge(a, 999_999, "mentions", "ev-1", scope: "private")
 
       assert edge_count() == 0
+    end
+
+    test "accepts source-scoped nodes and clamps source-scoped edges by GLB" do
+      assert Contract.validate_node(%{type: "article", scope: "src:wiki"}) == :ok
+
+      assert Contract.validate_edge(
+               "src:wiki",
+               "src:wiki",
+               "mentions",
+               "src:wiki",
+               nil,
+               "ev-1",
+               "origin-1",
+               "observation"
+             ) == :ok
+
+      assert Contract.validate_edge(
+               "src:wiki",
+               "src:wiki",
+               "mentions",
+               "public",
+               nil,
+               "ev-1",
+               "origin-1",
+               "observation"
+             ) == {:error, :scope_wider_than_endpoints}
     end
   end
 
