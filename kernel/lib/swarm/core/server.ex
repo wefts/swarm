@@ -335,6 +335,39 @@ defmodule Swarm.Core.Server do
     end)
   end
 
+  @spec list_users(Swarm.Core.V1.ListUsersRequest.t(), GRPC.Server.Stream.t()) ::
+          Swarm.Core.V1.ListUsersResponse.t()
+  def list_users(req, _stream) do
+    alias Swarm.Core.V1.{ListUsersResponse, UserView}
+
+    with_actor(req.assertion, %ListUsersResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_users(a.uuid, include_deleted: req.include_deleted, limit: req.limit) do
+        {:ok, users} ->
+          %ListUsersResponse{
+            status: :CALL_OK,
+            users:
+              Enum.map(users, fn u ->
+                %UserView{
+                  id: u.id,
+                  login: u.login,
+                  first_name: u.first_name || "",
+                  last_name: u.last_name || "",
+                  nickname: u.nickname || "",
+                  status: u.status,
+                  roles: u.roles,
+                  groups: u.groups,
+                  providers: u.providers,
+                  last_login_at: iso(u.last_login_at)
+                }
+              end)
+          }
+
+        :not_authorized ->
+          %ListUsersResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
   @spec manage_access(Swarm.Core.V1.ManageAccessRequest.t(), GRPC.Server.Stream.t()) ::
           AdminActionResponse.t()
   def manage_access(req, _stream) do

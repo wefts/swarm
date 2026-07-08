@@ -113,6 +113,27 @@ defmodule Swarm.Admin do
     end)
   end
 
+  # ── reads ────────────────────────────────────────────────────────────────
+
+  @doc """
+  The user roster for an admin console (admin-cleanup epic). Allowed for ANY of
+  the three admin capabilities — the list is prerequisite data for every admin
+  workflow (invite needs collision context; deactivate/grants need uuids) —
+  council: codex+gemini agreed. A successful read is NOT audited (a roster read
+  happens on every admin page load and would drown `admin_action_audit`); a
+  DENIED attempt is audited like every other admin op.
+  """
+  @admin_caps ~w(invite_users manage_users manage_access)
+  @spec list_users(String.t(), keyword()) :: {:ok, [map()]} | :not_authorized
+  def list_users(actor_id, opts \\ []) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+      {:ok, Identity.list_users(opts)}
+    else
+      audit(actor_id, "list_users", "denied")
+      :not_authorized
+    end
+  end
+
   # ── gates ────────────────────────────────────────────────────────────────
 
   @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) :: result()

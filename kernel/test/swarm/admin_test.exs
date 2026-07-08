@@ -109,6 +109,56 @@ defmodule Swarm.AdminTest do
     end
   end
 
+  describe "list_users — the admin-console roster (admin-cleanup epic)" do
+    test "an admin lists users: uuid, status, roles, groups, providers; login-ordered" do
+      admin = admin_user("lister")
+      _u = user("bravo")
+      _u2 = user("alpha")
+
+      assert {:ok, users} = Admin.list_users(admin.id)
+      logins = Enum.map(users, & &1.login)
+      assert "alpha" in logins and "bravo" in logins
+      # deterministic order (login, id)
+      assert logins == Enum.sort(logins)
+
+      me = Enum.find(users, &(&1.login == "lister"))
+      # the uuid ManageUser/ManageAccess actually target
+      assert me.id == admin.id
+      assert me.status == "active"
+      assert "admin" in me.roles
+      assert "keycloak" in me.providers
+    end
+
+    test "a plain user is denied AND the denial is audited; success is NOT audited" do
+      plain = user("nobody")
+      assert Admin.list_users(plain.id) == :not_authorized
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "list_users" and &1.decision == "denied")
+             )
+
+      admin = admin_user("quiet")
+      before = length(Audit.for_actor(admin.id))
+      assert {:ok, _} = Admin.list_users(admin.id)
+      # roster reads don't drown the audit
+      assert length(Audit.for_actor(admin.id)) == before
+    end
+
+    test "deleted users are tombstoned out unless explicitly included" do
+      root = superadmin()
+      ghost = user("ghost")
+      :ok = Admin.delete_user(root, ghost.id)
+
+      assert {:ok, users} = Admin.list_users(root)
+      refute Enum.any?(users, &(&1.login == "ghost"))
+
+      assert {:ok, all} = Admin.list_users(root, include_deleted: true)
+      g = Enum.find(all, &(&1.login == "ghost"))
+      assert g && g.status == "deleted"
+    end
+  end
+
   describe "manage_users — deactivate / delete (auth dies, learned content persists)" do
     test "deactivate disables login and strips role grants; learned content stays" do
       admin = admin_user("adm")

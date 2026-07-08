@@ -496,6 +496,57 @@ defmodule Swarm.Identity do
     end
   end
 
+  # ListUsers is bounded BY CONTRACT (council: gemini) — enforced in the SQL, not
+  # in memory; the wire `limit` is clamped into (0, @list_users_cap].
+  @list_users_cap 500
+
+  @doc """
+  The user roster for an admin console (admin-cleanup epic): each row aggregates
+  roles, groups and identity-link providers. Tombstones (status=deleted) are
+  excluded unless `include_deleted: true` (council: normal operator workflows must
+  not act on deleted identities). Deterministic order (login, id), SQL-bounded.
+  """
+  @spec list_users(keyword()) :: [map()]
+  def list_users(opts \\ []) do
+    include_deleted = Keyword.get(opts, :include_deleted, false)
+    limit = opts |> Keyword.get(:limit, 0) |> clamp_limit()
+
+    Repo.query!(
+      """
+      SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
+             coalesce(array_agg(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL), '{}'),
+             coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
+             coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}')
+        FROM app_user u
+        LEFT JOIN role_grant r ON r.user_id = u.id
+        LEFT JOIN user_group g ON g.user_id = u.id
+        LEFT JOIN identity_link l ON l.user_id = u.id
+       WHERE ($1 OR u.status <> 'deleted')
+       GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at
+       ORDER BY u.login, u.id
+       LIMIT $2
+      """,
+      [include_deleted, limit]
+    ).rows
+    |> Enum.map(fn [id, login, first, last, nick, status, last_login, roles, groups, providers] ->
+      %{
+        id: cast_uuid(id),
+        login: login,
+        first_name: first,
+        last_name: last,
+        nickname: nick,
+        status: status,
+        last_login_at: last_login,
+        roles: roles,
+        groups: groups,
+        providers: providers
+      }
+    end)
+  end
+
+  defp clamp_limit(n) when is_integer(n) and n > 0 and n <= @list_users_cap, do: n
+  defp clamp_limit(_), do: @list_users_cap
+
   @doc "Emails on record for a user (each `%{email, verified_at, is_primary}`)."
   @spec emails_for(String.t()) :: [
           %{email: String.t(), verified_at: term(), is_primary: boolean()}

@@ -57,6 +57,13 @@ service Core {
   // User lifecycle: invite / deactivate / delete, capability-gated + audited
   // (Decision 11). Deactivate/delete kill the login; learned content persists.
   rpc ManageUser(ManageUserRequest) returns (AdminActionResponse);
+
+  // The kernel-truth user roster for an admin console (ADR-16; admin-cleanup epic).
+  // Allowed for ANY of {invite_users, manage_users, manage_access} — the list is
+  // prerequisite data for all three workflows (council: codex+gemini agreed).
+  // Success is NOT audited (a roster read on every admin page load would drown
+  // admin_action_audit); DENIALS are audited like every other admin op.
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
 }
 
 // Outcome of an identity/privacy call. UNAUTHENTICATED (no/invalid assertion) is
@@ -184,6 +191,34 @@ message ManageUserRequest {
   string first_name = 5;
   string last_name = 6;
   string nickname = 7;
+}
+
+message ListUsersRequest {
+  string assertion = 1;
+  // Tombstones (status=deleted) are EXCLUDED by default — normal operator
+  // workflows must not act on deleted identities (council). Explicit opt-in only.
+  bool include_deleted = 2;
+  // Bounded by contract (council: gemini's must-fix): server clamps to [1..500];
+  // 0 means the server default (500). Deterministic order: login, id.
+  int32 limit = 3;
+}
+
+message UserView {
+  string id = 1;                 // the kernel uuid — what ManageUser/ManageAccess target
+  string login = 2;
+  string first_name = 3;
+  string last_name = 4;
+  string nickname = 5;
+  string status = 6;             // invited | active | disabled | deleted
+  repeated string roles = 7;     // admin | superadmin
+  repeated string groups = 8;
+  repeated string providers = 9; // identity_link providers (keycloak | local | …)
+  string last_login_at = 10;     // ISO8601, "" when never
+}
+
+message ListUsersResponse {
+  CallStatus status = 1;
+  repeated UserView users = 2;
 }
 
 message AdminActionResponse {
