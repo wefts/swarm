@@ -28,6 +28,9 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
+  # v10 — per-source scope (ADR-18): scope value space {private,group,public} → {private,public,
+  # src:*}; the `group` scope is migrated to per-source `src:<name>` (transitional CHECK still admits
+  # `group`); scope ordering becomes the lattice (private=⊥, public=⊤, src:* incomparable mid-band).
   # v9 — node_do_not_merge (master-plan S4): a negative identity assertion so ER/merge never
   # collapse two DISTINCT entities.
   # v8 — edge_provenance.lineage (master-plan S1): corroboration counts distinct upstream lineage,
@@ -38,7 +41,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 9
+  @schema_version 10
   @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
   @scopes Map.keys(@scope_rank)
   @src_format ~r/^src:[a-z0-9_-]+$/

@@ -32,13 +32,20 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   alias Swarm.WorldMap.Gate.Answer
   alias Swarm.WorldMap.Gate.Audit
 
+  @network_scope "src:wiki"
+  @who_scope "src:ldap"
+
   # --- shared injection helpers (same style as coverage_test.exs / gate_test.exs) ----------
 
   defp net_fun(facts), do: fn _key, _scopes, _opts -> facts end
-  defp net_fact(rel, obj, corr \\ 2), do: %{relation: rel, object: obj, object_kind: "subnet", corroboration: corr}
+
+  defp net_fact(rel, obj, corr \\ 2),
+    do: %{relation: rel, object: obj, object_kind: "subnet", corroboration: corr}
 
   defp who_fun(facts), do: fn _key, _scopes, _opts -> facts end
-  defp who_fact(rel, obj, corr \\ 1), do: %{relation: rel, object: obj, object_kind: "person", corroboration: corr}
+
+  defp who_fact(rel, obj, corr \\ 1),
+    do: %{relation: rel, object: obj, object_kind: "person", corroboration: corr}
 
   defp proc_fun(variants), do: fn _key, _scopes, _opts -> variants end
 
@@ -56,7 +63,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
       # cue (firewall). CURRENT behavior: the procedure branch is checked first ⇒ :procedure,
       # even with network_serve on and a network candidate that WOULD have served.
       d =
-        Coverage.describe("how do I configure the firewall", ["group"],
+        Coverage.describe("how do I configure the firewall", [@network_scope],
           candidate_keys: [],
           procedure_fun: fn _, _, _ -> [] end,
           network_serve: true,
@@ -73,7 +80,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
       # "who manages the firewall" matches the who-cue ("who manages") AND the network cue
       # ("firewall"). CURRENT behavior: who is checked BEFORE network ⇒ :who wins.
       d =
-        Coverage.describe("who manages the firewall", ["group"],
+        Coverage.describe("who manages the firewall", [@who_scope],
           who_serve: true,
           who_keys: ["who:person:admin"],
           who_fun: who_fun([who_fact("managed_by", "Ann Ops")]),
@@ -90,10 +97,11 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "a bare network query (no procedure/who cue) routes to :network" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: ["net:tunnel:orbit"],
-          network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
+          network_fun:
+            net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
       assert d.intent == :neighborhood
@@ -110,7 +118,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   describe "2. serve flags (default OFF ⇒ escalate; explicit true ⇒ serve)" do
     test "who_serve false (default) ⇒ a matching who query is :unknown / escalate" do
       d =
-        Coverage.describe("who manages the platform team", ["group"],
+        Coverage.describe("who manages the platform team", [@who_scope],
           who_keys: ["who:team:platform"],
           who_fun: who_fun([who_fact("managed_by", "Jane Doe")])
         )
@@ -121,7 +129,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "who_serve true ⇒ the SAME query serves" do
       d =
-        Coverage.describe("who manages the platform team", ["group"],
+        Coverage.describe("who manages the platform team", [@who_scope],
           who_serve: true,
           who_keys: ["who:team:platform"],
           who_fun: who_fun([who_fact("managed_by", "Jane Doe")])
@@ -134,7 +142,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "network_serve false (default) ⇒ a matching network query is :unknown / escalate" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_keys: ["net:tunnel:orbit"],
           network_fun: net_fun([net_fact("carries", "10.0.0.0/8")])
         )
@@ -145,10 +153,11 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "network_serve true ⇒ the SAME query serves" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: ["net:tunnel:orbit"],
-          network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
+          network_fun:
+            net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
       assert d.intent == :neighborhood
@@ -164,7 +173,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   describe "3. blockers (fail-closed escalation reasons)" do
     test "network: no candidate keys ⇒ :no_candidate ⇒ escalate" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: [],
           network_fun: net_fun([])
@@ -176,7 +185,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "network: candidate present but empty neighborhood ⇒ :no_corroboration ⇒ escalate" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: ["net:tunnel:orbit"],
           network_fun: net_fun([])
@@ -188,7 +197,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "who: no candidate keys ⇒ :no_candidate ⇒ escalate" do
       d =
-        Coverage.describe("who manages the platform team", ["group"],
+        Coverage.describe("who manages the platform team", [@who_scope],
           who_serve: true,
           who_keys: [],
           who_fun: who_fun([])
@@ -200,7 +209,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "who: candidate present but empty neighborhood ⇒ :no_corroboration ⇒ escalate" do
       d =
-        Coverage.describe("who manages the platform team", ["group"],
+        Coverage.describe("who manages the platform team", [@who_scope],
           who_serve: true,
           who_keys: ["who:person:jdoe"],
           who_fun: who_fun([])
@@ -218,7 +227,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   describe "4. service-rides-who (no distinct :service intent exists today)" do
     test "'who manages Keycloak' routes to :who (intent :who), not a separate :service intent" do
       d =
-        Coverage.describe("who manages Keycloak", ["group"],
+        Coverage.describe("who manages Keycloak", [@who_scope],
           who_serve: true,
           who_keys: ["who:service:keycloak"],
           who_fun: who_fun([who_fact("managed_by_team", "Platform Team")])
@@ -226,13 +235,19 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
       assert d.intent == :neighborhood
       assert d.domain == :who
-      assert {:ok, %Validated{intent: :neighborhood, domain: :who} = validated} = Coverage.validate(d)
-      assert Enum.any?(validated.atoms, &(&1.relation == "managed_by_team" and &1.object == "Platform Team"))
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who} = validated} =
+               Coverage.validate(d)
+
+      assert Enum.any?(
+               validated.atoms,
+               &(&1.relation == "managed_by_team" and &1.object == "Platform Team")
+             )
     end
 
     test "the served Answer for a service-ownership ask carries intent :who end to end" do
       d =
-        Coverage.describe("who manages Keycloak", ["group"],
+        Coverage.describe("who manages Keycloak", [@who_scope],
           who_serve: true,
           who_keys: ["who:service:keycloak"],
           who_fun: who_fun([who_fact("managed_by_team", "Platform Team")])
@@ -254,10 +269,11 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   describe "5. gate invariants (opaque citations; fail-closed entail veto)" do
     test "a served network Answer carries only opaque corroboration:N citations, never raw keys" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: ["net:tunnel:orbit"],
-          network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
+          network_fun:
+            net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
       assert {:serve, %Answer{citations: cits}, %Audit{decision: :serve}} =
@@ -269,7 +285,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "a served who Answer carries only opaque corroboration:N citations, never raw keys" do
       d =
-        Coverage.describe("who is in the platform team", ["group"],
+        Coverage.describe("who is in the platform team", [@who_scope],
           who_serve: true,
           who_keys: ["who:team:platform"],
           who_fun: who_fun([who_fact("works_in", "Jane Doe"), who_fact("works_in", "Bob Smith")])
@@ -284,10 +300,11 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "entail veto (entail_fun returns false) escalates a structurally-valid network descriptor" do
       d =
-        Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
           network_serve: true,
           network_keys: ["net:tunnel:orbit"],
-          network_fun: net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
+          network_fun:
+            net_fun([net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")])
         )
 
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
@@ -296,7 +313,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "entail veto (entail_fun returns false) escalates a structurally-valid who descriptor" do
       d =
-        Coverage.describe("who is in the platform team", ["group"],
+        Coverage.describe("who is in the platform team", [@who_scope],
           who_serve: true,
           who_keys: ["who:team:platform"],
           who_fun: who_fun([who_fact("works_in", "Jane Doe")])
@@ -310,7 +327,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
       boom = fn _q, _g -> raise "model timeout" end
 
       d =
-        Coverage.describe("who is in the platform team", ["group"],
+        Coverage.describe("who is in the platform team", [@who_scope],
           who_serve: true,
           who_keys: ["who:team:platform"],
           who_fun: who_fun([who_fact("works_in", "Jane Doe")])

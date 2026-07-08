@@ -3,7 +3,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
   Network-map skeleton extraction (ADR-17 world-map): the cheap gate, the conservative/grounded
   macro parse (governed vocabulary, address refusal, self-loop guard), and the write that emits
   namespaced `entity` nodes + `is_a` type edges + governed relation edges (symmetric doubling,
-  scope clamp, hypothesis band).
+  per-source scope inheritance, hypothesis band).
   """
   use Swarm.GraphCase, async: false
 
@@ -11,6 +11,8 @@ defmodule Swarm.Enrichment.NetworkMapTest do
   alias Swarm.Graph.Network
   alias Swarm.Graph.Store
   alias Swarm.Repo
+
+  @net_scope "src:wiki"
 
   defp gen(json), do: fn _m, _p, _o -> {:ok, json} end
 
@@ -92,6 +94,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
 
     test "drops a mis-typed relation↔kind signature (gateway hosted_on subnet)" do
       body = "the gateway opnsense is hosted_on the lansitesur subnet"
+
       # gateway hosted_on subnet is a real observed error — hosted_on object must be host/cluster
       json =
         ~s({"facts":[{"subject":"opnsense","subject_kind":"gateway","relation":"hosted_on","object":"lansitesur","object_kind":"subnet"}]})
@@ -114,7 +117,8 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       json =
         ~s({"facts":[{"subject":"icinga","subject_kind":"service","relation":"hosted_on","object":"lyderic","object_kind":"host"}]})
 
-      assert [%{subject: "icinga", object: "lyderic"}] = NetworkMap.extract(body, gen_fun: gen(json))
+      assert [%{subject: "icinga", object: "lyderic"}] =
+               NetworkMap.extract(body, gen_fun: gen(json))
     end
 
     test "alias_of requires matching endpoint kinds" do
@@ -147,7 +151,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
 
   describe "write/3" do
     test "emits namespaced entity nodes, is_a type markers, and the relation edge" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
         %{
@@ -163,16 +167,20 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       # 2 is_a edges + 1 relation edge
       assert length(ids) == 3
 
-      %{entities: entities, relations: relations} = Network.map(["group"])
+      %{entities: entities, relations: relations} = Network.map([@net_scope])
       keys = Enum.map(entities, & &1.key) |> Enum.sort()
       assert "net:site:paris" in keys
       assert "net:gateway:gw-core" in keys
+
+      assert Repo.query!("SELECT scope FROM node WHERE key = 'net:kind:site'").rows == [
+               ["public"]
+             ]
 
       assert [%{src: "site/paris", relation: "routes_via", dst: "gateway/gw-core"}] = relations
     end
 
     test "symmetric relations (connects_site) emit BOTH directions" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
         %{
@@ -185,13 +193,13 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       ]
 
       _ids = NetworkMap.write(node, facts, "prov-sym")
-      %{relations: relations} = Network.map(["group"])
+      %{relations: relations} = Network.map([@net_scope])
       pairs = Enum.map(relations, &{&1.src, &1.dst}) |> Enum.sort()
       assert {"site/lyon", "site/paris"} in pairs
       assert {"site/paris", "site/lyon"} in pairs
     end
 
-    test "no-leak: a PUBLIC source clamps network nodes/edges to group (never public)" do
+    test "network data inherits the source scope, including public sources" do
       node = src_node("public")
 
       facts = [
@@ -206,14 +214,22 @@ defmodule Swarm.Enrichment.NetworkMapTest do
 
       NetworkMap.write(node, facts, "prov-pub")
 
-      # visible at group
-      assert %{entities: [_ | _]} = Network.map(["group"])
-      # NOT visible at a public-only read
-      assert %{entities: [], relations: []} = Network.map(["public"])
+      assert Repo.query!("SELECT scope FROM node WHERE key = 'net:site:paris'").rows == [
+               ["public"]
+             ]
+
+      assert Repo.query!("SELECT scope FROM node WHERE key = 'net:kind:site'").rows == [
+               ["public"]
+             ]
+
+      assert Repo.query!("SELECT DISTINCT visibility_scope FROM edge WHERE type = 'routes_via'").rows ==
+               [["public"]]
+
+      assert %{entities: [_ | _], relations: [_ | _]} = Network.map(["public"])
     end
 
     test "Phase-2 opts: distinct origin corroborates a matching wiki edge (ADR-13 seen_count↑)" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
         %{
@@ -242,10 +258,16 @@ defmodule Swarm.Enrichment.NetworkMapTest do
     end
 
     test "Phase-2 opts set reliability + evidence_kind on the edge" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
-        %{subject: "orbit", subject_kind: "tunnel", relation: "carries", object: "10.0.0.0/8", object_kind: "subnet"}
+        %{
+          subject: "orbit",
+          subject_kind: "tunnel",
+          relation: "carries",
+          object: "10.0.0.0/8",
+          object_kind: "subnet"
+        }
       ]
 
       NetworkMap.write(node, facts, "iac-prov",
@@ -262,29 +284,49 @@ defmodule Swarm.Enrichment.NetworkMapTest do
     end
 
     test "has_address (host → address, IP object) is admitted via the write path (table facts)" do
-      node = src_node("group")
+      node = src_node(@net_scope)
       # bare-IP object: refused by the LLM extract path (Phase-1), but the table parser feeds it
       # directly to write, where admissible?/1 (vocab+signature) allows host → has_address → address
-      facts = [%{subject: "web01.corp", subject_kind: "host", relation: "has_address", object: "10.0.0.5", object_kind: "address"}]
-      assert [_ | _] = NetworkMap.write(node, facts, "wiki:tables", origin: "wiki:tables", reliability: 0.55, evidence_kind: "observation")
+      facts = [
+        %{
+          subject: "web01.corp",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.0.0.5",
+          object_kind: "address"
+        }
+      ]
 
-      %{relations: rels} = Network.map(["group"])
+      assert [_ | _] =
+               NetworkMap.write(node, facts, "wiki:tables",
+                 origin: "wiki:tables",
+                 reliability: 0.55,
+                 evidence_kind: "observation"
+               )
+
+      %{relations: rels} = Network.map([@net_scope])
       assert Enum.any?(rels, &(&1.relation == "has_address" and &1.src == "host/web01.corp"))
     end
 
     test "write signature-filters a directly-fed mis-typed fact" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
         # gateway hosted_on subnet — mis-typed, must be dropped even on the direct-write path
-        %{subject: "gw", subject_kind: "gateway", relation: "hosted_on", object: "net", object_kind: "subnet"}
+        %{
+          subject: "gw",
+          subject_kind: "gateway",
+          relation: "hosted_on",
+          object: "net",
+          object_kind: "subnet"
+        }
       ]
 
       assert NetworkMap.write(node, facts, "iac-prov", origin: "iac:repo") == []
     end
 
     test "network edges carry the hypothesis band (low reliability)" do
-      node = src_node("group")
+      node = src_node(@net_scope)
 
       facts = [
         %{

@@ -12,6 +12,9 @@ defmodule Swarm.WorldMap.CoverageTest do
   alias Swarm.WorldMap.Coverage.Descriptor
   alias Swarm.WorldMap.Coverage.Validated
 
+  @network_scope "src:wiki"
+  @who_scope "src:ldap"
+
   # A fake Procedure.steps/3: ignores args, returns the configured variants.
   defp proc_fun(variants), do: fn _key, _scopes, _opts -> variants end
 
@@ -223,47 +226,79 @@ defmodule Swarm.WorldMap.CoverageTest do
   describe "describe/3 + validate/1 — network intent" do
     # a fake Network.neighborhood/3: returns the configured facts (ignores args)
     defp net_fun(facts), do: fn _key, _scopes, _opts -> facts end
-    defp net_fact(rel, obj, corr \\ 2), do: %{relation: rel, object: obj, object_kind: "subnet", corroboration: corr}
+
+    defp net_fact(rel, obj, corr \\ 2),
+      do: %{relation: rel, object: obj, object_kind: "subnet", corroboration: corr}
 
     test "OFF by default: a network query without network_serve escalates (unknown intent)" do
-      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
-            network_keys: ["net:tunnel:orbit"], network_fun: net_fun([net_fact("carries", "10.0.0.0/8")]))
+      d =
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
+          network_keys: ["net:tunnel:orbit"],
+          network_fun: net_fun([net_fact("carries", "10.0.0.0/8")])
+        )
+
       assert d.intent == :unknown
     end
 
     test "serves a corroborated neighborhood when network_serve is on" do
       facts = [net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")]
 
-      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
-            network_serve: true, network_keys: ["net:tunnel:orbit"], network_fun: net_fun(facts))
+      d =
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:tunnel:orbit"],
+          network_fun: net_fun(facts)
+        )
 
       assert d.intent == :neighborhood
       assert d.domain == :network
       assert d.neighborhood_subject == "tunnel orbit"
 
-      assert {:ok, %Validated{intent: :neighborhood, domain: :network, atoms: ^facts, name: "tunnel orbit"}} =
+      assert {:ok,
+              %Validated{
+                intent: :neighborhood,
+                domain: :network,
+                atoms: ^facts,
+                name: "tunnel orbit"
+              }} =
                Coverage.validate(d)
     end
 
     test "no candidate → :no_candidate → escalate" do
-      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
-            network_serve: true, network_keys: [], network_fun: net_fun([]))
+      d =
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
+          network_serve: true,
+          network_keys: [],
+          network_fun: net_fun([])
+        )
+
       assert d.blockers == [:no_candidate]
       assert {:error, [:no_candidate]} = Coverage.validate(d)
     end
 
     test "candidate but NO corroborated facts → :no_corroboration → escalate (fail-closed floor)" do
-      d = Coverage.describe("what subnets does the orbit tunnel carry", ["group"],
-            network_serve: true, network_keys: ["net:tunnel:orbit"], network_fun: net_fun([]))
+      d =
+        Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:tunnel:orbit"],
+          network_fun: net_fun([])
+        )
+
       assert d.blockers == [:no_corroboration]
       assert {:error, [:no_corroboration]} = Coverage.validate(d)
     end
 
     test "a PROCEDURE cue takes precedence over a network cue (intent split honored)" do
       # 'configure the firewall' has both cues; procedure branch wins → not network
-      d = Coverage.describe("how do I configure the firewall", ["group"],
-            network_serve: true, network_keys: ["net:firewall:edge"], network_fun: net_fun([net_fact("protected_by", "x")]),
-            candidate_keys: [], procedure_fun: fn _, _, _ -> [] end)
+      d =
+        Coverage.describe("how do I configure the firewall", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:firewall:edge"],
+          network_fun: net_fun([net_fact("protected_by", "x")]),
+          candidate_keys: [],
+          procedure_fun: fn _, _, _ -> [] end
+        )
+
       assert d.intent == :procedure
       assert d.blockers == [:no_candidate]
     end
@@ -271,47 +306,75 @@ defmodule Swarm.WorldMap.CoverageTest do
 
   describe "describe/3 + validate/1 — who intent (E1 org directory)" do
     defp who_fun(facts), do: fn _key, _scopes, _opts -> facts end
-    defp who_fact(rel, obj, corr \\ 1), do: %{relation: rel, object: obj, object_kind: "person", corroboration: corr}
+
+    defp who_fact(rel, obj, corr \\ 1),
+      do: %{relation: rel, object: obj, object_kind: "person", corroboration: corr}
 
     test "OFF by default: a who query without who_serve escalates (unknown intent)" do
-      d = Coverage.describe("who manages the platform team", ["group"],
-            who_keys: ["who:team:platform"], who_fun: who_fun([who_fact("managed_by", "Jane Doe")]))
+      d =
+        Coverage.describe("who manages the platform team", [@who_scope],
+          who_keys: ["who:team:platform"],
+          who_fun: who_fun([who_fact("managed_by", "Jane Doe")])
+        )
+
       assert d.intent == :unknown
     end
 
     test "serves a directory neighborhood when who_serve is on (names resolved, not uids)" do
       facts = [who_fact("works_in", "Jane Doe"), who_fact("works_in", "Bob Smith")]
 
-      d = Coverage.describe("who is in the platform team", ["group"],
-            who_serve: true, who_keys: ["who:team:platform"], who_fun: who_fun(facts))
+      d =
+        Coverage.describe("who is in the platform team", [@who_scope],
+          who_serve: true,
+          who_keys: ["who:team:platform"],
+          who_fun: who_fun(facts)
+        )
 
       assert d.intent == :neighborhood
       assert d.domain == :who
       assert d.neighborhood_subject == "platform"
 
-      assert {:ok, %Validated{intent: :neighborhood, domain: :who, atoms: ^facts, name: "platform"}} =
+      assert {:ok,
+              %Validated{intent: :neighborhood, domain: :who, atoms: ^facts, name: "platform"}} =
                Coverage.validate(d)
     end
 
     test "no candidate → :no_candidate → escalate" do
-      d = Coverage.describe("who manages the platform team", ["group"],
-            who_serve: true, who_keys: [], who_fun: who_fun([]))
+      d =
+        Coverage.describe("who manages the platform team", [@who_scope],
+          who_serve: true,
+          who_keys: [],
+          who_fun: who_fun([])
+        )
+
       assert d.blockers == [:no_candidate]
       assert {:error, [:no_candidate]} = Coverage.validate(d)
     end
 
     test "candidate but empty neighborhood → :no_corroboration → escalate (fail-closed)" do
-      d = Coverage.describe("who manages the platform team", ["group"],
-            who_serve: true, who_keys: ["who:person:jdoe"], who_fun: who_fun([]))
+      d =
+        Coverage.describe("who manages the platform team", [@who_scope],
+          who_serve: true,
+          who_keys: ["who:person:jdoe"],
+          who_fun: who_fun([])
+        )
+
       assert d.blockers == [:no_corroboration]
       assert {:error, [:no_corroboration]} = Coverage.validate(d)
     end
 
     test "a who-cue wins over a network-cue (who manages the firewall → person answer, not topology)" do
       # both who and network serve are on; "who manages the firewall" is a who ask → :who, not :network
-      d = Coverage.describe("who manages the firewall", ["group"],
-            who_serve: true, who_keys: ["who:person:admin"], who_fun: who_fun([who_fact("managed_by", "Ann Ops")]),
-            network_serve: true, network_keys: ["net:firewall:edge"], network_fun: net_fun([net_fact("protected_by", "x")]))
+      d =
+        Coverage.describe("who manages the firewall", [@who_scope],
+          who_serve: true,
+          who_keys: ["who:person:admin"],
+          who_fun: who_fun([who_fact("managed_by", "Ann Ops")]),
+          network_serve: true,
+          network_keys: ["net:firewall:edge"],
+          network_fun: net_fun([net_fact("protected_by", "x")])
+        )
+
       assert d.intent == :neighborhood
       assert d.domain == :who
     end

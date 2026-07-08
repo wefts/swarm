@@ -10,15 +10,16 @@ defmodule Swarm.Enrichment.WhoMap do
 
   ## Shape (mirrors NetworkMap's namespaced-entity design)
   - People/teams/roles/sites are plain `entity` nodes (never the `user` type — ADR-16 pins `user`
-    private; org-directory people are group-scoped REFERENCE data), keyed `who:<kind>:<canonical>`
+    private; org-directory people are per-source REFERENCE data), keyed `who:<kind>:<canonical>`
     (person by **uid**, the stable unique key — NOT name, so two "Jean Martin"s never collide;
     team/role/site by canonicalized ou/title/location). Each gets an `is_a` edge to a
     `concept:who:kind:<kind>` marker (queryable type, provenance-bearing).
   - **Governed relations** (closed by discipline): `managed_by` (person→person), `works_in`
     (person→team), `has_title` (person→role), `located_at` (person→site) — with relation↔kind
     signatures (a mis-typed edge is dropped, same conservative ethos as NetworkMap).
-  - **Scope = group** for every who node/edge (org-internal reference; mirrors the directory's own
-    in-network readability). Never public — a who fact never widens past `group` (no-leak).
+  - **Scope = src:ldap** for every who data node/edge (org-directory reference; mirrors the
+    directory's connector source). Never public — a who fact is visible only to readers granted the
+    LDAP content source (no-leak).
   - **Profile as CONTENT** (`write_profile/3`): the allowlisted human attrs (cn/title/ou/l/mail/room)
     are stored as the person node's `content` body — SEARCHABLE, so "who is <Name>" resolves a name
     to the uid-keyed node (ER is OFF for persons — identity is uid, never name similarity). No PII
@@ -43,6 +44,7 @@ defmodule Swarm.Enrichment.WhoMap do
   @entity_type "entity"
   @marker_type "concept"
   @origin "ldap:directory"
+  @who_scope Contract.origin_to_src(@origin)
   @lineage "ldap:directory"
   @reliability 0.9
   @evidence_kind "observation"
@@ -93,12 +95,26 @@ defmodule Swarm.Enrichment.WhoMap do
   # family key (admin↛sysadmin, manager↛management). A matched term ADDS the family tail so the
   # exact-tier match fires. Keep curated + small; families themselves are the connector's taxonomy.
   @family_synonyms %{
-    "admin" => "sysadmin", "administrator" => "sysadmin", "sysadmins" => "sysadmin",
-    "manager" => "management", "boss" => "management", "director" => "management",
-    "dev" => "developer", "programmer" => "developer", "coder" => "developer",
-    "tester" => "qa", "recruiter" => "hr", "rh" => "hr", "designer" => "design",
-    "salesperson" => "sales", "seller" => "sales", "commercial" => "sales",
-    "pm" => "project_mgmt", "trainee" => "intern", "lawyer" => "legal", "accountant" => "finance"
+    "admin" => "sysadmin",
+    "administrator" => "sysadmin",
+    "sysadmins" => "sysadmin",
+    "manager" => "management",
+    "boss" => "management",
+    "director" => "management",
+    "dev" => "developer",
+    "programmer" => "developer",
+    "coder" => "developer",
+    "tester" => "qa",
+    "recruiter" => "hr",
+    "rh" => "hr",
+    "designer" => "design",
+    "salesperson" => "sales",
+    "seller" => "sales",
+    "commercial" => "sales",
+    "pm" => "project_mgmt",
+    "trainee" => "intern",
+    "lawyer" => "legal",
+    "accountant" => "finance"
   }
 
   @typedoc "One org-structure fact: typed subject → relation → typed object (keys, pre-namespacing)."
@@ -143,18 +159,30 @@ defmodule Swarm.Enrichment.WhoMap do
     reliability = Keyword.get(opts, :reliability, @reliability)
     evidence_kind = Keyword.get(opts, :evidence_kind, @evidence_kind)
     edge_opts = {reliability, evidence_kind, lineage}
-    scope = who_scope(node.scope)
+    scope = who_scope()
 
     facts
     |> Enum.filter(&admissible?/1)
     |> Enum.flat_map(fn fact ->
-      subj = ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance, edge_opts)
-      obj = ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance, edge_opts)
+      subj =
+        ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance, edge_opts)
+
+      obj =
+        ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance, edge_opts)
 
       case {subj, obj} do
         {{:ok, subj_id, subj_edges}, {:ok, obj_id, obj_edges}} ->
           rel_edges =
-            emit_relation(subj_id, obj_id, fact.relation, scope, node, origin, provenance, edge_opts)
+            emit_relation(
+              subj_id,
+              obj_id,
+              fact.relation,
+              scope,
+              node,
+              origin,
+              provenance,
+              edge_opts
+            )
 
           subj_edges ++ obj_edges ++ rel_edges
 
@@ -174,8 +202,8 @@ defmodule Swarm.Enrichment.WhoMap do
   @spec write_profile(map(), String.t(), keyword()) :: integer() | :error
   def write_profile(profile, provenance, opts \\ [])
 
-  def write_profile(%{"uid" => uid} = profile, _provenance, opts) when is_binary(uid) do
-    scope = who_scope(Keyword.get(opts, :scope, "group"))
+  def write_profile(%{"uid" => uid} = profile, _provenance, _opts) when is_binary(uid) do
+    scope = who_scope()
     key = entity_key("person", uid)
 
     if String.trim(uid) == "" do
@@ -192,7 +220,7 @@ defmodule Swarm.Enrichment.WhoMap do
   @doc "Upsert a curated group node (who:group:<slug>) with name+aliases as searchable content."
   @spec write_group(String.t(), String.t(), [String.t()]) :: integer()
   def write_group(slug, name, aliases) when is_binary(slug) do
-    node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: "group")
+    node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: who_scope())
     body = Enum.join([name | List.wrap(aliases)], " · ")
     put_content(node_id, "group: " <> body)
     node_id
@@ -201,7 +229,7 @@ defmodule Swarm.Enrichment.WhoMap do
   @doc "Upsert a service node (who:service:<slug>) with name+aliases as searchable content."
   @spec write_service(String.t(), String.t(), [String.t()]) :: integer()
   def write_service(slug, name, aliases) when is_binary(slug) do
-    node_id = Store.upsert_node(@entity_type, entity_key("service", slug), scope: "group")
+    node_id = Store.upsert_node(@entity_type, entity_key("service", slug), scope: who_scope())
     put_content(node_id, "service: " <> Enum.join([name | List.wrap(aliases)], " · "))
     node_id
   end
@@ -227,7 +255,9 @@ defmodule Swarm.Enrichment.WhoMap do
   def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
-    qnorm = query |> String.downcase() |> String.replace(~r/[^\p{L}\p{N}]+/u, " ") |> String.trim()
+
+    qnorm =
+      query |> String.downcase() |> String.replace(~r/[^\p{L}\p{N}]+/u, " ") |> String.trim()
 
     if terms == [] do
       []
@@ -377,7 +407,10 @@ defmodule Swarm.Enrichment.WhoMap do
   @spec display_subject(String.t()) :: String.t()
   def display_subject(key) do
     if who_kind(key) == "person" do
-      case Repo.query!("SELECT substring(body from 'name: ([^\n]*)') FROM content WHERE node_id = (SELECT id FROM node WHERE key = $1)", [key]) do
+      case Repo.query!(
+             "SELECT substring(body from 'name: ([^\n]*)') FROM content WHERE node_id = (SELECT id FROM node WHERE key = $1)",
+             [key]
+           ) do
         %{rows: [[cn]]} when is_binary(cn) and cn != "" -> cn
         _ -> who_tail(key)
       end
@@ -441,15 +474,24 @@ defmodule Swarm.Enrichment.WhoMap do
           String.t(),
           {float(), String.t(), String.t() | nil}
         ) :: {:ok, integer(), [integer()]} | :error
-  defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind, lineage}) do
+  defp ensure_entity(
+         name,
+         kind,
+         scope,
+         node,
+         origin,
+         provenance,
+         {reliability, evidence_kind, lineage}
+       ) do
     ent = Store.upsert_node(@entity_type, entity_key(kind, name), scope: scope)
+
     # Non-person nodes (team/role/site) get a searchable LABEL as content so retrieval can resolve a
     # named team/role/site to its node ("who's in the platform team"). Persons get richer content via
     # write_profile/3 (their cn/title/…). Idempotent (1:1 content per node).
     if kind != "person", do: put_content(ent, "#{kind}: #{name}")
-    # Kind markers are generic, non-sensitive type labels — pinned at `group` so the is_a edge's
-    # visibility invariant (edge scope ≤ min endpoints) holds for the group-scoped entity.
-    marker = Store.upsert_node(@marker_type, "who:kind:" <> kind, scope: "group")
+    # Kind markers are generic type labels shared across source scopes. Pin them public so a
+    # src-scoped is_a edge satisfies edge <= glb(entity, marker).
+    marker = Store.upsert_node(@marker_type, "who:kind:" <> kind, scope: "public")
 
     case Store.add_edge(ent, marker, "is_a", provenance,
            scope: scope,
@@ -474,7 +516,16 @@ defmodule Swarm.Enrichment.WhoMap do
           String.t(),
           {float(), String.t(), String.t() | nil}
         ) :: [integer()]
-  defp emit_relation(src, dst, relation, scope, node, origin, provenance, {reliability, evidence_kind, lineage}) do
+  defp emit_relation(
+         src,
+         dst,
+         relation,
+         scope,
+         node,
+         origin,
+         provenance,
+         {reliability, evidence_kind, lineage}
+       ) do
     case Store.add_edge(src, dst, relation, provenance,
            scope: scope,
            origin: origin,
@@ -488,14 +539,9 @@ defmodule Swarm.Enrichment.WhoMap do
     end
   end
 
-  # who scope clamp: never wider than `group` (org-directory reference is group-internal; a who fact
-  # never mints a public node — no-leak). A narrower source scope is preserved.
-  @spec who_scope(String.t()) :: String.t()
-  defp who_scope(source_scope) do
-    if Contract.scope_rank(source_scope) > Contract.scope_rank("group"),
-      do: "group",
-      else: source_scope
-  end
+  # Who facts are LDAP content facts, not derivatives from the caller's anchor scope.
+  @spec who_scope() :: String.t()
+  defp who_scope, do: @who_scope
 
   @spec valid_signature?(String.t(), String.t(), String.t()) :: boolean()
   defp valid_signature?(rel, sk, ok) do
