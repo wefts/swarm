@@ -32,7 +32,15 @@ are settled by the execution council first; this spec is the shape to implement 
 - **Derivation.** A node's `src` scope is a pure function of its ingest origin —
   `origin_to_src(origin)` (e.g. `wiki:page:… → src:wiki`, `iac:<repo> → src:iac`,
   `ldap:directory → src:ldap`, `confluence:… → src:confluence`). One table/function, single
-  source of truth, used by connectors at write time and by the migration.
+  source of truth, used by connectors at write time and by the migration. **Two rules the ps-2
+  staging measurement forced (86% of apparent cross-src collapses under them):**
+  (a) **`mediawiki:` AND `wiki:` → the SAME `src:wiki`** (mediawiki is the internal wiki engine);
+  (b) **`enrich:origin:node:N` → the src of the ANCHOR node N (inherit)**, NOT a phantom
+  `src:enrich` — `enrich`/`synonymy` are DERIVED-fact origins (network_map/procedures/worker/ER),
+  not content sources; their string encodes the node they enriched/aliased. Going forward each
+  enricher stamps its own `src` (F1); the migration of existing `enrich:`/`synonymy` rows inherits
+  the anchor node's src. Treating `enrich` as its own src would clamp 572 real edges to `private`
+  (measured); anchor-inherit drops that to ≈8-77, all in source-pairs no current cohort co-holds.
 
 ## 2. Viewer scopes
 
