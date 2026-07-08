@@ -19,11 +19,16 @@ are settled by the execution council first; this spec is the shape to implement 
   their semantics (ungrantable / universal baseline). `group` is retired — every `group` node
   is migrated to a `src:<name>` (§4). The open `src:*` namespace is validated by shape
   (`^src:[a-z0-9_-]+$`), not a fixed list.
-- **Ordering (F1).** Replace the total-order `@scope_rank` clamp with: `private` = floor 0,
-  `public` = ceiling, each `src:*` an incomparable mid-band tag. A node carries exactly ONE
-  scope (its origin's `src`, or `public`/`private`). The ingest "clamp" becomes: a node's scope
-  = its origin's `src` unless explicitly `public`/`private`. Visibility at read = set-membership
-  (`node.scope = ANY(viewer_scopes)`), NOT rank comparison.
+- **Ordering (F1 — RESOLVED, council 2026-07-08).** A lattice: `private`=⊥, `public`=⊤, each
+  `src:*` an incomparable mid-band tag. A node carries exactly ONE scope = its origin's `src`
+  (via `origin_to_src`) unless explicitly `public`/`private`. Visibility at read = set-membership
+  (`scope = ANY(viewer_scopes)`) — already true at all ~11 read sites, unchanged. Replace the
+  total-order rank at the WRITE sites (both duplicate `@scope_rank` maps, `Ingest.narrowest/2`,
+  `Contract.check_visibility`) with ONE lattice **greatest-lower-bound** helper for an edge's
+  endpoints: `GLB(public,public)=public`, `GLB(src:X,public)=src:X`, `GLB(src:X,src:X)=src:X`,
+  `GLB(src:A,src:B | A≠B)=private`, `GLB(private,_)=private`. Degrades to today's behavior on the
+  `{private,public}` subset. The two enrichment clamps (`network_map`/`who_map`, today → `"group"`)
+  become → their own `src` (`src:network`/`src:ldap`), never `public`. `group` is fully retired.
 - **Derivation.** A node's `src` scope is a pure function of its ingest origin —
   `origin_to_src(origin)` (e.g. `wiki:page:… → src:wiki`, `iac:<repo> → src:iac`,
   `ldap:directory → src:ldap`, `confluence:… → src:confluence`). One table/function, single
@@ -35,8 +40,10 @@ are settled by the execution council first; this spec is the shape to implement 
   user_group …)` where `group_scope_map.scopes` now holds `src:*` values. Default-deny
   preserved: no group ⇒ `["public"]`. `private` never enters a wire scope list
   (`Core.Auth` clamp unchanged).
-- The **authenticated⇒public baseline** (F4) is explicit and tested — a signed actor with no
-  group still derives `["public"]`, never `[]`.
+- The **authenticated⇒public baseline** (F4 — RESOLVED) is structurally guaranteed by an explicit
+  head-prepend `scopes = ["public" | group_scopes] |> Enum.uniq()` — a signed actor with no group
+  derives exactly `["public"]`, never `[]`. Guarded by a positive-control MATRIX (§8), exact
+  set-equality, not "0 hits".
 
 ## 3. Predicate rewrite (the invariant)
 
@@ -45,9 +52,17 @@ Every scope predicate site (`retrieval`, `traverse`, `neighborhood`, `aggregatio
 already filters `scope = ANY($scopes)` — the change is data (the value space), not shape, so the
 predicates keep working IF F1's set-membership semantics hold. Audit each site for any residual
 **rank assumption** (`min`/`<`/`>` on scope) and replace with membership. `edge` + BOTH
-endpoints on every hop stays mandatory. Multi-origin nodes (F3): a node's stored scope follows
-the council's F3 rule (union-of-sources vs most-restrictive) applied in the corroboration/merge
-path so corroboration can never silently widen visibility.
+endpoints on every hop stays mandatory. **Multi-origin nodes (F3 — RESOLVED): first-writer-wins;
+corroboration NEVER touches scope.** `upsert_node ON CONFLICT` already doesn't rewrite scope —
+pin it as an intentional, TESTED security invariant (a second origin cannot widen a node's scope);
+lineage/corroboration stays orthogonal to visibility. Cross-scope merge stays REFUSED. A
+cross-`src` EDGE gets `GLB=private` (accepted "invisible cross-source edge" cost — the graph
+fractures at src boundaries for shared traversal; fine for the current wiki+ldap NODE-visibility
+cohort, upgrade to a `text[]` scope only when cross-src EDGE traversal — E4 uid-join links — is
+real). **Before migrating, MEASURE the existing cross-`src` edge count** (synonymy/ER edges already
+spanning sources) — a nonzero count is a regression to weigh. Also audit the `activity` predicate
+(`node.scope = ANY OR edge.scope = ANY`): an edge-scope-alone path must not surface a
+cross-endpoint relationship.
 
 ## 4. Migration (reversible)
 
