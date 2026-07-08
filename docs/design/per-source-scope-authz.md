@@ -37,10 +37,13 @@ are settled by the execution council first; this spec is the shape to implement 
   (a) **`mediawiki:` AND `wiki:` → the SAME `src:wiki`** (mediawiki is the internal wiki engine);
   (b) **`enrich:origin:node:N` → the src of the ANCHOR node N (inherit)**, NOT a phantom
   `src:enrich` — `enrich`/`synonymy` are DERIVED-fact origins (network_map/procedures/worker/ER),
-  not content sources; their string encodes the node they enriched/aliased. Going forward each
-  enricher stamps its own `src` (F1); the migration of existing `enrich:`/`synonymy` rows inherits
-  the anchor node's src. Treating `enrich` as its own src would clamp 572 real edges to `private`
-  (measured); anchor-inherit drops that to ≈8-77, all in source-pairs no current cohort co-holds.
+  not content sources; their string encodes the node they enriched/aliased. **Operator 2026-07-08:
+  ALWAYS inherit the anchor node's src** — both the migration of existing rows AND forward writes;
+  no dedicated `src:network`, no per-enricher rules (a derived fact is only as protected as its
+  source). Forward, the enrichers change from "clamp to `group`" to "scope = the anchor node's
+  scope". Treating `enrich` as its own src would clamp 572 real edges to `private` (measured);
+  anchor-inherit drops that to ≈8-77. Accepted consequence (ps-5): wiki-derived network/topology
+  facts ride `src:wiki` and ARE visible to the wiki cohort.
 
 ## 2. Viewer scopes
 
