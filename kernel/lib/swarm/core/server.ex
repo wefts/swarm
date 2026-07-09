@@ -28,8 +28,11 @@ defmodule Swarm.Core.Server do
     ListGroupsResponse,
     ListRolesRequest,
     ListRolesResponse,
+    ListSsoMapRequest,
+    ListSsoMapResponse,
     LogConversationResponse,
     ManageGroupRequest,
+    ManageSsoMapRequest,
     MessageView,
     NamespaceStamp,
     NeighborhoodResponse,
@@ -39,6 +42,7 @@ defmodule Swarm.Core.Server do
     RoleView,
     SearchHit,
     SearchResponse,
+    SsoMapView,
     StatusResponse,
     TypeCount
   }
@@ -558,6 +562,59 @@ defmodule Swarm.Core.Server do
 
   defp manage_group_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
 
+  @spec list_sso_map(ListSsoMapRequest.t(), GRPC.Server.Stream.t()) :: ListSsoMapResponse.t()
+  def list_sso_map(req, _stream) do
+    with_actor(req.assertion, %ListSsoMapResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_sso_map(a.uuid) do
+        {:ok, mappings} ->
+          %ListSsoMapResponse{status: :CALL_OK, mappings: Enum.map(mappings, &to_sso_map_view/1)}
+
+        :not_authorized ->
+          %ListSsoMapResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec to_sso_map_view(map()) :: SsoMapView.t()
+  defp to_sso_map_view(m) do
+    %SsoMapView{
+      provider: m.provider,
+      incoming_group: m.incoming_group,
+      our_group_id: m.our_group_id
+    }
+  end
+
+  @spec manage_sso_map(ManageSsoMapRequest.t(), GRPC.Server.Stream.t()) :: AdminActionResponse.t()
+  def manage_sso_map(req, _stream) do
+    with_actor(req.assertion, %AdminActionResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      manage_sso_map_op(a.uuid, req)
+    end)
+  end
+
+  @spec manage_sso_map_op(String.t(), ManageSsoMapRequest.t()) :: AdminActionResponse.t()
+  defp manage_sso_map_op(actor_id, %{op: :SSO_MAP_PUT} = req) do
+    case {nz(req.provider), nz(req.incoming_group), nz(req.our_group_id)} do
+      {provider, incoming, our_group}
+      when is_binary(provider) and is_binary(incoming) and is_binary(our_group) ->
+        action_response(Admin.put_sso_map(actor_id, provider, incoming, our_group))
+
+      _ ->
+        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+    end
+  end
+
+  defp manage_sso_map_op(actor_id, %{op: :SSO_MAP_DELETE} = req) do
+    case {nz(req.provider), nz(req.incoming_group)} do
+      {provider, incoming} when is_binary(provider) and is_binary(incoming) ->
+        action_response(Admin.delete_sso_map(actor_id, provider, incoming))
+
+      _ ->
+        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+    end
+  end
+
+  defp manage_sso_map_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+
   @spec manage_user(Swarm.Core.V1.ManageUserRequest.t(), GRPC.Server.Stream.t()) ::
           AdminActionResponse.t()
   def manage_user(req, _stream) do
@@ -665,7 +722,7 @@ defmodule Swarm.Core.Server do
           | :not_authorized
           | :not_found
           | :not_confirmed
-          | {:error, :ungrantable_scope | :invalid_role | :bad_group_id}
+          | {:error, :ungrantable_scope | :invalid_role | :bad_group_id | :unknown_group}
         ) ::
           AdminActionResponse.t()
   defp action_response(:ok), do: %AdminActionResponse{status: :CALL_OK}
@@ -682,6 +739,10 @@ defmodule Swarm.Core.Server do
     do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   defp action_response({:error, :bad_group_id}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  # PUT of a mapping onto a non-existent group is a caller error (BE-1 SSO map).
+  defp action_response({:error, :unknown_group}),
     do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   @spec conv_view(map()) :: ConversationView.t()

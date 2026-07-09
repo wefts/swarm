@@ -245,6 +245,44 @@ defmodule Swarm.Admin do
     end
   end
 
+  # ── manage_access — SSO group mapping ──────────────────────────────────
+
+  @doc """
+  List incoming-SSO-group → our-group mappings (`manage_access`). This is
+  access-routing config, so it takes the same cap as the mapping mutations
+  (not the broad roster gate); a denied read is audited.
+  """
+  @spec list_sso_map(String.t()) :: {:ok, [map()]} | :not_authorized
+  def list_sso_map(actor_id) do
+    if "manage_access" in Identity.caps_for(actor_id) do
+      {:ok, Identity.list_sso_group_map()}
+    else
+      audit(actor_id, "list_sso_map", "denied")
+      :not_authorized
+    end
+  end
+
+  @doc """
+  Upsert an SSO group mapping (`manage_access`). The target group must already
+  exist — an unknown group is `{:error, :unknown_group}` (a caller error), never
+  a silently created mapping.
+  """
+  @spec put_sso_map(String.t(), String.t(), String.t(), String.t()) ::
+          result() | {:error, :unknown_group}
+  def put_sso_map(actor_id, provider, incoming, our_group_id) do
+    gate_cap(actor_id, "manage_access", "put_sso_map", nil, fn ->
+      Identity.put_sso_group_map(provider, incoming, our_group_id)
+    end)
+  end
+
+  @doc "Delete an SSO group mapping (`manage_access`)."
+  @spec delete_sso_map(String.t(), String.t(), String.t()) :: result()
+  def delete_sso_map(actor_id, provider, incoming) do
+    gate_cap(actor_id, "manage_access", "delete_sso_map", nil, fn ->
+      Identity.delete_sso_group_map(provider, incoming)
+    end)
+  end
+
   # ── gates ────────────────────────────────────────────────────────────────
 
   @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::

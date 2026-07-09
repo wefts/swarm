@@ -72,6 +72,11 @@ service Core {
   // Read-only role list with derived capabilities + holder counts. Any admin cap.
   rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
   rpc ManageGroup(ManageGroupRequest) returns (AdminActionResponse);
+  // Incoming-SSO-group → our-group mapping (ADR-18 ps-4; Auth Provider UI). Read
+  // + CRUD, `manage_access`-gated + audited. Default-deny stays — an unmapped
+  // incoming group grants nothing; the mapping only routes to an existing group.
+  rpc ListSsoMap(ListSsoMapRequest) returns (ListSsoMapResponse);
+  rpc ManageSsoMap(ManageSsoMapRequest) returns (AdminActionResponse);
 }
 
 // Outcome of an identity/privacy call. UNAUTHENTICATED (no/invalid assertion) is
@@ -299,6 +304,33 @@ message ManageGroupRequest {
 message AdminActionResponse {
   CallStatus status = 1;         // OK | NOT_AUTHORIZED | UNAUTHENTICATED
   string user_id = 2;            // set on INVITE (the created user's uuid)
+}
+
+message ListSsoMapRequest { string assertion = 1; }
+
+message SsoMapView {
+  string provider = 1;        // the SSO provider (e.g. "keycloak")
+  string incoming_group = 2;  // the group/role name as it arrives in the SSO claim
+  string our_group_id = 3;    // the kernel access-group it maps to
+}
+
+message ListSsoMapResponse {
+  CallStatus status = 1;              // OK | NOT_AUTHORIZED | UNAUTHENTICATED
+  repeated SsoMapView mappings = 2;   // ordered by provider, incoming_group
+}
+
+enum SsoMapOp {
+  SSO_MAP_OP_UNSPECIFIED = 0;
+  SSO_MAP_PUT = 1;     // manage_access; upsert (provider,incoming_group)→our_group_id
+  SSO_MAP_DELETE = 2;  // manage_access; remove (provider,incoming_group)
+}
+
+message ManageSsoMapRequest {
+  string assertion = 1;
+  SsoMapOp op = 2;
+  string provider = 3;
+  string incoming_group = 4;
+  string our_group_id = 5;   // PUT only; must be an existing group (else BAD_REQUEST)
 }
 
 message AskRequest {

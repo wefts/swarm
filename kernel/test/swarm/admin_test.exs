@@ -13,7 +13,9 @@ defmodule Swarm.AdminTest do
 
   alias Swarm.Core.V1.{
     ListGroupsRequest,
-    ManageGroupRequest
+    ListSsoMapRequest,
+    ManageGroupRequest,
+    ManageSsoMapRequest
   }
 
   defp user(login, overrides \\ %{}) do
@@ -50,6 +52,19 @@ defmodule Swarm.AdminTest do
     u = user(login)
     :ok = Admin.grant_role(superadmin(), u.id, "admin")
     u
+  end
+
+  defp put_map(token, provider, incoming, group) do
+    Server.manage_sso_map(
+      %ManageSsoMapRequest{
+        assertion: token,
+        op: :SSO_MAP_PUT,
+        provider: provider,
+        incoming_group: incoming,
+        our_group_id: group
+      },
+      nil
+    )
   end
 
   describe "role grants (superadmin-only — privilege management)" do
@@ -441,6 +456,89 @@ defmodule Swarm.AdminTest do
       listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
       group = Enum.find(listed.groups, &(&1.id == "role-backed"))
       assert group.granted_roles == ["admin"]
+    end
+  end
+
+  describe "SSO group mapping — list_sso_map / manage_sso_map (ADR-18 ps-4)" do
+    test "put/upsert/delete/list round-trip through the RPC, ordered provider then incoming" do
+      root = superadmin()
+      _admin = admin_user("sso-map-admin")
+      token = assertion("sso-map-admin")
+      assert :ok = Admin.create_group(root, "staff", "Staff", nil)
+      assert :ok = Admin.create_group(root, "ops", "Ops", nil)
+
+      for {provider, incoming, group} <- [
+            {"keycloak", "DSI", "ops"},
+            {"keycloak", "All-Staff", "staff"},
+            {"okta", "Everyone", "staff"}
+          ] do
+        assert put_map(token, provider, incoming, group).status == :CALL_OK
+      end
+
+      listed = Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil)
+      assert listed.status == :CALL_OK
+
+      assert Enum.map(listed.mappings, &{&1.provider, &1.incoming_group, &1.our_group_id}) ==
+               [
+                 {"keycloak", "All-Staff", "staff"},
+                 {"keycloak", "DSI", "ops"},
+                 {"okta", "Everyone", "staff"}
+               ]
+
+      # re-PUT re-points an existing (provider, incoming) pair — upsert, not a dup
+      assert put_map(token, "keycloak", "DSI", "staff").status == :CALL_OK
+      after_upsert = Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings
+      assert length(after_upsert) == 3
+      assert Enum.find(after_upsert, &(&1.incoming_group == "DSI")).our_group_id == "staff"
+
+      assert Server.manage_sso_map(
+               %ManageSsoMapRequest{
+                 assertion: token,
+                 op: :SSO_MAP_DELETE,
+                 provider: "keycloak",
+                 incoming_group: "DSI"
+               },
+               nil
+             ).status == :CALL_OK
+
+      remaining =
+        Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings
+        |> Enum.map(& &1.incoming_group)
+
+      refute "DSI" in remaining
+      assert length(remaining) == 2
+    end
+
+    test "PUT onto a non-existent group is BAD_REQUEST and maps nothing" do
+      _admin = admin_user("sso-map-unknown")
+      token = assertion("sso-map-unknown")
+
+      assert put_map(token, "keycloak", "Ghost", "no-such-group").status == :CALL_BAD_REQUEST
+      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings == []
+    end
+
+    test "an empty required field is BAD_REQUEST (no half-written mapping)" do
+      root = superadmin()
+      _admin = admin_user("sso-map-empty")
+      token = assertion("sso-map-empty")
+      assert :ok = Admin.create_group(root, "staff", "Staff", nil)
+
+      assert put_map(token, "keycloak", "", "staff").status == :CALL_BAD_REQUEST
+      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings == []
+    end
+
+    test "a non-admin is NOT_AUTHORIZED for list and manage, and denials are audited" do
+      plain = user("sso-map-denied")
+      token = assertion("sso-map-denied")
+
+      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).status ==
+               :CALL_NOT_AUTHORIZED
+
+      assert put_map(token, "keycloak", "X", "staff").status == :CALL_NOT_AUTHORIZED
+
+      rows = Audit.for_actor(plain.id)
+      assert Enum.any?(rows, &(&1.action == "list_sso_map" and &1.decision == "denied"))
+      assert Enum.any?(rows, &(&1.action == "put_sso_map" and &1.decision == "denied"))
     end
   end
 
