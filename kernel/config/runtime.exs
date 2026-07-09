@@ -126,12 +126,24 @@ if System.get_env("SWARM_TIER_GATE_NETWORK_SERVE") == "true" do
   config :swarm, :tier_gate, network_serve: true
 end
 
+# The :who serve path (org-directory who-is-who, E1) — OFF unless explicitly enabled, its OWN
+# go/no-go. Calibrated on `Swarm.WorldMap.Gate.WhoCalibration` (fsr 0.0 / recall 1.0, gemma4:31b).
+# Serves an AUTHORITATIVE single-source directory at min_corroboration 1 — safe because the
+# substrate is kept current by full-state RECONCILIATION (each refresh purges + rebuilds), so a
+# departed/moved person can't be served stale.
+if System.get_env("SWARM_TIER_GATE_WHO_SERVE") == "true" do
+  config :swarm, :tier_gate, who_serve: true
+end
+
 # Corroboration floor for the network serve path (default 2 = only multi-source-confirmed;
 # 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
 # the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
 case System.get_env("SWARM_TIER_GATE_NETWORK_MIN_CORROB") do
-  n when is_binary(n) and n != "" -> config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
-  _ -> :ok
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
+
+  _ ->
+    :ok
 end
 
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
@@ -151,9 +163,10 @@ if secret = System.get_env("SWARM_ACTOR_SECRET") do
   config :swarm, :actor, secret: secret
 end
 
-# Core API auth mode (ADR-16 D9). `SWARM_AUTH_MODE=strict` flips the legacy RPCs to
-# reject unsigned identity — the post-6b hard cutover, done WITH the channel change.
-# Unset ⇒ the product default (`:dual`) stands. Merges into :core_api.
+# Core API auth mode (ADR-16 D9). `SWARM_AUTH_MODE` overrides the compiled default.
+# Unset ⇒ the product default (`:strict`, config.exs) stands — verified identity only.
+# Set `dual`/`legacy` ONLY as an explicit migration opt-in (dual makes `viewer` forgeable
+# — see `dual-mode-history-leak`). Merges into :core_api.
 case System.get_env("SWARM_AUTH_MODE") do
   m when m in ["dual", "strict", "legacy"] ->
     config :swarm, :core_api, auth_mode: String.to_existing_atom(m)

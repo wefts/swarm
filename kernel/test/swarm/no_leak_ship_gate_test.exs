@@ -58,6 +58,7 @@ defmodule Swarm.NoLeakShipGateTest do
   # group-scoped read, not the trivial empty-scope case). Council (codex re-review).
   defp group_user(login) do
     Identity.put_group_scopes("staff", ["group"])
+    :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
     {:ok, u} =
       Identity.upsert_from_claims(%{
@@ -297,6 +298,7 @@ defmodule Swarm.NoLeakShipGateTest do
       # even if the scope map is CORRUPTED under the boundary (raw SQL), the derived
       # scopes clamp private out — the belt behind the boundary
       Identity.put_group_scopes("staff", ["group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
       {:ok, eve} =
         Identity.upsert_from_claims(%{
@@ -320,6 +322,11 @@ defmodule Swarm.NoLeakShipGateTest do
     test "a plaintext dual-mode caller cannot REQUEST private via wire scopes" do
       # Under :dual a legacy plaintext viewer is trusted — but the wire scopes are
       # clamped (council codex): asking for private yields a context without it.
+      # `:dual` is now an explicit opt-in (default flipped to :strict, dual-mode-history-leak).
+      prev = Application.get_env(:swarm, :core_api)
+      Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
+      on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
+
       assert {:ok, ctx} = Auth.legacy_context("mallory", ["group", "private"])
       refute "private" in ctx.scopes
 

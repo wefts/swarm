@@ -24,11 +24,15 @@ defmodule Swarm.Core.Auth do
 
   alias Swarm.Actor
 
-  @type context :: %{viewer: String.t(), scopes: [String.t()]}
+  # `verified?` is TRUE only when `viewer` was DERIVED from a resolved (signed) assertion.
+  # Plaintext/legacy/dual-fallback viewers are `false` — the history gate (core.ex) trusts a
+  # foreign conversation's owner ONLY on a verified viewer, so a forgeable plaintext uuid never
+  # unlocks someone else's chat even if `:dual` is (re-)enabled.
+  @type context :: %{viewer: String.t(), scopes: [String.t()], verified?: boolean()}
 
-  @doc "The configured auth mode (`:dual` default | `:strict` | `:legacy`)."
+  @doc "The configured auth mode (`:strict` default | `:dual` migration-opt-in | `:legacy`)."
   @spec mode() :: :dual | :strict | :legacy
-  def mode, do: Application.get_env(:swarm, :core_api, [])[:auth_mode] || :dual
+  def mode, do: Application.get_env(:swarm, :core_api, [])[:auth_mode] || :strict
 
   @doc """
   Effective `{viewer, scopes}` for a legacy RPC. `{:ok, context}` normally;
@@ -37,7 +41,7 @@ defmodule Swarm.Core.Auth do
   @spec legacy_context(String.t(), [String.t()]) :: {:ok, context()} | {:error, :unauthenticated}
   def legacy_context(viewer, wire_scopes) do
     case maybe_resolve(viewer) do
-      {:ok, a} -> {:ok, %{viewer: a.uuid, scopes: a.scopes}}
+      {:ok, a} -> {:ok, %{viewer: a.uuid, scopes: a.scopes, verified?: true}}
       {:error, _} -> unverified(viewer, wire_scopes)
     end
   end
@@ -55,7 +59,7 @@ defmodule Swarm.Core.Auth do
         {:error, :unauthenticated}
 
       :legacy ->
-        {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes)}}
+        {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes), verified?: false}}
 
       :dual ->
         dual_fallback(viewer, wire_scopes)
@@ -70,10 +74,10 @@ defmodule Swarm.Core.Auth do
           "as a plaintext id (dual mode) — falling back to anonymous public"
       )
 
-      {:ok, %{viewer: "", scopes: ["public"]}}
+      {:ok, %{viewer: "", scopes: ["public"], verified?: false}}
     else
       log_plaintext_viewer(viewer)
-      {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes)}}
+      {:ok, %{viewer: viewer, scopes: norm_scopes(wire_scopes), verified?: false}}
     end
   end
 

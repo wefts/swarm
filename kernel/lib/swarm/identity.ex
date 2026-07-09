@@ -87,7 +87,7 @@ defmodule Swarm.Identity do
       Repo.transaction(fn ->
         user_id = find_or_create_user(claims)
         sync_emails(user_id, Map.get(claims, :emails, []))
-        sync_groups(user_id, Map.get(claims, :groups, []))
+        sync_groups(user_id, Map.get(claims, :provider), Map.get(claims, :groups, []))
         user_id
       end)
 
@@ -258,27 +258,43 @@ defmodule Swarm.Identity do
     :ok
   end
 
-  @spec sync_groups(String.t(), [String.t()]) :: :ok
-  defp sync_groups(user_id, groups) do
-    Enum.each(groups, fn g ->
-      Repo.query!(
-        "INSERT INTO access_group (id, source) VALUES ($1, 'idp') ON CONFLICT (id) DO NOTHING",
-        [g]
-      )
+  @spec sync_groups(String.t(), String.t() | nil, [String.t()] | nil) :: :ok
+  defp sync_groups(user_id, provider, incoming) do
+    incoming = incoming || []
 
+    mapped_groups =
       Repo.query!(
         """
-        INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'idp')
+        SELECT DISTINCT our_group_id
+          FROM sso_group_map
+         WHERE provider = $1
+           AND incoming_group = ANY($2::text[])
+         ORDER BY our_group_id
+        """,
+        [provider, incoming]
+      ).rows
+      |> List.flatten()
+
+    Enum.each(mapped_groups, fn group_id ->
+      Repo.query!(
+        """
+        INSERT INTO user_group (user_id, group_id, source)
+        VALUES ($1, $2, 'idp')
         ON CONFLICT (user_id, group_id) DO NOTHING
         """,
-        [cast_to_uuid(user_id), g]
+        [cast_to_uuid(user_id), group_id]
       )
     end)
 
-    # Revoke memberships no longer asserted (default-deny).
+    # Revoke IdP memberships no longer asserted through the kernel-owned map.
     Repo.query!(
-      "DELETE FROM user_group WHERE user_id = $1 AND NOT (group_id = ANY($2))",
-      [cast_to_uuid(user_id), groups]
+      """
+      DELETE FROM user_group
+       WHERE user_id = $1
+         AND source = 'idp'
+         AND NOT (group_id = ANY($2::text[]))
+      """,
+      [cast_to_uuid(user_id), mapped_groups]
     )
 
     :ok
@@ -373,6 +389,155 @@ defmodule Swarm.Identity do
     )
 
     :ok
+  end
+
+  @doc """
+  Create or update a first-class local group. The group id is immutable; existing
+  rows keep their source while `name` and `description` are replaced.
+  """
+  @spec create_group(String.t(), String.t() | nil, String.t() | nil) :: :ok
+  def create_group(id, name, description) do
+    Repo.query!(
+      """
+      INSERT INTO access_group (id, source, name, description)
+      VALUES ($1, 'local', $2, $3)
+      ON CONFLICT (id) DO UPDATE
+        SET name = EXCLUDED.name,
+            description = EXCLUDED.description
+      """,
+      [id, name, description]
+    )
+
+    :ok
+  end
+
+  @doc "Rename a group without changing its immutable id."
+  @spec rename_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
+  def rename_group(id, name) do
+    case Repo.query!("UPDATE access_group SET name = $2 WHERE id = $1", [id, name]) do
+      %{num_rows: 0} -> {:error, :not_found}
+      _ -> :ok
+    end
+  end
+
+  @doc "Replace a group's description."
+  @spec describe_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
+  def describe_group(id, description) do
+    case Repo.query!(
+           "UPDATE access_group SET description = $2 WHERE id = $1",
+           [id, description]
+         ) do
+      %{num_rows: 0} -> {:error, :not_found}
+      _ -> :ok
+    end
+  end
+
+  @doc """
+  Delete a group. Foreign keys cascade membership, scope-map and group-role rows.
+  """
+  @spec delete_group(String.t()) :: :ok
+  def delete_group(id) do
+    Repo.query!("DELETE FROM access_group WHERE id = $1", [id])
+    :ok
+  end
+
+  @grantable_group_roles ~w(admin superadmin)
+
+  @doc """
+  Add a role conferred by group membership. `user` is implicit and is rejected as
+  a stored group role.
+  """
+  @spec set_group_role(String.t(), String.t()) :: :ok | {:error, :invalid_role}
+  def set_group_role(id, role) do
+    if role in @grantable_group_roles do
+      Repo.query!(
+        """
+        INSERT INTO group_role (group_id, role)
+        VALUES ($1, $2)
+        ON CONFLICT (group_id, role) DO NOTHING
+        """,
+        [id, role]
+      )
+
+      :ok
+    else
+      {:error, :invalid_role}
+    end
+  end
+
+  @doc "Remove one group-conferred role."
+  @spec clear_group_role(String.t(), String.t()) :: :ok
+  def clear_group_role(id, role) do
+    Repo.query!("DELETE FROM group_role WHERE group_id = $1 AND role = $2", [id, role])
+    :ok
+  end
+
+  @doc "Count current members of a group."
+  @spec group_member_count(String.t()) :: non_neg_integer()
+  def group_member_count(id) do
+    [[count]] =
+      Repo.query!("SELECT count(*)::int FROM user_group WHERE group_id = $1", [id]).rows
+
+    count
+  end
+
+  @doc "Whether a group exists in the first-class group registry."
+  @spec group_exists?(String.t()) :: boolean()
+  def group_exists?(id) do
+    case Repo.query!("SELECT 1 FROM access_group WHERE id = $1", [id]) do
+      %{rows: [[1]]} -> true
+      %{rows: []} -> false
+    end
+  end
+
+  @doc """
+  Map an incoming SSO group claim to a kernel-owned access group.
+
+  The target group must already exist; unmapped incoming groups grant nothing.
+  """
+  @spec put_sso_group_map(String.t(), String.t(), String.t()) :: :ok | {:error, :unknown_group}
+  def put_sso_group_map(provider, incoming, our_group_id) do
+    if group_exists?(our_group_id) do
+      Repo.query!(
+        """
+        INSERT INTO sso_group_map (provider, incoming_group, our_group_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (provider, incoming_group) DO UPDATE
+          SET our_group_id = EXCLUDED.our_group_id
+        """,
+        [provider, incoming, our_group_id]
+      )
+
+      :ok
+    else
+      {:error, :unknown_group}
+    end
+  end
+
+  @doc "Delete an SSO group mapping if present."
+  @spec delete_sso_group_map(String.t(), String.t()) :: :ok
+  def delete_sso_group_map(provider, incoming) do
+    Repo.query!(
+      "DELETE FROM sso_group_map WHERE provider = $1 AND incoming_group = $2",
+      [provider, incoming]
+    )
+
+    :ok
+  end
+
+  @doc "List SSO group mappings ordered by provider and incoming group."
+  @spec list_sso_group_map() :: [
+          %{provider: String.t(), incoming_group: String.t(), our_group_id: String.t()}
+        ]
+  def list_sso_group_map do
+    Repo.query!("""
+    SELECT provider, incoming_group, our_group_id
+      FROM sso_group_map
+     ORDER BY provider, incoming_group
+    """).rows
+    |> Enum.map(fn [provider, incoming_group, our_group_id] ->
+      %{provider: provider, incoming_group: incoming_group, our_group_id: our_group_id}
+    end)
   end
 
   @doc "Remove a user from a group."
@@ -496,6 +661,204 @@ defmodule Swarm.Identity do
     end
   end
 
+  # ListUsers is bounded BY CONTRACT (council: gemini) — enforced in the SQL, not
+  # in memory; the wire `limit` is clamped into (0, @list_users_cap].
+  @list_users_cap 500
+
+  @doc """
+  The user roster for an admin console (admin-cleanup epic): each row aggregates
+  roles, groups and identity-link providers. Tombstones (status=deleted) are
+  excluded unless `include_deleted: true` (council: normal operator workflows must
+  not act on deleted identities). Supports literal case-insensitive substring
+  search over names/login and offset paging. Deterministic order (login, id),
+  SQL-bounded. Returns `{rows, total}` where `total` is pre-page count.
+  """
+  @spec list_users(keyword()) :: {[map()], non_neg_integer()}
+  def list_users(opts \\ []) do
+    include_deleted = Keyword.get(opts, :include_deleted, false)
+    limit = opts |> Keyword.get(:limit, 0) |> clamp_limit()
+    offset = opts |> Keyword.get(:offset, 0) |> clamp_offset()
+    query = opts |> Keyword.get(:query) |> query_pattern()
+    query_absent? = is_nil(query)
+
+    rows =
+      Repo.query!(
+        """
+        SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
+               coalesce(array_agg(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL), '{}'),
+               coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
+               coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}'),
+               count(*) OVER()
+          FROM app_user u
+          LEFT JOIN role_grant r ON r.user_id = u.id
+          LEFT JOIN user_group g ON g.user_id = u.id
+          LEFT JOIN identity_link l ON l.user_id = u.id
+         WHERE ($1 OR u.status <> 'deleted')
+           AND ($2 OR u.login ILIKE $3 ESCAPE '\\'
+                   OR u.first_name ILIKE $3 ESCAPE '\\'
+                   OR u.last_name ILIKE $3 ESCAPE '\\'
+                   OR u.nickname ILIKE $3 ESCAPE '\\')
+         GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at
+         ORDER BY u.login, u.id
+         LIMIT $4 OFFSET $5
+        """,
+        [include_deleted, query_absent?, query || "%", limit, offset]
+      ).rows
+
+    users =
+      Enum.map(rows, fn [
+                          id,
+                          login,
+                          first,
+                          last,
+                          nick,
+                          status,
+                          last_login,
+                          roles,
+                          groups,
+                          providers,
+                          _total
+                        ] ->
+        %{
+          id: cast_uuid(id),
+          login: login,
+          first_name: first,
+          last_name: last,
+          nickname: nick,
+          status: status,
+          last_login_at: last_login,
+          roles: roles,
+          groups: groups,
+          providers: providers
+        }
+      end)
+
+    total =
+      case rows do
+        [[_, _, _, _, _, _, _, _, _, _, n] | _] -> n
+        [] -> 0
+      end
+
+    {users, total}
+  end
+
+  @doc """
+  Read-only group registry for the admin console. Includes every group known from
+  the registry, membership rows, or scope-map rows; groups without members or
+  scopes are preserved. First-class group metadata comes from `access_group`;
+  group roles come from `group_role`.
+  """
+  @spec list_groups() :: [
+          %{
+            id: String.t(),
+            name: String.t() | nil,
+            description: String.t() | nil,
+            member_count: non_neg_integer(),
+            granted_scopes: [String.t()],
+            granted_roles: [String.t()]
+          }
+        ]
+  def list_groups do
+    Repo.query!(
+      """
+      WITH groups AS (
+        SELECT id AS group_id FROM access_group
+        UNION
+        SELECT group_id FROM user_group
+        UNION
+        SELECT group_id FROM group_scope_map
+      ),
+      member_counts AS (
+        SELECT group_id, count(*)::int AS member_count
+          FROM user_group
+         GROUP BY group_id
+      ),
+      role_grants AS (
+        SELECT group_id, array_agg(DISTINCT role ORDER BY role) AS granted_roles
+          FROM group_role
+         GROUP BY group_id
+      )
+      SELECT g.group_id,
+             ag.name,
+             ag.description,
+             coalesce(mc.member_count, 0),
+             coalesce(m.scopes, '{}'::text[]),
+             coalesce(rg.granted_roles, '{}'::text[])
+        FROM groups g
+        LEFT JOIN access_group ag ON ag.id = g.group_id
+        LEFT JOIN member_counts mc ON mc.group_id = g.group_id
+        LEFT JOIN group_scope_map m ON m.group_id = g.group_id
+        LEFT JOIN role_grants rg ON rg.group_id = g.group_id
+       ORDER BY g.group_id
+      """,
+      []
+    ).rows
+    |> Enum.map(fn [id, name, description, member_count, granted_scopes, granted_roles] ->
+      %{
+        id: id,
+        name: name,
+        description: description,
+        member_count: member_count,
+        granted_scopes: granted_scopes,
+        granted_roles: granted_roles
+      }
+    end)
+  end
+
+  @known_roles ~w(user admin superadmin)
+
+  @doc """
+  Read-only role list for the admin console. Roles are ordered by ascending
+  privilege; capabilities are derived from the same role policy as `caps_for/1`.
+  `user` is implicit and is never stored in `role_grant`, so its holder count is 0.
+  """
+  @spec list_roles() :: [
+          %{name: String.t(), capabilities: [String.t()], holder_count: non_neg_integer()}
+        ]
+  def list_roles do
+    counts =
+      Repo.query!(
+        """
+        SELECT role, count(DISTINCT user_id)::int
+          FROM role_grant
+         WHERE role = ANY($1)
+         GROUP BY role
+        """,
+        [@known_roles]
+      ).rows
+      |> Map.new(fn [role, count] -> {role, count} end)
+
+    Enum.map(@known_roles, fn role ->
+      %{
+        name: role,
+        capabilities: role |> caps_for_role() |> Enum.uniq() |> Enum.sort(),
+        holder_count: Map.get(counts, role, 0)
+      }
+    end)
+  end
+
+  defp clamp_limit(n) when is_integer(n) and n > 0 and n <= @list_users_cap, do: n
+  defp clamp_limit(_), do: @list_users_cap
+
+  defp clamp_offset(n) when is_integer(n) and n > 0, do: n
+  defp clamp_offset(_), do: 0
+
+  defp query_pattern(q) when is_binary(q) do
+    case String.trim(q) do
+      "" -> nil
+      trimmed -> "%" <> escape_like(trimmed) <> "%"
+    end
+  end
+
+  defp query_pattern(_), do: nil
+
+  defp escape_like(q) do
+    q
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
+  end
+
   @doc "Emails on record for a user (each `%{email, verified_at, is_primary}`)."
   @spec emails_for(String.t()) :: [
           %{email: String.t(), verified_at: term(), is_primary: boolean()}
@@ -520,10 +883,57 @@ defmodule Swarm.Identity do
     |> List.flatten()
   end
 
+  @doc "Identity providers linked to a user."
+  @spec providers_for(String.t()) :: [String.t()]
+  def providers_for(id) do
+    Repo.query!(
+      "SELECT DISTINCT provider FROM identity_link WHERE user_id = $1 ORDER BY provider",
+      [cast_to_uuid(id)]
+    ).rows
+    |> List.flatten()
+  end
+
+  @doc """
+  Full admin-visible view for one active/non-deleted user, including emails.
+  Returns `nil` for an unknown or tombstoned user.
+  """
+  @spec get_user_view(String.t()) :: map() | nil
+  def get_user_view(id) do
+    case get_user(id) do
+      nil ->
+        nil
+
+      %{status: "deleted"} ->
+        nil
+
+      user ->
+        %{
+          id: user.id,
+          login: user.login,
+          first_name: user.first_name,
+          last_name: user.last_name,
+          nickname: user.nickname,
+          status: user.status,
+          last_login_at: user.last_login_at,
+          roles: roles_for(user.id),
+          groups: groups_for(user.id),
+          providers: providers_for(user.id),
+          emails: user.id |> emails_for() |> Enum.map(& &1.email)
+        }
+    end
+  end
+
   @doc """
   The scopes a user is granted: the **authenticated baseline `public`** plus the
-  scopes **derived** from their groups via `group_scope_map` (unioned, deduped).
-  Default-deny holds for everything ABOVE public: unmapped groups add nothing.
+  configured authenticated baseline group's scopes plus the scopes **derived**
+  from their groups via `group_scope_map` (unioned, deduped). Default-deny holds
+  for everything ABOVE the baseline: unmapped groups add nothing.
+
+  The baseline group id is read from `SWARM_AUTH_BASELINE_GROUP` and defaults to
+  `"everyone"`. It applies to every authenticated actor, even without group
+  membership, and confers SCOPES only — never a role or capability. If the
+  baseline group has no scope-map row, it contributes `[]` for backward
+  compatibility.
 
   The baseline restores the channel's documented, council-reviewed semantic
   ("ALWAYS includes public; groups add more" — `web_channel/auth.scopes_for`)
@@ -553,14 +963,44 @@ defmodule Swarm.Identity do
       |> List.flatten()
       |> Enum.reject(&(&1 == "private"))
 
-    Enum.uniq(["public" | derived])
+    Enum.uniq(["public"] ++ baseline_scopes() ++ derived)
+    |> Enum.reject(&(&1 == "private"))
   end
 
-  @doc "The roles a user holds (default-deny — `[]` when none granted)."
+  @spec baseline_scopes() :: [String.t()]
+  defp baseline_scopes do
+    group_id = System.get_env("SWARM_AUTH_BASELINE_GROUP", "everyone")
+
+    Repo.query!(
+      """
+      SELECT DISTINCT unnest(scopes) AS scope
+        FROM group_scope_map
+       WHERE group_id = $1
+      """,
+      [group_id]
+    ).rows
+    |> List.flatten()
+    |> Enum.reject(&(&1 == "private"))
+  end
+
+  @doc """
+  The roles a user holds from direct grants and group-role membership
+  (default-deny — `[]` when none granted).
+  """
   @spec roles_for(String.t()) :: [String.t()]
   def roles_for(id) do
     Repo.query!(
-      "SELECT DISTINCT role FROM role_grant WHERE user_id = $1 ORDER BY role",
+      """
+      SELECT DISTINCT role FROM (
+        SELECT role FROM role_grant WHERE user_id = $1
+        UNION
+        SELECT gr.role
+          FROM group_role gr
+          JOIN user_group ug ON ug.group_id = gr.group_id
+         WHERE ug.user_id = $1
+      ) t
+      ORDER BY role
+      """,
       [cast_to_uuid(id)]
     ).rows
     |> List.flatten()
@@ -571,6 +1011,11 @@ defmodule Swarm.Identity do
   @admin_caps ~w(manage_access invite_users manage_users)
   @superadmin_caps @admin_caps ++ ~w(read_any_conversation)
 
+  @spec caps_for_role(String.t()) :: [String.t()]
+  defp caps_for_role("superadmin"), do: @superadmin_caps
+  defp caps_for_role("admin"), do: @admin_caps
+  defp caps_for_role(_), do: []
+
   @doc """
   The capabilities a user holds, **derived** from their roles (default-deny — `[]`
   when no role is granted). superadmin ⊃ admin + `read_any_conversation`.
@@ -579,11 +1024,7 @@ defmodule Swarm.Identity do
   def caps_for(id) do
     id
     |> roles_for()
-    |> Enum.flat_map(fn
-      "superadmin" -> @superadmin_caps
-      "admin" -> @admin_caps
-      _ -> []
-    end)
+    |> Enum.flat_map(&caps_for_role/1)
     |> Enum.uniq()
     |> Enum.sort()
   end
@@ -620,15 +1061,14 @@ defmodule Swarm.Identity do
   Ensure a group exists and set its conferred scopes (the config-seeding
   primitive; the audited admin-mutable path is ADR-16 step 5). Idempotent.
 
-  Validates at this — the deepest — grant boundary: every scope must be in
-  `grantable_scopes/0` (Contract vocabulary, `private` hard-denied); on
-  violation nothing is written. Seeding callers must pattern-match `:ok =` so
-  a rejected seed fails loud rather than leaving the group scopeless (council
-  gemini).
+  Validates at this — the deepest — grant boundary: every scope must be any valid
+  scope except `private`; on violation nothing is written. Seeding callers must
+  pattern-match `:ok =` so a rejected seed fails loud rather than leaving the
+  group scopeless (council gemini).
   """
   @spec put_group_scopes(String.t(), [String.t()]) :: :ok | {:error, :ungrantable_scope}
   def put_group_scopes(group_id, scopes) do
-    if Enum.all?(scopes, &(&1 in grantable_scopes())) do
+    if Enum.all?(scopes, &(Contract.valid_scope?(&1) and &1 != "private")) do
       Repo.query!(
         "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
         [group_id]

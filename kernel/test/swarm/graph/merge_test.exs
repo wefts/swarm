@@ -244,4 +244,35 @@ defmodule Swarm.Graph.MergeTest do
                []
     end
   end
+
+  describe "do-not-merge (S4 identity foundations)" do
+    test "block_merge/merge_blocked? is symmetric + idempotent" do
+      refute Store.merge_blocked?("entity", "dnm-a", "dnm-b")
+      :ok = Store.block_merge("entity", "dnm-a", "dnm-b", "different thing")
+      :ok = Store.block_merge("entity", "dnm-a", "dnm-b")
+      # order-independent
+      assert Store.merge_blocked?("entity", "dnm-a", "dnm-b")
+      assert Store.merge_blocked?("entity", "dnm-b", "dnm-a")
+      refute Store.merge_blocked?("entity", "dnm-a", "dnm-unrelated")
+    end
+
+    test "merge_nodes REFUSES a blocked pair (never collapses distinct entities)" do
+      a = Store.upsert_node("entity", "core-sw", scope: "public")
+      b = Store.upsert_node("entity", "core-proj", scope: "public")
+      :ok = Store.block_merge("entity", "core-sw", "core-proj")
+
+      assert {:ok, %{result: :refused_do_not_merge}} =
+               Store.merge_nodes("entity", "core-sw", "core-proj")
+
+      # both nodes survive
+      assert Repo.query!("SELECT count(*) FROM node WHERE id = ANY($1)", [[a, b]]).rows == [[2]]
+    end
+
+    test "an UNBLOCKED pair still merges normally" do
+      Store.upsert_node("entity", "srv-1", scope: "public")
+      Store.upsert_node("entity", "srv-1-dup", scope: "public")
+      assert {:ok, %{result: r}} = Store.merge_nodes("entity", "srv-1-dup", "srv-1")
+      assert r in [:merged, :renamed]
+    end
+  end
 end

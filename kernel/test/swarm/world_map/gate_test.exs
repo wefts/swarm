@@ -55,6 +55,8 @@ defmodule Swarm.WorldMap.GateTest do
       assert ans.text =~ "1. open portal"
       assert ans.text =~ "2. set password"
       assert ans.citations == ["source-1"]
+      # chat-thread epic 2: for active_keys
+      assert ans.key == "reset password procedure"
       # opaque citation only — no raw origin leaks into the served answer
       refute ans.text =~ "wiki"
       refute Enum.any?(ans.citations, &String.contains?(&1, "wiki"))
@@ -105,36 +107,133 @@ defmodule Swarm.WorldMap.GateTest do
   end
 
   describe "network intent" do
-    defp net_desc(subject, facts) do
+    defp net_desc(subject, facts, key \\ nil) do
       %Descriptor{
         query: "what subnets does #{subject} carry",
-        intent: :network,
-        network_subject: subject,
-        network_facts:
-          Enum.map(facts, fn {r, o} -> %{relation: r, object: o, object_kind: "subnet", corroboration: 2} end),
+        intent: :neighborhood,
+        domain: :network,
+        neighborhood_subject: subject,
+        neighborhood_key: key || subject,
+        neighborhood_facts:
+          Enum.map(facts, fn {r, o} ->
+            %{relation: r, object: o, object_kind: "subnet", corroboration: 2}
+          end),
         blockers: []
       }
     end
 
     test "serves a network neighborhood when the entail veto passes" do
-      d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}, {"carries", "10.129.0.0/16"}])
+      d =
+        net_desc(
+          "tunnel orbit",
+          [{"carries", "10.128.0.0/16"}, {"carries", "10.129.0.0/16"}],
+          "net:tunnel:orbit"
+        )
 
-      assert {:serve, %Answer{intent: :network, text: text, citations: cits}, %Audit{decision: :serve}} =
+      assert {:serve,
+              %Answer{
+                intent: :neighborhood,
+                domain: :network,
+                text: text,
+                citations: cits,
+                key: key
+              }, %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "tunnel orbit"
       assert text =~ "carries 10.128.0.0/16"
       assert cits == ["corroboration:2"]
+      # chat-thread epic 2: active_keys must echo the RAW key, never the display subject
+      # (WhoMap/Network's subject_fun is a one-way display transform — not invertible).
+      assert key == "net:tunnel:orbit"
     end
 
     test "entail veto escalates (never serves the wrong-relation/entity)" do
       d = net_desc("tunnel conduit", [{"terminates_at", "gateway peer"}])
+
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
                Gate.sufficient?(d, entail_fun: always(false))
     end
 
     test "an empty network neighborhood cannot mint a Validated (fail-closed)" do
-      d = %Descriptor{query: "q", intent: :network, network_facts: [], blockers: [:no_corroboration]}
+      d = %Descriptor{
+        query: "q",
+        intent: :neighborhood,
+        domain: :network,
+        neighborhood_facts: [],
+        blockers: [:no_corroboration]
+      }
+
+      assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
+
+  describe "who intent (E1 org directory)" do
+    defp who_desc(subject, facts, key \\ nil) do
+      %Descriptor{
+        query: "who is in #{subject}",
+        intent: :neighborhood,
+        domain: :who,
+        neighborhood_subject: subject,
+        neighborhood_key: key || subject,
+        neighborhood_facts:
+          Enum.map(facts, fn {r, o} ->
+            %{relation: r, object: o, object_kind: "person", corroboration: 1}
+          end),
+        blockers: []
+      }
+    end
+
+    test "serves a directory neighborhood when the entail veto passes (names, not uids)" do
+      d =
+        who_desc(
+          "platform",
+          [{"works_in", "Jane Doe"}, {"works_in", "Bob Smith"}],
+          "who:team:platform"
+        )
+
+      assert {:serve,
+              %Answer{intent: :neighborhood, domain: :who, text: text, citations: cits, key: key},
+              %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "platform"
+      assert text =~ "works_in Jane Doe"
+      assert cits == ["corroboration:1"]
+      # chat-thread epic 2: active_keys must echo the RAW key, never the display subject
+      assert key == "who:team:platform"
+    end
+
+    test "a person's served key is their uid, even though the display text names them (cn ≠ key)" do
+      # `WhoMap.display_subject/1` resolves a PERSON to their `cn` for the header — a one-way
+      # transform. If active_keys echoed "Jane Doe" back, no `who:person:*` lookup would ever
+      # resolve it; the raw uid key must ride along instead (this is the exact live-verify gap).
+      d = who_desc("Jane Doe", [{"works_in", "platform"}], "who:person:jdoe123")
+
+      assert {:serve, %Answer{key: key, text: text}, %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "Jane Doe"
+      assert key == "who:person:jdoe123"
+    end
+
+    test "entail veto escalates (never serves a different person/relation)" do
+      d = who_desc("billing", [{"managed_by", "Wrong Person"}])
+
+      assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
+               Gate.sufficient?(d, entail_fun: always(false))
+    end
+
+    test "an empty directory neighborhood cannot mint a Validated (fail-closed)" do
+      d = %Descriptor{
+        query: "q",
+        intent: :neighborhood,
+        domain: :who,
+        neighborhood_facts: [],
+        blockers: [:no_corroboration]
+      }
+
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
     end

@@ -31,7 +31,7 @@ defmodule Swarm.GraphCase do
     # truncate them explicitly. `enrichment_watermark` is reached via its node FK,
     # but list it for clarity. `deliberation` (ADR-15) keys by ask_ref, no node FK.
     Swarm.Repo.query!(
-      "TRUNCATE node, edge, edge_provenance, content, chunk, node_alias, outbox, dead_letter, stagnant, enrichment_watermark, entity_resolution_audit, enrichment_decision, enrichment_pass, deliberation RESTART IDENTITY CASCADE"
+      "TRUNCATE node, edge, edge_provenance, content, chunk, node_alias, node_do_not_merge, outbox, dead_letter, stagnant, enrichment_watermark, entity_resolution_audit, enrichment_decision, enrichment_pass, deliberation RESTART IDENTITY CASCADE"
     )
 
     # Reset the stigmergy cursor (the singleton row survives TRUNCATE of outbox).

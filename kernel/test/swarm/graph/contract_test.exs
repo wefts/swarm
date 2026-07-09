@@ -18,6 +18,53 @@ defmodule Swarm.Graph.ContractTest do
     n
   end
 
+  describe "scope lattice helpers" do
+    test "glb/2 returns the write-time clamp for endpoint scopes" do
+      assert Contract.glb("public", "public") == "public"
+      assert Contract.glb("src:wiki", "public") == "src:wiki"
+      assert Contract.glb("src:wiki", "src:wiki") == "src:wiki"
+      assert Contract.glb("src:wiki", "src:ldap") == "private"
+      assert Contract.glb("private", "src:wiki") == "private"
+      assert Contract.glb("group", "src:wiki") == "private"
+    end
+
+    test "lattice_leq/2 implements the partial order" do
+      assert Contract.lattice_leq("private", "src:wiki")
+      assert Contract.lattice_leq("src:wiki", "public")
+      refute Contract.lattice_leq("src:wiki", "src:ldap")
+      assert Contract.lattice_leq("src:wiki", "src:wiki")
+      refute Contract.lattice_leq("public", "src:wiki")
+    end
+
+    test "valid_scope?/1 accepts base scopes and well-formed source scopes" do
+      assert Contract.valid_scope?("private")
+      assert Contract.valid_scope?("public")
+      assert Contract.valid_scope?("group")
+      assert Contract.valid_scope?("src:wiki")
+      assert Contract.valid_scope?("src:a-b_1")
+
+      refute Contract.valid_scope?("src:BAD")
+      refute Contract.valid_scope?("src:")
+      refute Contract.valid_scope?("wiki")
+      refute Contract.valid_scope?("")
+      refute Contract.valid_scope?(123)
+    end
+
+    test "origin_to_src/1 maps known origins to source scopes" do
+      assert Contract.origin_to_src("wiki:page:1") == "src:wiki"
+      assert Contract.origin_to_src("mediawiki:x") == "src:wiki"
+      assert Contract.origin_to_src("wikipedia:Page") == "src:wiki"
+      assert Contract.origin_to_src("confluence:y") == "src:confluence"
+      assert Contract.origin_to_src("iac:repo") == "src:iac"
+      assert Contract.origin_to_src("ldap:directory") == "src:ldap"
+      assert Contract.origin_to_src("enrich:origin:node:42") == :inherit
+      assert Contract.origin_to_src("synonymy") == :inherit
+      assert Contract.origin_to_src("synonymy:concept") == :inherit
+      assert Contract.origin_to_src("weird:thing") == :unknown
+      assert Contract.origin_to_src(123) == :unknown
+    end
+  end
+
   describe "visibility invariant (ADR-5) enforced at the write boundary" do
     test "rejects an edge whose scope is wider than an endpoint — the leak path" do
       a = add_node!(%{type: "file", scope: "private"})
@@ -56,6 +103,32 @@ defmodule Swarm.Graph.ContractTest do
                Graph.add_edge(a, 999_999, "mentions", "ev-1", scope: "private")
 
       assert edge_count() == 0
+    end
+
+    test "accepts source-scoped nodes and clamps source-scoped edges by GLB" do
+      assert Contract.validate_node(%{type: "article", scope: "src:wiki"}) == :ok
+
+      assert Contract.validate_edge(
+               "src:wiki",
+               "src:wiki",
+               "mentions",
+               "src:wiki",
+               nil,
+               "ev-1",
+               "origin-1",
+               "observation"
+             ) == :ok
+
+      assert Contract.validate_edge(
+               "src:wiki",
+               "src:wiki",
+               "mentions",
+               "public",
+               nil,
+               "ev-1",
+               "origin-1",
+               "observation"
+             ) == {:error, :scope_wider_than_endpoints}
     end
   end
 
@@ -108,7 +181,12 @@ defmodule Swarm.Graph.ContractTest do
     test "add_node rejects an unknown scope (changeset)" do
       assert {:error, cs} = Graph.add_node(%{type: "file", scope: "secret"})
       refute cs.valid?
-      assert {"is invalid", _} = cs.errors[:scope]
+      # ADR-18: scope validated via Contract.valid_scope?/1 (base vocab OR src:* shape).
+      assert {"is not an admissible scope", _} = cs.errors[:scope]
+    end
+
+    test "add_node accepts a well-formed src:* scope (changeset; ADR-18)" do
+      assert {:ok, _} = Graph.add_node(%{type: "file", key: "src-scope-ok", scope: "src:wiki"})
     end
 
     test "add_node rejects a malformed type (changeset)" do
@@ -207,7 +285,7 @@ defmodule Swarm.Graph.ContractTest do
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()
-      assert Contract.schema_version() == 7
+      assert Contract.schema_version() == 10
     end
   end
 

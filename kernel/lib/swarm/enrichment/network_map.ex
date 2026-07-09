@@ -33,8 +33,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     hostname/FQDN/IP stay DISTINCT nodes; an `alias_of` edge is emitted only when a source states
     the identity explicitly; folding is a read-time view concern. We deliberately do NOT use the
     eager `node_alias` table for network.
-  - **No-leak:** network nodes/edges are clamped to `min(source_scope, group)` — a public wiki
-    leaking an internal name never mints a public node.
+  - **No-leak:** network nodes/edges inherit the source node's scope (per-source); derived facts
+    never widen past their anchor.
 
   ## Residual (carded, not built here)
   **Ghost infrastructure** (both families, the single biggest risk): a claim-graph grows
@@ -44,7 +44,6 @@ defmodule Swarm.Enrichment.NetworkMap do
   shortest-path/blast-radius affordances) until Phase-2 evidence exists.
   """
 
-  alias Swarm.Graph.Contract
   alias Swarm.Graph.Store
   alias Swarm.ML.Generation
 
@@ -102,8 +101,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     "connects_site" => {~w(site tunnel), ~w(site tunnel)},
     # a tunnel terminates at an endpoint
     "terminates_at" => {~w(tunnel), ~w(gateway firewall host)},
-    # a tunnel/gateway CARRIES (reaches) a subnet — the ipsec "remote_subnets" relation (Phase-2)
-    "carries" => {~w(tunnel gateway), ~w(subnet)},
+    # a tunnel/gateway/cluster CARRIES a subnet — ipsec "remote_subnets" + kubespray pod/service CIDRs
+    "carries" => {~w(tunnel gateway cluster), ~w(subnet)},
     # an entity HAS an IP address (wiki inventory tables — public/private IP columns)
     "has_address" => {~w(host service gateway firewall cluster site), ~w(address)},
     # something is protected by a firewall
@@ -183,8 +182,8 @@ defmodule Swarm.Enrichment.NetworkMap do
   Write `facts` for source `node` as namespaced network `entity` nodes + `is_a` type edges + the
   governed relation claim-edges (symmetric relations doubled). Returns the fresh edge ids (the
   caller folds them into the enrichment `reconcile` kept-set so they are not re-deleted). Network
-  scope is clamped to `min(source_scope, group)` — never public (no-leak). Each edge carries
-  `source_node_id` for ghost-purge.
+  scope inherits the source node's scope (per-source, no-leak). Each edge carries `source_node_id`
+  for ghost-purge.
 
   `opts` (Phase-2 IaC vs Phase-1 prose):
   - `:reliability` (default #{@reliability}) — Phase-1 prose is a low-reliability `hypothesis`;
@@ -203,19 +202,34 @@ defmodule Swarm.Enrichment.NetworkMap do
     origin = Keyword.get(opts, :origin) || "enrich:origin:node:#{node.id}"
     reliability = Keyword.get(opts, :reliability, @reliability)
     evidence_kind = Keyword.get(opts, :evidence_kind, @evidence_kind)
-    scope = net_scope(node.scope)
-    edge_opts = {reliability, evidence_kind}
+    # S1: explicit upstream lineage (nil → Store derives from origin). Wiki-derived callers pass
+    # "wiki:page:#{page_node}" so prose + table + api of the SAME page count as ONE vote.
+    lineage = Keyword.get(opts, :lineage)
+    scope = node.scope
+    edge_opts = {reliability, evidence_kind, lineage}
 
     facts
     |> Enum.filter(&admissible?/1)
     |> Enum.flat_map(fn fact ->
-      subj = ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance, edge_opts)
-      obj = ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance, edge_opts)
+      subj =
+        ensure_entity(fact.subject, fact.subject_kind, scope, node, origin, provenance, edge_opts)
+
+      obj =
+        ensure_entity(fact.object, fact.object_kind, scope, node, origin, provenance, edge_opts)
 
       case {subj, obj} do
         {{:ok, subj_id, subj_edges}, {:ok, obj_id, obj_edges}} ->
           rel_edges =
-            emit_relation(subj_id, obj_id, fact.relation, scope, node, origin, provenance, edge_opts)
+            emit_relation(
+              subj_id,
+              obj_id,
+              fact.relation,
+              scope,
+              node,
+              origin,
+              provenance,
+              edge_opts
+            )
 
           subj_edges ++ obj_edges ++ rel_edges
 
@@ -247,18 +261,27 @@ defmodule Swarm.Enrichment.NetworkMap do
           map(),
           String.t(),
           String.t(),
-          {float(), String.t()}
+          {float(), String.t(), String.t() | nil}
         ) :: {:ok, integer(), [integer()]} | :error
-  defp ensure_entity(name, kind, scope, node, origin, provenance, {reliability, evidence_kind}) do
+  defp ensure_entity(
+         name,
+         kind,
+         scope,
+         node,
+         origin,
+         provenance,
+         {reliability, evidence_kind, lineage}
+       ) do
     key = entity_key(kind, name)
     ent = Store.upsert_node(@entity_type, key, scope: scope)
-    # Kind markers are generic type labels (non-sensitive) — pinned at `group` so the is_a edge's
-    # visibility invariant (edge <= min(endpoints)) holds for any clamped entity scope.
-    marker = Store.upsert_node(@marker_type, "net:kind:" <> kind, scope: "group")
+    # Kind markers are generic type labels shared across source scopes. Pin them public so a
+    # src-scoped is_a edge satisfies edge <= glb(entity, marker).
+    marker = Store.upsert_node(@marker_type, "net:kind:" <> kind, scope: "public")
 
     case Store.add_edge(ent, marker, "is_a", provenance,
            scope: scope,
            origin: origin,
+           lineage: lineage,
            reliability: reliability,
            evidence_kind: evidence_kind,
            source_node_id: node.id
@@ -278,15 +301,25 @@ defmodule Swarm.Enrichment.NetworkMap do
           map(),
           String.t(),
           String.t(),
-          {float(), String.t()}
+          {float(), String.t(), String.t() | nil}
         ) :: [integer()]
-  defp emit_relation(src, dst, relation, scope, node, origin, provenance, {reliability, evidence_kind}) do
+  defp emit_relation(
+         src,
+         dst,
+         relation,
+         scope,
+         node,
+         origin,
+         provenance,
+         {reliability, evidence_kind, lineage}
+       ) do
     directed = [{src, dst} | if(relation in @symmetric, do: [{dst, src}], else: [])]
 
     Enum.flat_map(directed, fn {s, d} ->
       case Store.add_edge(s, d, relation, provenance,
              scope: scope,
              origin: origin,
+             lineage: lineage,
              reliability: reliability,
              evidence_kind: evidence_kind,
              source_node_id: node.id
@@ -295,15 +328,6 @@ defmodule Swarm.Enrichment.NetworkMap do
         {:error, _} -> []
       end
     end)
-  end
-
-  # Network scope clamp: never wider than `group` (no-leak — a public source must not mint a
-  # public topology node); a narrower source scope is preserved.
-  @spec net_scope(String.t()) :: String.t()
-  defp net_scope(source_scope) do
-    if Contract.scope_rank(source_scope) > Contract.scope_rank("group"),
-      do: "group",
-      else: source_scope
   end
 
   # --- parse + validate ------------------------------------------------------

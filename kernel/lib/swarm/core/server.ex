@@ -20,14 +20,23 @@ defmodule Swarm.Core.Server do
     DeliberationResponse,
     EdgeView,
     GetConversationResponse,
+    GetUserRequest,
+    GetUserResponse,
+    GroupView,
     ListConversationsResponse,
+    ListGroupsRequest,
+    ListGroupsResponse,
+    ListRolesRequest,
+    ListRolesResponse,
     LogConversationResponse,
+    ManageGroupRequest,
     MessageView,
     NamespaceStamp,
     NeighborhoodResponse,
     NodeView,
     PanelTake,
     ResolveActorResponse,
+    RoleView,
     SearchHit,
     SearchResponse,
     StatusResponse,
@@ -36,8 +45,16 @@ defmodule Swarm.Core.Server do
 
   @spec ask(Swarm.Core.V1.AskRequest.t(), GRPC.Server.Stream.t()) :: AskResponse.t()
   def ask(req, _stream) do
-    {viewer, scopes} = ctx(req.viewer, req.scopes)
-    a = Core.ask(req.query, scopes: scopes, viewer: viewer)
+    {viewer, scopes, verified?} = ctx(req.viewer, req.scopes)
+
+    a =
+      Core.ask(req.query,
+        scopes: scopes,
+        viewer: viewer,
+        verified: verified?,
+        active_keys: req.active_keys,
+        conversation_id: nz(req.conversation_id)
+      )
 
     %AskResponse{
       answer: a.answer,
@@ -92,7 +109,7 @@ defmodule Swarm.Core.Server do
     # SearchRequest now carries an optional signed `assertion` (ADR-16): dual-accept —
     # derive scopes when signed, else use the wire scopes (legacy). KbStatus stays
     # global (no scope filtering), so it needs none.
-    {_viewer, scopes} = ctx(req.assertion, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.assertion, req.scopes)
     limit = if req.limit == 0, do: 10, else: req.limit
     hits = Core.search(req.query, scopes, limit: limit)
 
@@ -104,7 +121,7 @@ defmodule Swarm.Core.Server do
   @spec deliberation(Swarm.Core.V1.DeliberationRequest.t(), GRPC.Server.Stream.t()) ::
           DeliberationResponse.t()
   def deliberation(req, _stream) do
-    {viewer, scopes} = ctx(req.viewer, req.scopes)
+    {viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     case Core.deliberation(req.ask_ref, viewer, scopes) do
       {:ok, d} ->
@@ -129,7 +146,7 @@ defmodule Swarm.Core.Server do
   @spec neighborhood(Swarm.Core.V1.NeighborhoodRequest.t(), GRPC.Server.Stream.t()) ::
           NeighborhoodResponse.t()
   def neighborhood(req, _stream) do
-    {_viewer, scopes} = ctx(req.viewer, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     opts = [
       scopes: scopes,
@@ -178,7 +195,7 @@ defmodule Swarm.Core.Server do
   @spec activity_feed(Swarm.Core.V1.ActivityFeedRequest.t(), GRPC.Server.Stream.t()) ::
           ActivityFeedResponse.t()
   def activity_feed(req, _stream) do
-    {_viewer, scopes} = ctx(req.viewer, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     page =
       Core.activity_feed(
@@ -328,6 +345,117 @@ defmodule Swarm.Core.Server do
     end)
   end
 
+  @spec list_users(Swarm.Core.V1.ListUsersRequest.t(), GRPC.Server.Stream.t()) ::
+          Swarm.Core.V1.ListUsersResponse.t()
+  def list_users(req, _stream) do
+    alias Swarm.Core.V1.ListUsersResponse
+
+    with_actor(req.assertion, %ListUsersResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_users(a.uuid,
+             include_deleted: req.include_deleted,
+             limit: req.limit,
+             query: req.query,
+             offset: req.offset
+           ) do
+        {:ok, {users, total}} ->
+          %ListUsersResponse{
+            status: :CALL_OK,
+            users: Enum.map(users, &to_user_view/1),
+            total: total
+          }
+
+        :not_authorized ->
+          %ListUsersResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec get_user(GetUserRequest.t(), GRPC.Server.Stream.t()) :: GetUserResponse.t()
+  def get_user(req, _stream) do
+    with_actor(req.assertion, %GetUserResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.get_user(a.uuid, req.user_id) do
+        {:ok, v} ->
+          %GetUserResponse{status: :CALL_OK, user: to_user_view(v, emails: v.emails)}
+
+        :not_found ->
+          %GetUserResponse{status: :CALL_NOT_FOUND}
+
+        :not_authorized ->
+          %GetUserResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec list_groups(ListGroupsRequest.t(), GRPC.Server.Stream.t()) :: ListGroupsResponse.t()
+  def list_groups(req, _stream) do
+    with_actor(req.assertion, %ListGroupsResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_groups(a.uuid) do
+        {:ok, groups} ->
+          %ListGroupsResponse{
+            status: :CALL_OK,
+            groups: Enum.map(groups, &to_group_view/1)
+          }
+
+        :not_authorized ->
+          %ListGroupsResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec list_roles(ListRolesRequest.t(), GRPC.Server.Stream.t()) :: ListRolesResponse.t()
+  def list_roles(req, _stream) do
+    with_actor(req.assertion, %ListRolesResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.list_roles(a.uuid) do
+        {:ok, roles} ->
+          %ListRolesResponse{
+            status: :CALL_OK,
+            roles: Enum.map(roles, &to_role_view/1)
+          }
+
+        :not_authorized ->
+          %ListRolesResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec to_group_view(map()) :: GroupView.t()
+  defp to_group_view(view) do
+    %GroupView{
+      id: view.id,
+      member_count: view.member_count,
+      granted_scopes: view.granted_scopes,
+      granted_roles: view.granted_roles,
+      name: view.name || "",
+      description: view.description || ""
+    }
+  end
+
+  @spec to_role_view(map()) :: RoleView.t()
+  defp to_role_view(view) do
+    %RoleView{
+      name: view.name,
+      capabilities: view.capabilities,
+      holder_count: view.holder_count
+    }
+  end
+
+  @spec to_user_view(map(), keyword()) :: Swarm.Core.V1.UserView.t()
+  defp to_user_view(view, opts \\ []) do
+    %Swarm.Core.V1.UserView{
+      id: view.id,
+      login: view.login,
+      first_name: view.first_name || "",
+      last_name: view.last_name || "",
+      nickname: view.nickname || "",
+      status: view.status,
+      roles: view.roles,
+      groups: view.groups,
+      providers: view.providers,
+      last_login_at: iso(view.last_login_at),
+      emails: opts[:emails] || []
+    }
+  end
+
   @spec manage_access(Swarm.Core.V1.ManageAccessRequest.t(), GRPC.Server.Stream.t()) ::
           AdminActionResponse.t()
   def manage_access(req, _stream) do
@@ -371,6 +499,64 @@ defmodule Swarm.Core.Server do
     do: action_response(Admin.set_group_scopes(actor_id, req.group_id, req.scopes))
 
   defp manage_access_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+
+  @spec manage_group(ManageGroupRequest.t(), GRPC.Server.Stream.t()) :: AdminActionResponse.t()
+  def manage_group(req, _stream) do
+    with_actor(req.assertion, %AdminActionResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      manage_group_op(a.uuid, req)
+    end)
+  end
+
+  @spec manage_group_op(String.t(), ManageGroupRequest.t()) :: AdminActionResponse.t()
+  defp manage_group_op(actor_id, %{op: :GROUP_CREATE} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.create_group(actor_id, id, nz(req.name), nz(req.description))
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_RENAME} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.rename_group(actor_id, id, nz(req.name))
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_DELETE} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.delete_group(actor_id, id, req.confirm)
+      end)
+    )
+  end
+
+  defp manage_group_op(actor_id, %{op: op, role: role} = req)
+       when op in [:GROUP_SET_ROLE, :GROUP_CLEAR_ROLE] do
+    cond do
+      role not in ["admin", "superadmin"] ->
+        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+      op == :GROUP_SET_ROLE ->
+        action_response(guarded_group_id(req.group_id, &Admin.set_group_role(actor_id, &1, role)))
+
+      true ->
+        action_response(
+          guarded_group_id(req.group_id, &Admin.clear_group_role(actor_id, &1, role))
+        )
+    end
+  end
+
+  defp manage_group_op(actor_id, %{op: :GROUP_SET_SCOPES} = req) do
+    action_response(
+      guarded_group_id(req.group_id, fn id ->
+        Admin.set_group_scopes(actor_id, id, req.scopes)
+      end)
+    )
+  end
+
+  defp manage_group_op(_actor_id, _req), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
 
   @spec manage_user(Swarm.Core.V1.ManageUserRequest.t(), GRPC.Server.Stream.t()) ::
           AdminActionResponse.t()
@@ -421,11 +607,11 @@ defmodule Swarm.Core.Server do
 
   # Legacy-RPC context: dual-accept (verify a signed viewer, else trust plaintext).
   # `:unauthenticated` (strict mode, no assertion) ⇒ anonymous public — fail closed.
-  @spec ctx(String.t(), [String.t()]) :: {String.t(), [String.t()]}
+  @spec ctx(String.t(), [String.t()]) :: {String.t(), [String.t()], boolean()}
   defp ctx(viewer, wire_scopes) do
     case Auth.legacy_context(viewer, wire_scopes) do
-      {:ok, c} -> {c.viewer, c.scopes}
-      {:error, :unauthenticated} -> {"", ["public"]}
+      {:ok, c} -> {c.viewer, c.scopes, c.verified?}
+      {:error, :unauthenticated} -> {"", ["public"], false}
     end
   end
 
@@ -449,6 +635,14 @@ defmodule Swarm.Core.Server do
     end
   end
 
+  @spec guarded_group_id(String.t(), (String.t() -> term())) :: term() | {:error, :bad_group_id}
+  defp guarded_group_id(group_id, fun) do
+    case nz(group_id) do
+      nil -> {:error, :bad_group_id}
+      id -> fun.(id)
+    end
+  end
+
   @spec conversation_response(
           {:ok, %{conversation: map(), messages: [map()]}}
           | :not_found
@@ -466,14 +660,28 @@ defmodule Swarm.Core.Server do
 
   defp conversation_response(:not_found), do: %GetConversationResponse{status: :CALL_NOT_FOUND}
 
-  @spec action_response(:ok | :not_authorized | {:error, :ungrantable_scope}) ::
+  @spec action_response(
+          :ok
+          | :not_authorized
+          | :not_found
+          | :not_confirmed
+          | {:error, :ungrantable_scope | :invalid_role | :bad_group_id}
+        ) ::
           AdminActionResponse.t()
   defp action_response(:ok), do: %AdminActionResponse{status: :CALL_OK}
   defp action_response(:not_authorized), do: %AdminActionResponse{status: :CALL_NOT_AUTHORIZED}
+  defp action_response(:not_found), do: %AdminActionResponse{status: :CALL_NOT_FOUND}
+  defp action_response(:not_confirmed), do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   # A grant of an ungrantable scope (private / out-of-vocabulary) is a caller
   # error, not an authz outcome (person-scope-leak-guard).
   defp action_response({:error, :ungrantable_scope}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  defp action_response({:error, :invalid_role}),
+    do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  defp action_response({:error, :bad_group_id}),
     do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   @spec conv_view(map()) :: ConversationView.t()

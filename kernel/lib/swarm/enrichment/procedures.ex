@@ -101,8 +101,8 @@ defmodule Swarm.Enrichment.Procedures do
   into the enrichment `reconcile` kept-set so they are not re-deleted). Scope inherits the
   source node's scope (no-leak).
   """
-  @spec write(map(), [procedure()], String.t()) :: [integer()]
-  def write(node, procedures, provenance) do
+  @spec write(map(), [procedure()], String.t(), String.t() | nil) :: [integer()]
+  def write(node, procedures, provenance, lineage \\ nil) do
     origin = "enrich:origin:node:#{node.id}"
 
     Enum.flat_map(procedures, fn %{name: name, steps: steps} ->
@@ -112,20 +112,21 @@ defmodule Swarm.Enrichment.Procedures do
       steps
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {text, ordinal} ->
-        write_step(proc, text, ordinal, node, origin, provenance)
+        write_step(proc, text, ordinal, node, origin, provenance, lineage)
       end)
     end)
   end
 
   # Insert ONE fresh has_step edge (proc → step node), returning [edge_id] or [] on write error.
-  @spec write_step(integer(), String.t(), pos_integer(), map(), String.t(), String.t()) ::
+  @spec write_step(integer(), String.t(), pos_integer(), map(), String.t(), String.t(), String.t() | nil) ::
           [integer()]
-  defp write_step(proc, text, ordinal, node, origin, provenance) do
+  defp write_step(proc, text, ordinal, node, origin, provenance, lineage) do
     step = Store.upsert_node(@step_type, text, scope: node.scope)
 
     case Store.add_edge(proc, step, "has_step", provenance,
            scope: node.scope,
            origin: origin,
+           lineage: lineage,
            evidence_kind: "claim",
            step_ordinal: ordinal,
            source_node_id: node.id
@@ -166,7 +167,7 @@ defmodule Swarm.Enrichment.Procedures do
 
       Repo.query!(
         "UPDATE edge e SET seen_count = " <>
-          "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+          "(SELECT count(DISTINCT coalesce(lineage, origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
           "WHERE e.id = ANY($1::bigint[])",
         [ids]
       )

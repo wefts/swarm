@@ -113,6 +113,10 @@ defmodule Swarm.Graph.Store do
     weight = Keyword.get(opts, :weight, 1.0)
     reliability = Keyword.get(opts, :reliability, 1.0)
     origin = Keyword.get(opts, :origin, provenance)
+    # S1 (master plan, evidence-governance): corroboration counts distinct UPSTREAM LINEAGE, not
+    # origin labels. Default derived from origin (wiki family → one `wiki` lineage — fixes the
+    # `wiki:corrob` double-vote); a connector may pass an explicit `:lineage`.
+    lineage = Keyword.get(opts, :lineage) || lineage_of(origin)
     evidence_kind = Keyword.get(opts, :evidence_kind, "observation")
     # ADR-17: a `has_step` edge's position in its procedure (NULL for every other
     # edge — enforced here at the write boundary, not just by convention). Set only
@@ -150,9 +154,9 @@ defmodule Swarm.Graph.Store do
       edge_id =
         upsert_identity(src, dst, type, scope, weight, reliability, evidence_kind, step_ordinal)
 
-      case record_event(edge_id, provenance, origin, source_node_id) do
-        :new_origin ->
-          # A new distinct origin adds exactly 1 to count(DISTINCT origin).
+      case record_event(edge_id, provenance, origin, lineage, source_node_id) do
+        :new_lineage ->
+          # A new distinct lineage adds exactly 1 to count(DISTINCT lineage).
           seen = bump_seen(edge_id)
 
           emit_outbox(
@@ -223,6 +227,18 @@ defmodule Swarm.Graph.Store do
 
         alias_key == into_key or alias_id == into_id ->
           %{into_id: into_id, edges: 0, result: :noop_same}
+
+        merge_blocked?(type, alias_key, into_key) ->
+          # S4 do-not-merge: an explicit assertion that these are DISTINCT entities. Never merge
+          # (a wrong merge is catastrophic + hard to un-merge); surface for escalation.
+          emit_outbox(
+            "merge_refused",
+            "node:#{into_id || alias_id}",
+            %{into: into_id, from: alias_id, reason: "do_not_merge"},
+            "merge_refused:do_not_merge:#{type}:#{alias_key}->#{into_key}"
+          )
+
+          %{into_id: into_id, edges: 0, result: :refused_do_not_merge}
 
         is_nil(into_id) ->
           # Canonical not yet present: rename the alias to the canonical key. Safe —
@@ -379,6 +395,40 @@ defmodule Swarm.Graph.Store do
     :ok
   end
 
+  @doc """
+  Assert (durably) that `(type, k1)` and `(type, k2)` are DISTINCT entities and must NEVER be
+  merged (master-plan S4 do-not-merge). `merge_nodes/3` then refuses this pair
+  (`:refused_do_not_merge`) and entity-resolution excludes it from merge proposals. Symmetric —
+  stored order-independent. Idempotent.
+  """
+  @spec block_merge(String.t(), String.t(), String.t(), String.t() | nil) :: :ok
+  def block_merge(type, k1, k2, reason \\ nil)
+      when is_binary(type) and is_binary(k1) and is_binary(k2) do
+    {a, b} = if k1 <= k2, do: {k1, k2}, else: {k2, k1}
+
+    Repo.query!(
+      "INSERT INTO node_do_not_merge (type, key_a, key_b, reason) VALUES ($1,$2,$3,$4) " <>
+        "ON CONFLICT (type, key_a, key_b) DO NOTHING",
+      [type, a, b, reason]
+    )
+
+    :ok
+  end
+
+  @doc "Is this `(type, k1, k2)` pair blocked from merging (S4 do-not-merge)? Order-independent."
+  @spec merge_blocked?(String.t(), String.t(), String.t()) :: boolean()
+  def merge_blocked?(type, k1, k2) when is_binary(type) and is_binary(k1) and is_binary(k2) do
+    {a, b} = if k1 <= k2, do: {k1, k2}, else: {k2, k1}
+
+    %{rows: [[c]]} =
+      Repo.query!(
+        "SELECT count(*) FROM node_do_not_merge WHERE type = $1 AND key_a = $2 AND key_b = $3",
+        [type, a, b]
+      )
+
+    c > 0
+  end
+
   @spec node_id(String.t(), String.t()) :: integer() | nil
   defp node_id(type, key) do
     case Repo.query!("SELECT id FROM node WHERE type = $1 AND key = $2", [type, key]) do
@@ -446,7 +496,7 @@ defmodule Swarm.Graph.Store do
 
       Repo.query!(
         "UPDATE edge e SET seen_count = " <>
-          "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+          "(SELECT count(DISTINCT coalesce(lineage, origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
           "WHERE e.id = ANY($1::bigint[])",
         [edge_ids]
       )
@@ -496,7 +546,7 @@ defmodule Swarm.Graph.Store do
         )
 
         Repo.query!(
-          "UPDATE edge SET seen_count = (SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance WHERE edge_id = $1), last_seen = now(), updated_at = now() WHERE id = $1",
+          "UPDATE edge SET seen_count = (SELECT count(DISTINCT coalesce(lineage, origin, provenance)) FROM edge_provenance WHERE edge_id = $1), last_seen = now(), updated_at = now() WHERE id = $1",
           [target]
         )
 
@@ -570,41 +620,52 @@ defmodule Swarm.Graph.Store do
     id
   end
 
-  # Record one (provenance, origin) event and classify what it did for the edge's
-  # distinct-origin count (workspace ADR-13):
-  #   :duplicate       — the same emission instance, already recorded (no-op);
-  #   :existing_origin — a new event, but its origin is already counted (audit only);
-  #   :new_origin      — a new event introducing an origin the edge had not seen.
-  @spec record_event(integer(), String.t(), String.t(), integer() | nil) ::
-          :duplicate | :existing_origin | :new_origin
-  defp record_event(edge_id, provenance, origin, source_node_id) do
+  # Record one (provenance, origin, lineage) event and classify what it did for the edge's
+  # distinct-LINEAGE count (workspace ADR-13 + master-plan S1):
+  #   :duplicate        — the same emission instance, already recorded (no-op);
+  #   :existing_lineage — a new event, but its upstream lineage is already counted (audit only);
+  #   :new_lineage      — a new event introducing a lineage the edge had not seen (reinforces).
+  @spec record_event(integer(), String.t(), String.t(), String.t() | nil, integer() | nil) ::
+          :duplicate | :existing_lineage | :new_lineage
+  defp record_event(edge_id, provenance, origin, lineage, source_node_id) do
     sql = """
-    INSERT INTO edge_provenance (edge_id, provenance, origin, source_node_id)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO edge_provenance (edge_id, provenance, origin, lineage, source_node_id)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (edge_id, provenance) DO NOTHING
     RETURNING edge_id
     """
 
-    if Repo.query!(sql, [edge_id, provenance, origin, source_node_id]).num_rows == 1 do
-      # New event recorded. Is this the FIRST row carrying this origin (the row we
-      # just inserted included)? If so it is a new distinct origin → reinforces.
+    if Repo.query!(sql, [edge_id, provenance, origin, lineage, source_node_id]).num_rows == 1 do
+      # New event recorded. Is this the FIRST row carrying this LINEAGE (this row included)?
+      # If so it is a new distinct upstream lineage → reinforces (S1). Three origins from one
+      # lineage reinforce only ONCE.
       #
       # Race-safety: this read-then-classify is exact only because the caller's
       # `upsert_identity` already holds the edge row lock for this transaction
       # (its `ON CONFLICT DO UPDATE` locks the conflicting row), serialising
       # concurrent same-edge reinforcements. Do NOT drop that conflict-update or
-      # this count can race two same-origin events into a double reinforcement.
+      # this count can race two same-lineage events into a double reinforcement.
       %{rows: [[c]]} =
         Repo.query!(
-          "SELECT count(*) FROM edge_provenance WHERE edge_id = $1 AND coalesce(origin, provenance) = $2",
-          [edge_id, origin]
+          "SELECT count(*) FROM edge_provenance WHERE edge_id = $1 AND coalesce(lineage, origin, provenance) = $2",
+          [edge_id, lineage]
         )
 
-      if c == 1, do: :new_origin, else: :existing_origin
+      if c == 1, do: :new_lineage, else: :existing_lineage
     else
       :duplicate
     end
   end
+
+  # S1 lineage default = the origin itself (per-source lineage) — behaviorally identical to the
+  # pre-S1 distinct-origin count, so this lands the MECHANISM (column + `:lineage` opt + lineage-
+  # aware `seen_count` everywhere) with ZERO behavior change. The GRANULARITY POLICY — which
+  # origins collapse to one upstream (the wiki family dedups at PAGE level, NOT "all wiki = 1"; a
+  # coarse all-wiki collapse wrongly merged two independent pages' attestations, caught by
+  # worker_test) — is a designed S1-step-2 (see board). Connectors pass an explicit `:lineage` to
+  # opt into coarser grouping once that policy exists.
+  @spec lineage_of(String.t() | nil) :: String.t() | nil
+  defp lineage_of(origin), do: origin
 
   # Atomic increment in the engine (ADR-1), not a read-modify-write in app code.
   @spec bump_seen(integer()) :: integer()

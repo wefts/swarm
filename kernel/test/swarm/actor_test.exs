@@ -106,6 +106,8 @@ defmodule Swarm.ActorTest do
     test "a valid assertion resolves to the derived uuid, scopes and caps" do
       Identity.put_group_scopes("staff", ["public"])
       Identity.put_group_scopes("nebula", ["public", "group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
+      :ok = Identity.put_sso_group_map("keycloak", "nebula", "nebula")
       u = provision_penta(["staff", "nebula"])
 
       t =
@@ -122,6 +124,7 @@ defmodule Swarm.ActorTest do
 
     test "scopes are DERIVED — a token cannot widen them (it carries no scopes)" do
       Identity.put_group_scopes("staff", ["public"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
       provision_penta(["staff"])
       t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: 300)
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)

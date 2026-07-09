@@ -127,7 +127,7 @@ defmodule Swarm.Graph.Aggregation do
                  btrim(lower(regexp_replace(e.type, '[[:space:]_]+', ' ', 'g'))) AS predicate,
                  o.key AS object,
                  max(e.reliability) AS reliability,
-                 count(DISTINCT coalesce(ep.origin, ep.provenance)) AS corroboration
+                 count(DISTINCT coalesce(ep.lineage, ep.origin, ep.provenance)) AS corroboration
             FROM edge e
             JOIN node s ON s.id = e.src AND s.scope = ANY($1::text[])
             JOIN node o ON o.id = e.dst AND o.scope = ANY($1::text[])

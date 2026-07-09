@@ -149,6 +149,35 @@ defmodule Swarm.CoreTest do
       # opaque citation only — never the raw origin
       assert Enum.all?(a.citations, &(&1.source == "structured"))
       refute a.answer =~ "wiki"
+      # chat-thread epic 2: the served entity's real key rides along in citations (not
+      # just the gate's opaque "corroboration:N" labels) — a channel echoing THESE refs
+      # back as the next turn's active_keys must be able to re-hit this same procedure.
+      assert "ldap password reset" in Enum.map(a.citations, & &1.ref)
+    end
+
+    test "chat-thread epic 2: a structured turn's own citations re-serve the NEXT pronoun follow-up" do
+      p = seed_procedure()
+
+      opts1 =
+        escalate_opts(consilium_stub()) ++
+          [retriever: proc_retriever(p), tier_gate: true, entail_fun: fn _q, _g -> true end]
+
+      first = Core.ask("how to reset the ldap password", opts1)
+      assert first.tier == "structured"
+      echoed_keys = Enum.map(first.citations, & &1.ref)
+
+      opts2 =
+        escalate_opts(consilium_stub()) ++
+          [
+            retriever: unrelated_retriever(),
+            tier_gate: true,
+            entail_fun: fn _q, _g -> true end,
+            active_keys: echoed_keys
+          ]
+
+      second = Core.ask("and how do I do that again?", opts2)
+      assert second.tier == "structured"
+      assert second.answer =~ "open the self-service portal"
     end
 
     test "entailment NO vetoes the serve ⇒ escalates to the consilium (near-miss guard)" do
@@ -170,6 +199,58 @@ defmodule Swarm.CoreTest do
       a = Core.ask("how to reset the ldap password", opts)
       assert a.tier == "escalate"
       assert a.answer == "consilium answer"
+    end
+
+    # An UNRELATED retriever — hit_keys/Procedure.candidates alone give the gate no
+    # matching candidate — simulates a context-free pronoun follow-up ("and how do I
+    # do that again?") whose OWN text carries no usable key.
+    defp unrelated_retriever do
+      fn _q, _s, _o -> {:ok, [%{id: 999, type: "entity", key: "unrelated thing", score: 0.1}]} end
+    end
+
+    test "chat-thread epic 2: without active_keys, a pronoun follow-up finds nothing to serve" do
+      _p = seed_procedure()
+
+      opts =
+        escalate_opts(consilium_stub()) ++
+          [retriever: unrelated_retriever(), tier_gate: true, entail_fun: fn _q, _g -> true end]
+
+      a = Core.ask("and how do I do that again?", opts)
+      assert a.tier == "escalate"
+    end
+
+    test "chat-thread epic 2: active_keys let the SAME pronoun follow-up hit the structured gate" do
+      _p = seed_procedure()
+
+      opts =
+        escalate_opts(consilium_stub()) ++
+          [
+            retriever: unrelated_retriever(),
+            tier_gate: true,
+            entail_fun: fn _q, _g -> true end,
+            active_keys: ["ldap password reset"]
+          ]
+
+      a = Core.ask("and how do I do that again?", opts)
+      assert a.tier == "structured"
+      assert a.status == :found
+      assert a.answer =~ "open the self-service portal"
+    end
+
+    test "chat-thread epic 2: active_keys are sanitized (blanks dropped, never crash)" do
+      _p = seed_procedure()
+
+      opts =
+        escalate_opts(consilium_stub()) ++
+          [
+            retriever: unrelated_retriever(),
+            tier_gate: true,
+            entail_fun: fn _q, _g -> true end,
+            active_keys: ["", nil, "ldap password reset", ""]
+          ]
+
+      a = Core.ask("and how do I do that again?", opts)
+      assert a.tier == "structured"
     end
   end
 end

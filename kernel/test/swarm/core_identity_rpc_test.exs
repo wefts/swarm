@@ -52,6 +52,7 @@ defmodule Swarm.CoreIdentityRpcTest do
   describe "ResolveActor" do
     test "a valid assertion returns the derived uuid/scopes/caps" do
       Identity.put_group_scopes("staff", ["public", "group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
       u = provision("penta", "sub-penta", ["staff"])
 
       resp = Server.resolve_actor(%ResolveActorRequest{assertion: assertion("sub-penta")}, nil)
@@ -78,6 +79,7 @@ defmodule Swarm.CoreIdentityRpcTest do
 
     test "a NEW SSO subject is JIT-provisioned; scopes derive from synced groups" do
       Identity.put_group_scopes("staff", ["public", "group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
       t =
         provision_token(%{
@@ -104,6 +106,7 @@ defmodule Swarm.CoreIdentityRpcTest do
 
     test "re-provision on every login re-syncs groups (privilege retention closed)" do
       Identity.put_group_scopes("staff", ["group"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
 
       t1 =
         provision_token(%{
@@ -573,6 +576,16 @@ defmodule Swarm.CoreIdentityRpcTest do
   end
 
   describe "dual-accept auth seam (legacy RPCs keep working)" do
+    # `:dual` is now an explicit migration opt-in (the product default flipped to `:strict`,
+    # dual-mode-history-leak). This block exercises the dual seam, so set it here; the `:strict`
+    # case below overrides it for its own assertion.
+    setup do
+      prev = Application.get_env(:swarm, :core_api)
+      Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
+      on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
+      :ok
+    end
+
     test "legacy_context in :dual passes a plaintext viewer through unchanged" do
       assert {:ok, %{viewer: "alice", scopes: ["group"]}} =
                Auth.legacy_context("alice", ["group"])
@@ -580,6 +593,7 @@ defmodule Swarm.CoreIdentityRpcTest do
 
     test "legacy_context in :dual verifies + derives a signed viewer (ignoring wire scopes)" do
       Identity.put_group_scopes("staff", ["public"])
+      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
       u = provision("penta", "sub-penta", ["staff"])
       t = assertion("sub-penta")
       # wire scopes claim [group,private] but the DERIVED scopes win

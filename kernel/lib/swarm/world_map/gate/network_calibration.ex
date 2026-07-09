@@ -134,9 +134,10 @@ defmodule Swarm.WorldMap.Gate.NetworkCalibration do
   defp build_descriptor(%{query: q, subject: subject, facts: facts}) do
     %Descriptor{
       query: q,
-      intent: :network,
-      network_subject: subject,
-      network_facts:
+      intent: :neighborhood,
+      domain: :network,
+      neighborhood_subject: subject,
+      neighborhood_facts:
         Enum.map(facts, fn {rel, obj} ->
           %{relation: rel, object: obj, object_kind: "entity", corroboration: 2}
         end),

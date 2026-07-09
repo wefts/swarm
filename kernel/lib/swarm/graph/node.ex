@@ -43,9 +43,14 @@ defmodule Swarm.Graph.Node do
       greater_than_or_equal_to: 0.0,
       less_than_or_equal_to: 1.0
     )
-    # swarm ADR-4: the graph schema is a write-validated contract. Scope is a
-    # closed vocabulary; type is a non-empty lowercase identifier.
-    |> validate_inclusion(:scope, Contract.scopes())
+    # swarm ADR-4: the graph schema is a write-validated contract. Scope is the
+    # base vocab OR a well-formed `src:<name>` (ADR-18 lattice) — validated via
+    # Contract.valid_scope?/1, the single source of truth (not the finite
+    # scopes() list, which excludes the open src:* namespace); type is a
+    # non-empty lowercase identifier.
+    |> validate_change(:scope, fn :scope, scope ->
+      if Contract.valid_scope?(scope), do: [], else: [scope: "is not an admissible scope"]
+    end)
     |> validate_inclusion(:kind, Contract.kinds())
     |> validate_format(:type, Contract.type_format())
     # swarm ADR-14 §3.1: node `type` is a closed kernel vocabulary, not merely a

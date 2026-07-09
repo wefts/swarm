@@ -16,6 +16,7 @@ defmodule Swarm.Graph.Network do
   write, so a `[public]` read never surfaces topology (no-leak).
   """
 
+  alias Swarm.Graph.Freshness
   alias Swarm.Repo
 
   @typedoc "A network entity: its namespaced key, derived kind, and display name."
@@ -144,9 +145,13 @@ defmodule Swarm.Graph.Network do
 
   @doc """
   The relation NEIGHBORHOOD of a network entity `key` (outgoing non-`is_a` edges), scope-enforced,
-  refuted excluded. Each fact carries its `corroboration` (distinct-origin `seen_count`). `opts`:
+  refuted excluded. Each fact carries `corroboration` (distinct-lineage `seen_count`, S1). `opts`:
   `:min_corroboration` (default 1) — the tier-gate passes 2 to serve ONLY multi-source-confirmed
-  topology (wiki∩IaC / cross-repo / live). Returns `[%{relation, object, object_kind, corroboration}]`.
+  topology; `:freshness` (default true) — S2: drop facts too STALE to serve (decay below the
+  serve floor, per freshness class) and rank by `effective_reliability` (base × decay). Age is
+  measured against the graph's freshness FRONTIER (newest `last_seen`) so a stalled ingest can't
+  decay-then-escalate the whole graph. Returns `[%{relation, object, object_kind, corroboration,
+  effective_reliability}]`, freshest-first.
   """
   @spec neighborhood(String.t(), [String.t()], keyword()) :: [map()]
   def neighborhood(key, scopes, opts \\ [])
@@ -155,25 +160,40 @@ defmodule Swarm.Graph.Network do
 
   def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
     min_corr = Keyword.get(opts, :min_corroboration, 1)
+    freshness? = Keyword.get(opts, :freshness, true)
 
     %{rows: rows} =
       Repo.query!(
         """
-        SELECT e.type, d.key, e.seen_count
+        SELECT e.type, d.key, e.seen_count, e.reliability::float8,
+               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec
           FROM edge e
           JOIN node s ON s.id = e.src
           JOIN node d ON d.id = e.dst
          WHERE s.key = $1 AND e.type <> 'is_a' AND e.reward >= 0
            AND e.visibility_scope = ANY($2) AND d.scope = ANY($2) AND s.scope = ANY($2)
            AND e.seen_count >= $3
-         ORDER BY e.seen_count DESC, e.type, d.key
         """,
         [key, scopes, min_corr]
       )
 
-    Enum.map(rows, fn [type, dkey, seen] ->
-      %{relation: type, object: strip_ns(dkey), object_kind: decode_key(dkey).kind, corroboration: seen}
+    rows
+    |> Enum.map(fn [type, dkey, seen, rel, age] ->
+      age = age || 0.0
+      %{
+        relation: type,
+        object: strip_ns(dkey),
+        object_kind: decode_key(dkey).kind,
+        corroboration: seen,
+        effective_reliability: Freshness.effective_reliability(rel || 0.0, age, type),
+        fresh?: Freshness.fresh?(age, type)
+      }
     end)
+    # S2 serve gate: drop too-stale facts (fail-closed — below-cutoff escalates, not served).
+    |> then(fn facts -> if freshness?, do: Enum.filter(facts, & &1.fresh?), else: facts end)
+    # rank freshest/most-reliable first, then corroboration
+    |> Enum.sort_by(&{&1.effective_reliability, &1.corroboration}, :desc)
+    |> Enum.map(&Map.delete(&1, :fresh?))
   end
 
   @spec query_terms(String.t()) :: [String.t()]

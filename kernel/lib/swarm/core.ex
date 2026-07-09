@@ -11,7 +11,7 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Activity, Consilium, Deliberation, Gate, Repo}
+  alias Swarm.{Activity, Consilium, Conversations, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
 
@@ -434,7 +434,7 @@ defmodule Swarm.Core do
   end
 
   defp deliberate(query, hits, base_status, scopes, profile, opts) do
-    grounding = build_grounding(profile, hits)
+    grounding = build_grounding(profile, hits) |> prepend_history(opts)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -465,20 +465,46 @@ defmodule Swarm.Core do
     if tier_gate_enabled?(opts) do
       # Candidate keys: the query's procedure-shaped entities FIRST (overlap-ranked — a
       # key-only procedure entity ranks poorly in content retrieval, so the gate would
-      # otherwise never see it; ADR-17 #2), then the retrieval hits as fallback. Order matters:
-      # the gate picks the best-matching procedure, so the targeted candidates lead.
-      candidate_keys = Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits))
-      # Network-neighborhood candidates (net:<kind>:<name> entities matching the query) for the
-      # :network serve path — probed directly, like procedure candidates (ADR-17 world-map).
-      network_keys = Swarm.Graph.Network.candidates(query, scopes)
+      # otherwise never see it; ADR-17 #2), then the retrieval hits, then any
+      # conversational `active_keys` (chat-thread epic 2 — a pronoun follow-up like
+      # "its dependencies?" has NO usable key of its own; the channel echoes back the
+      # previous turn's citation keys here instead of an LLM rewriting the query text).
+      # Order matters: the gate picks the best-matching candidate, so query-derived
+      # keys still lead — active_keys only fill in what the query text alone can't.
+      # No new no-leak surface: a bogus/foreign-scoped key here simply fails the
+      # gate's existing scope+evidence checks below, same as a wrong guess would.
+      candidate_keys =
+        Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits) ++ active_keys(opts))
+
+      # Neighborhood serve paths (network, who, …) are registry-driven (E2b): for each domain in
+      # `Domain.neighborhood_domains/0`, probe its OWN candidate source (net:<kind>:<name> via
+      # Network.candidates; who:<kind>:<name> — persons by profile content, teams/roles/sites by key
+      # — via WhoMap.candidates), and read its serve flag + corroboration floor from config. A new
+      # neighborhood domain = one Domain registry entry, no wiring here. Flat `<key>_*` opts are what
+      # Coverage.describe/3 expects.
+      #
+      # `active_keys(opts)` is unioned into EVERY domain's own candidates here too (chat-thread
+      # epic 2, live-verify finding): the generic `candidate_keys` above feeds Procedure/hit_keys
+      # only — a neighborhood domain reads its candidates from THIS opt, a wholly separate pool,
+      # so without this union a pronoun follow-up ("who manages it?") that matches a domain's cue
+      # but carries no key of its own would never see the previous turn's key at all. A
+      # wrong-domain/foreign key here is harmless: Stage 1 (`Coverage.validate/1`) only mints a
+      # `Validated` when the key actually resolves to real neighborhood facts IN that domain.
+      neighborhood_opts =
+        Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
+          [
+            {:"#{dom.key}_keys",
+             Enum.uniq(dom.candidates_fun.(query, scopes) ++ active_keys(opts))},
+            {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
+            {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
+          ]
+        end)
 
       descriptor =
-        WorldMap.Coverage.describe(query, scopes,
-          candidate_keys: candidate_keys,
-          network_keys: network_keys,
-          network_serve: network_serve?(opts),
-          network_min_corroboration: network_min_corroboration(),
-          profile: profile
+        WorldMap.Coverage.describe(
+          query,
+          scopes,
+          [candidate_keys: candidate_keys, profile: profile] ++ neighborhood_opts
         )
 
       run_gate(descriptor, opts)
@@ -524,22 +550,42 @@ defmodule Swarm.Core do
     end
   end
 
-  # Map the gate's evidence-closed answer onto the Core `answer()` shape. Citations are
-  # the gate's OPAQUE labels (no source identity) wrapped as `citation()`.
+  # Map the gate's evidence-closed answer onto the Core `answer()` shape. The gate's own
+  # `a.citations` are OPAQUE audit labels (e.g. "corroboration:1" — no source identity);
+  # `a.key`, when present, is the real served entity/subject key. Both become `citation()`s
+  # so a channel's `active_keys` echo (chat-thread epic 2) has something usable to carry
+  # forward — without `a.key` here, a pronoun follow-up right after a structured-served
+  # turn would only see "corroboration:1" and could never resolve back to the entity.
   @spec structured_answer(WorldMap.Gate.Answer.t()) :: answer()
   defp structured_answer(%WorldMap.Gate.Answer{} = a) do
+    key_citation = if a.key, do: [%{source: "structured", ref: a.key, confidence: 1.0}], else: []
+
     %{
       answer: a.text,
       confidence: 0.85,
       tier: "structured",
       status: :found,
-      citations: Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
+      citations:
+        key_citation ++ Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
     }
   end
 
   # Candidate entity keys to probe for procedures — the retrieval hits' keys, bounded.
   @spec hit_keys([hit()]) :: [String.t()]
   defp hit_keys(hits), do: hits |> Enum.map(& &1.key) |> Enum.uniq() |> Enum.take(8)
+
+  # Client-supplied (chat-thread epic 2) — sanitize before folding into the gate's
+  # candidate list: drop blanks, cap the count (a buggy/abusive channel sending an
+  # unbounded list is just noise here, never a correctness or leak issue, but still
+  # bounded on principle).
+  @spec active_keys(keyword()) :: [String.t()]
+  defp active_keys(opts) do
+    opts
+    |> Keyword.get(:active_keys, [])
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> Enum.take(20)
+  end
 
   # OFF by default (config `:swarm, :tier_gate, enabled: true`); `opts[:tier_gate]`
   # overrides per-call (tests, shadow measurement). Until the go/no-go council, wiring
@@ -549,23 +595,21 @@ defmodule Swarm.Core do
     Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
   end
 
-  # The :network serve path is OFF by default (like entity_serve) — it needs its own calibration
-  # (`Gate.NetworkCalibration`, false-serve ~0) before opting in. Config `:swarm, :tier_gate,
-  # network_serve: true` or `opts[:network_serve]` enables it.
-  @spec network_serve?(keyword()) :: boolean()
-  defp network_serve?(opts) do
-    Keyword.get(
-      opts,
-      :network_serve,
-      Application.get_env(:swarm, :tier_gate, [])[:network_serve] == true
-    )
+  # A neighborhood domain's serve flag. Each path is OFF by default (like entity_serve) until it is
+  # calibrated (its own `Gate.*Calibration`, false-serve ~0). `opts[<domain>_serve]` (tests / shadow
+  # measurement) overrides the config `:swarm, :tier_gate, <domain>_serve` — e.g. `SWARM_TIER_GATE_
+  # NETWORK_SERVE`/`_WHO_SERVE` → the network/who domain's serve flag.
+  @spec neighborhood_serve?(WorldMap.Domain.t(), keyword()) :: boolean()
+  defp neighborhood_serve?(%WorldMap.Domain{serve_opt: serve_opt}, opts) do
+    Keyword.get(opts, serve_opt, Application.get_env(:swarm, :tier_gate, [])[serve_opt] == true)
   end
 
-  # Corroboration floor for the network serve path (config, default 2 = safe/narrow; staging runs
-  # 1 = wider, entail-veto-guarded). See `Coverage.describe`.
-  @spec network_min_corroboration() :: pos_integer()
-  defp network_min_corroboration do
-    Application.get_env(:swarm, :tier_gate, [])[:network_min_corroboration] || 2
+  # A neighborhood domain's corroboration floor: config `:swarm, :tier_gate, <domain>_min_corroboration`
+  # overrides the registry default (network 2 = safe/narrow, staging runs 1 = wider entail-veto-guarded;
+  # who is authoritative at 1). See `Coverage.describe`.
+  @spec neighborhood_min_corroboration(WorldMap.Domain.t()) :: pos_integer()
+  defp neighborhood_min_corroboration(%WorldMap.Domain{key: key, min_corroboration: default}) do
+    Application.get_env(:swarm, :tier_gate, [])[:"#{key}_min_corroboration"] || default
   end
 
   @spec log_gate(WorldMap.Gate.Audit.t()) :: :ok
@@ -684,6 +728,60 @@ defmodule Swarm.Core do
       |> String.slice(0, @grounding_char_budget)
 
     [facts_block, passages] |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
+  end
+
+  # Chat-thread epic 2: fold recent conversation history into the grounding, ONLY
+  # on the escalate path (an LLM call is already being paid for; the marginal
+  # prompt cost is near-free) and ONLY when it's safe to fetch — reuses the ADR-16
+  # `Conversations` owner-enforcement predicate exactly, so a `viewer` that doesn't
+  # own `conversation_id` (or isn't a real actor uuid — the legacy dual-accept
+  # fallback can hand us a plaintext login here) silently yields no history, never
+  # an error or a leak. No new no-leak surface: this is the SAME check
+  # `GetConversation` already ship-gate-tests.
+  @history_turns 6
+  @spec prepend_history(String.t(), keyword()) :: String.t()
+  defp prepend_history(grounding, opts) do
+    case history_block(opts) do
+      "" -> grounding
+      history -> Enum.join([history, grounding] |> Enum.reject(&(&1 == "")), "\n\n")
+    end
+  end
+
+  # NOTE: deliberately NOT `Ecto.UUID.cast/1` — it accepts any 16-BYTE string as
+  # raw UUID bytes (not just canonical `8-4-4-4-12` hex-dash form), so a plaintext
+  # login that happens to be exactly 16 bytes (e.g. "not-a-uuid-login") casts
+  # "successfully" and then crashes `Ecto.UUID.dump!/1` downstream in
+  # `Conversations` — caught by this epic's own tests. A real actor uuid is
+  # ALWAYS canonical form, so a strict format regex is both correct and safe here.
+  # (The pre-existing `Conversations.valid_uuid?/1` and `Server.guarded_target/2`
+  # share this same cast-based fragility — carded separately, not fixed here:
+  # board/todo/conversations-uuid-cast-fragility.md — out of this epic's scope.)
+  @uuid_re ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  @spec valid_actor_uuid?(term()) :: boolean()
+  defp valid_actor_uuid?(s), do: is_binary(s) and Regex.match?(@uuid_re, s)
+
+  @spec history_block(keyword()) :: String.t()
+  defp history_block(opts) do
+    conversation_id = Keyword.get(opts, :conversation_id)
+    viewer = Keyword.get(opts, :viewer, "")
+
+    # `verified?` gate (dual-mode-history-leak): fold a conversation's turns ONLY when the viewer was
+    # DERIVED from a verified assertion. Under `:dual`, `viewer` can be an attacker-chosen plaintext
+    # uuid that satisfies the owner predicate — so requiring verified identity here keeps a foreign
+    # conversation unreachable even if `:dual` is enabled (defense-in-depth behind the `:strict` default).
+    with true <- is_binary(conversation_id),
+         true <- Keyword.get(opts, :verified, false),
+         true <- valid_actor_uuid?(viewer),
+         {:ok, %{messages: messages}} <- Conversations.get(viewer, conversation_id) do
+      text =
+        messages
+        |> Enum.take(-@history_turns)
+        |> Enum.map_join("\n", &"#{&1.role}: #{&1.body}")
+
+      if text == "", do: "", else: "## recent conversation\n" <> text
+    else
+      _ -> ""
+    end
   end
 
   @spec hit_grounding(hit()) :: String.t()

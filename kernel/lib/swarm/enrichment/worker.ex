@@ -140,13 +140,13 @@ defmodule Swarm.Enrichment.Worker do
             # it never aborts the claim path. Its fresh has_step edge ids join the reconcile
             # kept-set so the same-source reconcile does not re-delete them.
             procedures = Procedures.extract(body, gen_fun: gen, model: model)
-            step_ids = Procedures.write(node, procedures, provenance(node.id))
+            step_ids = Procedures.write(node, procedures, provenance(node.id), page_lineage(node.id))
 
             # Network-map skeleton (ADR-17 world-map): a THIRD gated additive pass — like the
             # procedure pass it never aborts the claim path, and its fresh edge ids join the
             # reconcile kept-set so the same-source reconcile does not re-delete them.
             net_facts = NetworkMap.extract(body, gen_fun: gen, model: model)
-            net_ids = NetworkMap.write(node, net_facts, provenance(node.id))
+            net_ids = NetworkMap.write(node, net_facts, provenance(node.id), lineage: page_lineage(node.id))
 
             reconcile(node.id, edge_ids ++ step_ids ++ net_ids)
             Watermark.record(node.id, stamp.("fresh"))
@@ -220,6 +220,9 @@ defmodule Swarm.Enrichment.Worker do
         case Store.add_edge(subj, obj, pred, provenance,
                scope: node.scope,
                origin: origin,
+               # S1: all extractions of the SAME wiki page share one lineage → prose + table + api
+               # of page N count as ONE corroboration vote, not several (blackboard, unanimous).
+               lineage: page_lineage(node.id),
                evidence_kind: "claim",
                reliability: reliability,
                # Structural source ref (ADR-13/ADR-17 ghost-purge): when THIS source node
@@ -278,7 +281,7 @@ defmodule Swarm.Enrichment.Worker do
 
         Repo.query!(
           "UPDATE edge e SET seen_count = " <>
-            "(SELECT count(DISTINCT coalesce(origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
+            "(SELECT count(DISTINCT coalesce(lineage, origin, provenance)) FROM edge_provenance ep WHERE ep.edge_id = e.id) " <>
             "WHERE e.id = ANY($1::bigint[])",
           [stale]
         )
@@ -293,6 +296,11 @@ defmodule Swarm.Enrichment.Worker do
 
   @spec provenance(integer()) :: String.t()
   defp provenance(node_id), do: "enrich:node:#{node_id}"
+
+  # S1 upstream lineage: the corpus page a fact was extracted from. Every extraction pass over the
+  # SAME page (prose claims, procedures, network facts) shares it, so they corroborate as ONE vote;
+  # a DIFFERENT page is an independent vote. (Blackboard 2026-07-07, codex + gemini unanimous.)
+  defp page_lineage(node_id), do: "wiki:page:#{node_id}"
 
   # Robust parse (spike lesson): slice first '{' .. last '}' so stray prose/think
   # tokens don't break decode; keep only well-formed string triples.
