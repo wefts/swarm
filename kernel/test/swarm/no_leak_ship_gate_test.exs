@@ -322,6 +322,11 @@ defmodule Swarm.NoLeakShipGateTest do
     test "a plaintext dual-mode caller cannot REQUEST private via wire scopes" do
       # Under :dual a legacy plaintext viewer is trusted — but the wire scopes are
       # clamped (council codex): asking for private yields a context without it.
+      # `:dual` is now an explicit opt-in (default flipped to :strict, dual-mode-history-leak).
+      prev = Application.get_env(:swarm, :core_api)
+      Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
+      on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
+
       assert {:ok, ctx} = Auth.legacy_context("mallory", ["group", "private"])
       refute "private" in ctx.scopes
 

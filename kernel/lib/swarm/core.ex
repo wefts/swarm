@@ -765,7 +765,12 @@ defmodule Swarm.Core do
     conversation_id = Keyword.get(opts, :conversation_id)
     viewer = Keyword.get(opts, :viewer, "")
 
+    # `verified?` gate (dual-mode-history-leak): fold a conversation's turns ONLY when the viewer was
+    # DERIVED from a verified assertion. Under `:dual`, `viewer` can be an attacker-chosen plaintext
+    # uuid that satisfies the owner predicate — so requiring verified identity here keeps a foreign
+    # conversation unreachable even if `:dual` is enabled (defense-in-depth behind the `:strict` default).
     with true <- is_binary(conversation_id),
+         true <- Keyword.get(opts, :verified, false),
          true <- valid_actor_uuid?(viewer),
          {:ok, %{messages: messages}} <- Conversations.get(viewer, conversation_id) do
       text =

@@ -576,6 +576,16 @@ defmodule Swarm.CoreIdentityRpcTest do
   end
 
   describe "dual-accept auth seam (legacy RPCs keep working)" do
+    # `:dual` is now an explicit migration opt-in (the product default flipped to `:strict`,
+    # dual-mode-history-leak). This block exercises the dual seam, so set it here; the `:strict`
+    # case below overrides it for its own assertion.
+    setup do
+      prev = Application.get_env(:swarm, :core_api)
+      Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
+      on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
+      :ok
+    end
+
     test "legacy_context in :dual passes a plaintext viewer through unchanged" do
       assert {:ok, %{viewer: "alice", scopes: ["group"]}} =
                Auth.legacy_context("alice", ["group"])

@@ -139,8 +139,11 @@ end
 # 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
 # the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
 case System.get_env("SWARM_TIER_GATE_NETWORK_MIN_CORROB") do
-  n when is_binary(n) and n != "" -> config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
-  _ -> :ok
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
+
+  _ ->
+    :ok
 end
 
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
@@ -160,9 +163,10 @@ if secret = System.get_env("SWARM_ACTOR_SECRET") do
   config :swarm, :actor, secret: secret
 end
 
-# Core API auth mode (ADR-16 D9). `SWARM_AUTH_MODE=strict` flips the legacy RPCs to
-# reject unsigned identity — the post-6b hard cutover, done WITH the channel change.
-# Unset ⇒ the product default (`:dual`) stands. Merges into :core_api.
+# Core API auth mode (ADR-16 D9). `SWARM_AUTH_MODE` overrides the compiled default.
+# Unset ⇒ the product default (`:strict`, config.exs) stands — verified identity only.
+# Set `dual`/`legacy` ONLY as an explicit migration opt-in (dual makes `viewer` forgeable
+# — see `dual-mode-history-leak`). Merges into :core_api.
 case System.get_env("SWARM_AUTH_MODE") do
   m when m in ["dual", "strict", "legacy"] ->
     config :swarm, :core_api, auth_mode: String.to_existing_atom(m)

@@ -45,12 +45,13 @@ defmodule Swarm.Core.Server do
 
   @spec ask(Swarm.Core.V1.AskRequest.t(), GRPC.Server.Stream.t()) :: AskResponse.t()
   def ask(req, _stream) do
-    {viewer, scopes} = ctx(req.viewer, req.scopes)
+    {viewer, scopes, verified?} = ctx(req.viewer, req.scopes)
 
     a =
       Core.ask(req.query,
         scopes: scopes,
         viewer: viewer,
+        verified: verified?,
         active_keys: req.active_keys,
         conversation_id: nz(req.conversation_id)
       )
@@ -108,7 +109,7 @@ defmodule Swarm.Core.Server do
     # SearchRequest now carries an optional signed `assertion` (ADR-16): dual-accept —
     # derive scopes when signed, else use the wire scopes (legacy). KbStatus stays
     # global (no scope filtering), so it needs none.
-    {_viewer, scopes} = ctx(req.assertion, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.assertion, req.scopes)
     limit = if req.limit == 0, do: 10, else: req.limit
     hits = Core.search(req.query, scopes, limit: limit)
 
@@ -120,7 +121,7 @@ defmodule Swarm.Core.Server do
   @spec deliberation(Swarm.Core.V1.DeliberationRequest.t(), GRPC.Server.Stream.t()) ::
           DeliberationResponse.t()
   def deliberation(req, _stream) do
-    {viewer, scopes} = ctx(req.viewer, req.scopes)
+    {viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     case Core.deliberation(req.ask_ref, viewer, scopes) do
       {:ok, d} ->
@@ -145,7 +146,7 @@ defmodule Swarm.Core.Server do
   @spec neighborhood(Swarm.Core.V1.NeighborhoodRequest.t(), GRPC.Server.Stream.t()) ::
           NeighborhoodResponse.t()
   def neighborhood(req, _stream) do
-    {_viewer, scopes} = ctx(req.viewer, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     opts = [
       scopes: scopes,
@@ -194,7 +195,7 @@ defmodule Swarm.Core.Server do
   @spec activity_feed(Swarm.Core.V1.ActivityFeedRequest.t(), GRPC.Server.Stream.t()) ::
           ActivityFeedResponse.t()
   def activity_feed(req, _stream) do
-    {_viewer, scopes} = ctx(req.viewer, req.scopes)
+    {_viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
 
     page =
       Core.activity_feed(
@@ -606,11 +607,11 @@ defmodule Swarm.Core.Server do
 
   # Legacy-RPC context: dual-accept (verify a signed viewer, else trust plaintext).
   # `:unauthenticated` (strict mode, no assertion) ⇒ anonymous public — fail closed.
-  @spec ctx(String.t(), [String.t()]) :: {String.t(), [String.t()]}
+  @spec ctx(String.t(), [String.t()]) :: {String.t(), [String.t()], boolean()}
   defp ctx(viewer, wire_scopes) do
     case Auth.legacy_context(viewer, wire_scopes) do
-      {:ok, c} -> {c.viewer, c.scopes}
-      {:error, :unauthenticated} -> {"", ["public"]}
+      {:ok, c} -> {c.viewer, c.scopes, c.verified?}
+      {:error, :unauthenticated} -> {"", ["public"], false}
     end
   end
 
