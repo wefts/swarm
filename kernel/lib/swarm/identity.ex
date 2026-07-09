@@ -925,8 +925,15 @@ defmodule Swarm.Identity do
 
   @doc """
   The scopes a user is granted: the **authenticated baseline `public`** plus the
-  scopes **derived** from their groups via `group_scope_map` (unioned, deduped).
-  Default-deny holds for everything ABOVE public: unmapped groups add nothing.
+  configured authenticated baseline group's scopes plus the scopes **derived**
+  from their groups via `group_scope_map` (unioned, deduped). Default-deny holds
+  for everything ABOVE the baseline: unmapped groups add nothing.
+
+  The baseline group id is read from `SWARM_AUTH_BASELINE_GROUP` and defaults to
+  `"everyone"`. It applies to every authenticated actor, even without group
+  membership, and confers SCOPES only — never a role or capability. If the
+  baseline group has no scope-map row, it contributes `[]` for backward
+  compatibility.
 
   The baseline restores the channel's documented, council-reviewed semantic
   ("ALWAYS includes public; groups add more" — `web_channel/auth.scopes_for`)
@@ -956,7 +963,24 @@ defmodule Swarm.Identity do
       |> List.flatten()
       |> Enum.reject(&(&1 == "private"))
 
-    Enum.uniq(["public" | derived])
+    Enum.uniq(["public"] ++ baseline_scopes() ++ derived)
+    |> Enum.reject(&(&1 == "private"))
+  end
+
+  @spec baseline_scopes() :: [String.t()]
+  defp baseline_scopes do
+    group_id = System.get_env("SWARM_AUTH_BASELINE_GROUP", "everyone")
+
+    Repo.query!(
+      """
+      SELECT DISTINCT unnest(scopes) AS scope
+        FROM group_scope_map
+       WHERE group_id = $1
+      """,
+      [group_id]
+    ).rows
+    |> List.flatten()
+    |> Enum.reject(&(&1 == "private"))
   end
 
   @doc """

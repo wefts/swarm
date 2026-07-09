@@ -51,8 +51,12 @@ defmodule Swarm.Scope.PerSourceScopeMatrixTest do
       {:ok, everyone_user} = Identity.upsert_from_claims(claims("everyone-user", []))
       {:ok, nobody_user} = Identity.upsert_from_claims(claims("nobody-user", []))
 
-      :ok = Identity.put_group_scopes("everyone", ["src:wiki", "src:ldap"])
-      :ok = Identity.add_to_group(everyone_user.id, "everyone")
+      # A MAPPED cohort (NOT the "everyone" baseline group — this test proves per-membership
+      # isolation: a member sees the cohort's scopes, a non-member sees only public). Using
+      # "everyone" here would collide with the authenticated-baseline (SWARM_AUTH_BASELINE_GROUP),
+      # which every authenticated actor gets regardless of membership.
+      :ok = Identity.put_group_scopes("wl-cohort", ["src:wiki", "src:ldap"])
+      :ok = Identity.add_to_group(everyone_user.id, "wl-cohort")
 
       assert Identity.scopes_for(nobody_user.id) == ["public"]
 

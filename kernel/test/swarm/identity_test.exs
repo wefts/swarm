@@ -225,6 +225,84 @@ defmodule Swarm.IdentityTest do
       assert Identity.scopes_for(u.id) == ["public"]
     end
 
+    test "the everyone baseline applies without user_group membership" do
+      :ok = Identity.create_group("everyone", "Everyone", nil)
+      :ok = Identity.put_group_scopes("everyone", ["src:wiki", "src:ldap"])
+
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-baseline-0001", login: "baseline1", groups: []})
+        )
+
+      assert Identity.groups_for(u.id) == []
+      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:ldap", "src:wiki"]
+    end
+
+    test "the everyone baseline is unioned with explicit group additions" do
+      :ok = Identity.create_group("everyone", "Everyone", nil)
+      :ok = Identity.put_group_scopes("everyone", ["src:wiki", "src:ldap"])
+      :ok = Identity.create_group("confluence", "Confluence", nil)
+      :ok = Identity.put_group_scopes("confluence", ["src:confluence"])
+
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-baseline-0002", login: "baseline2", groups: []})
+        )
+
+      :ok = Identity.add_to_group(u.id, "confluence")
+
+      assert Enum.sort(Identity.scopes_for(u.id)) == [
+               "public",
+               "src:confluence",
+               "src:ldap",
+               "src:wiki"
+             ]
+    end
+
+    test "the everyone baseline confers scopes only, never roles or capabilities" do
+      :ok = Identity.create_group("everyone", "Everyone", nil)
+      :ok = Identity.put_group_scopes("everyone", ["src:wiki"])
+      :ok = Identity.set_group_role("everyone", "admin")
+
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-baseline-0003", login: "baseline3", groups: []})
+        )
+
+      assert Identity.groups_for(u.id) == []
+      assert Identity.roles_for(u.id) == []
+      assert Identity.caps_for(u.id) == []
+      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
+    end
+
+    test "private never leaks through the everyone baseline" do
+      :ok = Identity.create_group("everyone", "Everyone", nil)
+      assert Identity.put_group_scopes("everyone", ["private"]) == {:error, :ungrantable_scope}
+      :ok = Identity.put_group_scopes("everyone", ["public"])
+
+      Swarm.Repo.query!(
+        "UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1",
+        ["everyone", ["public", "private"]]
+      )
+
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-baseline-0004", login: "baseline4", groups: []})
+        )
+
+      assert Identity.scopes_for(u.id) == ["public"]
+    end
+
+    test "missing everyone baseline group preserves the no-group public behavior" do
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-baseline-0005", login: "baseline5", groups: []})
+        )
+
+      assert Identity.groups_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
+    end
+
     test "a group's mapped scopes are conferred, unioned across groups, deduped" do
       Identity.put_group_scopes("staff", ["public"])
       Identity.put_group_scopes("nebula", ["public", "group"])
