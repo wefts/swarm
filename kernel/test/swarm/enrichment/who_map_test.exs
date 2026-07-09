@@ -303,19 +303,21 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert WhoMap.display_subject("who:team:platform") == "platform"
     end
 
-    test "candidates: a surname doesn't get hijacked by a short site code (boremchuk ≠ site 'bor')" do
+    test "candidates: a surname doesn't get hijacked by a short site code (dupont ≠ site 'dup')" do
+      # SYNTHETIC fixture (leak-free policy — sibling who_calibration.ex): a surname that is a
+      # superstring of a short site code, to prove the site code doesn't prefix-grab the surname.
       a = anchor()
-      WhoMap.write(a, [fact("sboremchuk", "person", "located_at", "Bor", "site")], "p")
+      WhoMap.write(a, [fact("jdupont", "person", "located_at", "Dup", "site")], "p")
 
       WhoMap.write_profile(
-        %{"uid" => "sboremchuk", "cn" => "Serhii Boremchuk", "sn" => "Boremchuk"},
+        %{"uid" => "jdupont", "cn" => "Jean Dupont", "sn" => "Dupont"},
         "p"
       )
 
-      cands = WhoMap.candidates("who is boremchuk", [@who_scope])
-      # the 3-char site 'bor' must NOT prefix-grab the 9-char surname; the person resolves
-      refute "who:site:bor" in cands
-      assert "who:person:sboremchuk" in cands
+      cands = WhoMap.candidates("who is dupont", [@who_scope])
+      # the 3-char site 'dup' must NOT prefix-grab the 6-char surname; the person resolves
+      refute "who:site:dup" in cands
+      assert "who:person:jdupont" in cands
     end
 
     test "candidates/2 resolves a person by profile NAME and a team by key" do
