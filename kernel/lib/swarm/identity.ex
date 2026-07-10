@@ -321,12 +321,19 @@ defmodule Swarm.Identity do
           [cast_to_uuid(id), login]
         )
 
+        # ADR-19: superadmin is conferred by MEMBERSHIP in the Superuser group, NEVER a
+        # direct role grant. Ensure the group + its superadmin binding, then add this user
+        # (fresh-boot bootstrap — the migration handles existing deployments).
         Repo.query!(
-          """
-          INSERT INTO role_grant (user_id, role, source)
-          VALUES ($1, 'superadmin', 'direct')
-          ON CONFLICT (user_id, role, source) DO NOTHING
-          """,
+          "INSERT INTO access_group (id, source, name) VALUES ('superuser', 'local', 'Superuser') ON CONFLICT (id) DO NOTHING"
+        )
+
+        Repo.query!(
+          "INSERT INTO group_role (group_id, role) VALUES ('superuser', 'superadmin') ON CONFLICT (group_id, role) DO NOTHING"
+        )
+
+        Repo.query!(
+          "INSERT INTO user_group (user_id, group_id, source) VALUES ($1, 'superuser', 'local') ON CONFLICT (user_id, group_id) DO NOTHING",
           [cast_to_uuid(id)]
         )
 

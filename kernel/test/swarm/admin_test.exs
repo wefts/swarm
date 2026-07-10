@@ -1,10 +1,10 @@
 defmodule Swarm.AdminTest do
   @moduledoc """
-  Workspace ADR-16 step 5 — access grants + user management, kernel-owned,
-  admin-mutable, audited. Capabilities (derived from role_grant, default-deny):
-  admin = {manage_access, invite_users, manage_users}; superadmin = all +
-  read_any_conversation. Role grants are privilege management → superadmin-only.
-  admin does NOT get chat-read (step 4) nor another user's own KB.
+  Workspace ADR-16 step 5 + ADR-19 — access grants + user management, kernel-owned,
+  admin-mutable, audited. Capabilities (default-deny): admin = {manage_access,
+  invite_users, manage_users}; superadmin = all + read_any_conversation. ADR-19:
+  roles are GROUP-derived (per-user role grants forbidden); superadmin only via the
+  Superuser group (local-only); admin does NOT get chat-read nor another user's own KB.
   """
   use Swarm.IdentityCase, async: false
 
@@ -116,8 +116,12 @@ defmodule Swarm.AdminTest do
 
     test "superadmin role binds ONLY to the Superuser group", %{root: root} do
       :ok = Admin.create_group(root, "ops", "Ops", nil)
-      assert {:error, :superadmin_superuser_only} = Admin.set_group_role(root, "ops", "superadmin")
-      refute "superadmin" in (Identity.list_groups() |> Enum.find(&(&1.id == "ops"))).granted_roles
+
+      assert {:error, :superadmin_superuser_only} =
+               Admin.set_group_role(root, "ops", "superadmin")
+
+      refute "superadmin" in (Identity.list_groups()
+                              |> Enum.find(&(&1.id == "ops"))).granted_roles
 
       su = Identity.list_groups() |> Enum.find(&(&1.id == "superuser"))
       assert "superadmin" in su.granted_roles
@@ -138,6 +142,25 @@ defmodule Swarm.AdminTest do
       assert Admin.set_group_scopes(admin.id, "superuser", ["src:wiki"]) == :not_authorized
       refute "superuser" in Identity.groups_for(loc.id)
       assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
+    end
+
+    test "seed_superadmin confers superadmin via Superuser membership, not a direct grant" do
+      id = Identity.uuid7()
+
+      {:ok, _} =
+        Identity.seed_superadmin(%{
+          id: id,
+          login: "seedcheck-#{System.unique_integer([:positive])}"
+        })
+
+      assert "superadmin" in Identity.roles_for(id)
+      assert "superuser" in Identity.groups_for(id)
+
+      assert [[0]] =
+               Swarm.Repo.query!(
+                 "SELECT count(*)::int FROM role_grant WHERE user_id = $1",
+                 [Ecto.UUID.dump!(id)]
+               ).rows
     end
 
     test "an SSO group cannot map into Superuser", %{root: root} do
