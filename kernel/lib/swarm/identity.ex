@@ -805,6 +805,42 @@ defmodule Swarm.Identity do
     end)
   end
 
+  @doc """
+  One group with its view (as in `list_groups/0`) plus its member list
+  (login + providers + status, tombstones excluded, login-ordered). `nil` when the
+  group is unknown. ADR-19: backs the admin group detail page.
+  """
+  @spec get_group(String.t()) :: %{group: map(), members: [map()]} | nil
+  def get_group(id) do
+    case Enum.find(list_groups(), &(&1.id == id)) do
+      nil -> nil
+      view -> %{group: view, members: group_members(id)}
+    end
+  end
+
+  @spec group_members(String.t()) :: [map()]
+  defp group_members(id) do
+    Repo.query!(
+      """
+      SELECT u.id::text, u.login, u.status,
+             coalesce(
+               array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL),
+               '{}'::text[]
+             )
+        FROM user_group ug
+        JOIN app_user u ON u.id = ug.user_id
+        LEFT JOIN identity_link l ON l.user_id = u.id
+       WHERE ug.group_id = $1 AND u.status <> 'deleted'
+       GROUP BY u.id, u.login, u.status
+       ORDER BY u.login
+      """,
+      [id]
+    ).rows
+    |> Enum.map(fn [uid, login, status, providers] ->
+      %{user_id: uid, login: login, status: status, providers: providers}
+    end)
+  end
+
   @known_roles ~w(user admin superadmin)
 
   @doc """

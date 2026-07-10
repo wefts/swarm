@@ -12,6 +12,7 @@ defmodule Swarm.AdminTest do
   alias Swarm.Core.Server
 
   alias Swarm.Core.V1.{
+    GetGroupRequest,
     ListGroupsRequest,
     ListSsoMapRequest,
     ManageGroupRequest,
@@ -539,6 +540,50 @@ defmodule Swarm.AdminTest do
       rows = Audit.for_actor(plain.id)
       assert Enum.any?(rows, &(&1.action == "list_sso_map" and &1.decision == "denied"))
       assert Enum.any?(rows, &(&1.action == "put_sso_map" and &1.decision == "denied"))
+    end
+  end
+
+  describe "get_group — group detail with members (ADR-19)" do
+    test "returns the group view + members (login + providers), login-ordered, tombstones out" do
+      root = superadmin()
+      admin = admin_user("gg-admin")
+      token = assertion("gg-admin")
+      assert :ok = Admin.create_group(root, "platform", "Platform", nil)
+      assert :ok = Admin.set_group_scopes(root, "platform", ["src:wiki"])
+      zoe = user("zoe")
+      amy = user("amy")
+      assert :ok = Admin.grant_group(admin.id, zoe.id, "platform")
+      assert :ok = Admin.grant_group(admin.id, amy.id, "platform")
+
+      resp = Server.get_group(%GetGroupRequest{assertion: token, group_id: "platform"}, nil)
+      assert resp.status == :CALL_OK
+      assert resp.group.id == "platform"
+      assert resp.group.granted_scopes == ["src:wiki"]
+      assert Enum.map(resp.members, & &1.login) == ["amy", "zoe"]
+      assert "keycloak" in Enum.find(resp.members, &(&1.login == "amy")).providers
+    end
+
+    test "unknown group is NOT_FOUND" do
+      _admin = admin_user("gg-admin2")
+      token = assertion("gg-admin2")
+
+      assert Server.get_group(%GetGroupRequest{assertion: token, group_id: "nope"}, nil).status ==
+               :CALL_NOT_FOUND
+    end
+
+    test "a non-admin is NOT_AUTHORIZED and the denial is audited" do
+      root = superadmin()
+      assert :ok = Admin.create_group(root, "platform", "Platform", nil)
+      plain = user("gg-denied")
+      token = assertion("gg-denied")
+
+      assert Server.get_group(%GetGroupRequest{assertion: token, group_id: "platform"}, nil).status ==
+               :CALL_NOT_AUTHORIZED
+
+      assert Enum.any?(
+               Audit.for_actor(plain.id),
+               &(&1.action == "get_group" and &1.decision == "denied")
+             )
     end
   end
 

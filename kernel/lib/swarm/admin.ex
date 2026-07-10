@@ -245,6 +245,23 @@ defmodule Swarm.Admin do
     end
   end
 
+  @doc """
+  One group with its members for the admin console detail page. Same broad
+  admin-cap gate as the roster; successful reads are not audited, denied reads are.
+  """
+  @spec get_group(String.t(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
+  def get_group(actor_id, group_id) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+      case Identity.get_group(group_id) do
+        nil -> :not_found
+        view -> {:ok, view}
+      end
+    else
+      audit(actor_id, "get_group", "denied")
+      :not_authorized
+    end
+  end
+
   # ── manage_access — SSO group mapping ──────────────────────────────────
 
   @doc """

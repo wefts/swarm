@@ -20,8 +20,11 @@ defmodule Swarm.Core.Server do
     DeliberationResponse,
     EdgeView,
     GetConversationResponse,
+    GetGroupRequest,
+    GetGroupResponse,
     GetUserRequest,
     GetUserResponse,
+    GroupMember,
     GroupView,
     ListConversationsResponse,
     ListGroupsRequest,
@@ -420,6 +423,36 @@ defmodule Swarm.Core.Server do
           %ListRolesResponse{status: :CALL_NOT_AUTHORIZED}
       end
     end)
+  end
+
+  @spec get_group(GetGroupRequest.t(), GRPC.Server.Stream.t()) :: GetGroupResponse.t()
+  def get_group(req, _stream) do
+    with_actor(req.assertion, %GetGroupResponse{status: :CALL_UNAUTHENTICATED}, fn a ->
+      case Admin.get_group(a.uuid, req.group_id) do
+        {:ok, %{group: g, members: members}} ->
+          %GetGroupResponse{
+            status: :CALL_OK,
+            group: to_group_view(g),
+            members: Enum.map(members, &to_group_member/1)
+          }
+
+        :not_found ->
+          %GetGroupResponse{status: :CALL_NOT_FOUND}
+
+        :not_authorized ->
+          %GetGroupResponse{status: :CALL_NOT_AUTHORIZED}
+      end
+    end)
+  end
+
+  @spec to_group_member(map()) :: GroupMember.t()
+  defp to_group_member(m) do
+    %GroupMember{
+      user_id: m.user_id,
+      login: m.login,
+      providers: m.providers,
+      status: m.status
+    }
   end
 
   @spec to_group_view(map()) :: GroupView.t()
