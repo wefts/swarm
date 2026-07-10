@@ -599,7 +599,10 @@ defmodule Swarm.Identity do
         [cast_to_uuid(user_id)]
       )
 
+      # Kill ALL authority sources: direct grants AND group memberships (ADR-19 —
+      # roles/access are group-derived, so a disabled account must hold no group).
       Repo.query!("DELETE FROM role_grant WHERE user_id = $1", [cast_to_uuid(user_id)])
+      Repo.query!("DELETE FROM user_group WHERE user_id = $1", [cast_to_uuid(user_id)])
     end)
 
     :ok
@@ -685,12 +688,19 @@ defmodule Swarm.Identity do
       Repo.query!(
         """
         SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
-               coalesce(array_agg(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL), '{}'),
+               coalesce((
+                 SELECT array_agg(DISTINCT role ORDER BY role) FROM (
+                   SELECT role FROM role_grant WHERE user_id = u.id
+                   UNION
+                   SELECT gr.role FROM group_role gr
+                     JOIN user_group ug ON ug.group_id = gr.group_id
+                    WHERE ug.user_id = u.id
+                 ) rr
+               ), '{}'),
                coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
                coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}'),
                count(*) OVER()
           FROM app_user u
-          LEFT JOIN role_grant r ON r.user_id = u.id
           LEFT JOIN user_group g ON g.user_id = u.id
           LEFT JOIN identity_link l ON l.user_id = u.id
          WHERE ($1 OR u.status <> 'deleted')
@@ -852,13 +862,21 @@ defmodule Swarm.Identity do
           %{name: String.t(), capabilities: [String.t()], holder_count: non_neg_integer()}
         ]
   def list_roles do
+    # Holders = DISTINCT users who hold the role via a direct grant OR via group
+    # membership (ADR-19: roles are group-derived, so a group-conferred role must
+    # count). Mirrors `roles_for/1`.
     counts =
       Repo.query!(
         """
-        SELECT role, count(DISTINCT user_id)::int
-          FROM role_grant
-         WHERE role = ANY($1)
-         GROUP BY role
+        SELECT role, count(DISTINCT user_id)::int FROM (
+          SELECT role, user_id FROM role_grant WHERE role = ANY($1)
+          UNION
+          SELECT gr.role, ug.user_id
+            FROM group_role gr
+            JOIN user_group ug ON ug.group_id = gr.group_id
+           WHERE gr.role = ANY($1)
+        ) t
+        GROUP BY role
         """,
         [@known_roles]
       ).rows
@@ -1063,6 +1081,23 @@ defmodule Swarm.Identity do
     |> Enum.flat_map(&caps_for_role/1)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  @doc """
+  True iff the user has a `local` identity_link and NO non-local link (ADR-19: the
+  Superuser group takes local-provider users only). A user with any external IdP
+  link is not local-only.
+  """
+  @spec local_only?(String.t()) :: boolean()
+  def local_only?(user_id) do
+    providers =
+      Repo.query!(
+        "SELECT DISTINCT provider FROM identity_link WHERE user_id = $1",
+        [cast_to_uuid(user_id)]
+      ).rows
+      |> List.flatten()
+
+    "local" in providers and Enum.all?(providers, &(&1 == "local"))
   end
 
   @doc "The user linked to a `(provider, subject)` pair, or `nil`. The resolve lookup."

@@ -503,22 +503,13 @@ defmodule Swarm.Core.Server do
 
   @spec manage_access_op(String.t(), Swarm.Core.V1.ManageAccessRequest.t()) ::
           AdminActionResponse.t()
-  defp manage_access_op(actor_id, %{op: op, role: role} = req)
-       when op in [:GRANT_ROLE, :REVOKE_ROLE] do
-    # Validate the role vocab at the boundary (else the DB CHECK would 500). Council.
-    cond do
-      role not in ["admin", "superadmin"] ->
-        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+  # ADR-19: per-user role grants are forbidden (roles hang on groups). Admin audits
+  # the denial and returns {:error, :role_on_user_forbidden} → BAD_REQUEST.
+  defp manage_access_op(actor_id, %{op: :GRANT_ROLE} = req),
+    do: action_response(Admin.grant_role(actor_id, req.target_user_id, req.role))
 
-      op == :GRANT_ROLE ->
-        action_response(guarded_target(req.target_user_id, &Admin.grant_role(actor_id, &1, role)))
-
-      true ->
-        action_response(
-          guarded_target(req.target_user_id, &Admin.revoke_role(actor_id, &1, role))
-        )
-    end
-  end
+  defp manage_access_op(actor_id, %{op: :REVOKE_ROLE} = req),
+    do: action_response(Admin.revoke_role(actor_id, req.target_user_id, req.role))
 
   defp manage_access_op(actor_id, %{op: :GRANT_GROUP} = req),
     do:
@@ -755,7 +746,15 @@ defmodule Swarm.Core.Server do
           | :not_authorized
           | :not_found
           | :not_confirmed
-          | {:error, :ungrantable_scope | :invalid_role | :bad_group_id | :unknown_group}
+          | {:error,
+             :ungrantable_scope
+             | :invalid_role
+             | :bad_group_id
+             | :unknown_group
+             | :role_on_user_forbidden
+             | :superuser_local_only
+             | :sso_superuser_forbidden
+             | :superadmin_superuser_only}
         ) ::
           AdminActionResponse.t()
   defp action_response(:ok), do: %AdminActionResponse{status: :CALL_OK}
@@ -777,6 +776,17 @@ defmodule Swarm.Core.Server do
   # PUT of a mapping onto a non-existent group is a caller error (BE-1 SSO map).
   defp action_response({:error, :unknown_group}),
     do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
+
+  # ADR-19 policy rejections (forbidden per-user role / Superuser local-only /
+  # SSO→Superuser / superadmin-off-Superuser) are all caller errors.
+  defp action_response({:error, reason})
+       when reason in [
+              :role_on_user_forbidden,
+              :superuser_local_only,
+              :sso_superuser_forbidden,
+              :superadmin_superuser_only
+            ],
+       do: %AdminActionResponse{status: :CALL_BAD_REQUEST}
 
   @spec conv_view(map()) :: ConversationView.t()
   defp conv_view(c) do

@@ -17,71 +17,84 @@ defmodule Swarm.Admin do
 
   alias Swarm.{Audit, Identity}
 
+  # ADR-19: the Superuser group is the only holder of `superadmin`, takes local-only
+  # members, and every op on it is superadmin-gated (an admin must not touch it —
+  # otherwise an admin could add themselves and self-escalate).
+  @superuser_group "superuser"
+
   @type result :: :ok | :not_authorized
   @type scopes_result :: result() | {:error, :ungrantable_scope}
 
-  # ── role grants (superadmin-only) ──────────────────────────────────────
+  # ── role grants — FORBIDDEN per-user (ADR-19) ──────────────────────────
 
-  @doc "Grant a role to a user (superadmin-only). `role` ∈ admin|superadmin."
-  @spec grant_role(String.t(), String.t(), String.t()) :: result()
-  def grant_role(actor_id, target_id, role) do
-    gate_superadmin(actor_id, "grant", target_id, fn ->
-      Identity.grant_role(target_id, role, "direct", actor_id)
-    end)
+  @doc """
+  Per-user role grants are FORBIDDEN (ADR-19: roles attach to GROUPS, never people).
+  Always rejected + audited, for everyone including superadmin. A member's role comes
+  from the roles their groups confer.
+  """
+  @spec grant_role(String.t(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
+  def grant_role(actor_id, _target_id, _role) do
+    audit(actor_id, "grant_role", "denied", reason: "roles_on_groups_only")
+    {:error, :role_on_user_forbidden}
   end
 
-  @doc "Revoke a role from a user (superadmin-only)."
-  @spec revoke_role(String.t(), String.t(), String.t()) :: result()
-  def revoke_role(actor_id, target_id, role) do
-    gate_superadmin(actor_id, "revoke", target_id, fn ->
-      Identity.revoke_role(target_id, role)
-    end)
+  @doc "Per-user role revokes are FORBIDDEN (ADR-19); roles live on groups."
+  @spec revoke_role(String.t(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
+  def revoke_role(actor_id, _target_id, _role) do
+    audit(actor_id, "revoke_role", "denied", reason: "roles_on_groups_only")
+    {:error, :role_on_user_forbidden}
   end
 
   # ── manage_access — group membership + scope map ───────────────────────
 
-  @doc "Add a user to a group (`manage_access`)."
-  @spec grant_group(String.t(), String.t(), String.t()) :: result()
+  @doc """
+  Add a user to a group (`manage_access`; the Superuser group is superadmin-only
+  and local-members-only, ADR-19).
+  """
+  @spec grant_group(String.t(), String.t(), String.t()) ::
+          result() | {:error, :superuser_local_only}
   def grant_group(actor_id, target_id, group_id) do
-    gate_cap(actor_id, "manage_access", "grant", target_id, fn ->
-      Identity.add_to_group(target_id, group_id)
+    group_gate(actor_id, group_id, "grant", target_id, fn ->
+      if group_id == @superuser_group and not Identity.local_only?(target_id),
+        do: {:error, :superuser_local_only},
+        else: Identity.add_to_group(target_id, group_id)
     end)
   end
 
-  @doc "Remove a user from a group (`manage_access`)."
+  @doc "Remove a user from a group (`manage_access`; Superuser superadmin-only)."
   @spec revoke_group(String.t(), String.t(), String.t()) :: result()
   def revoke_group(actor_id, target_id, group_id) do
-    gate_cap(actor_id, "manage_access", "revoke", target_id, fn ->
+    group_gate(actor_id, group_id, "revoke", target_id, fn ->
       Identity.remove_from_group(target_id, group_id)
     end)
   end
 
   @doc """
-  Set a group's conferred scopes (`manage_access`). Scopes are validated at the
-  grant boundary (person-scope-leak-guard): Contract vocabulary only, `private`
-  hard-denied — a rejected grant writes nothing and is audited as denied.
+  Set a group's conferred scopes (`manage_access`; Superuser superadmin-only).
+  Scopes are validated at the grant boundary (person-scope-leak-guard): Contract
+  vocabulary only, `private` hard-denied — a rejected grant writes nothing.
   """
   @spec set_group_scopes(String.t(), String.t(), [String.t()]) :: scopes_result()
   def set_group_scopes(actor_id, group_id, scopes) do
-    gate_cap(actor_id, "manage_access", "grant", nil, fn ->
+    group_gate(actor_id, group_id, "grant", nil, fn ->
       Identity.put_group_scopes(group_id, scopes)
     end)
   end
 
   # ── manage_access — group lifecycle ─────────────────────────────────────
 
-  @doc "Create a first-class local group (`manage_access`)."
+  @doc "Create a first-class local group (`manage_access`; Superuser superadmin-only)."
   @spec create_group(String.t(), String.t(), String.t() | nil, String.t() | nil) :: result()
   def create_group(actor_id, id, name, desc) do
-    gate_cap(actor_id, "manage_access", "create_group", nil, fn ->
+    group_gate(actor_id, id, "create_group", nil, fn ->
       Identity.create_group(id, name, desc)
     end)
   end
 
-  @doc "Rename a first-class group (`manage_access`)."
+  @doc "Rename a first-class group (`manage_access`; Superuser superadmin-only)."
   @spec rename_group(String.t(), String.t(), String.t() | nil) :: result() | :not_found
   def rename_group(actor_id, id, name) do
-    case gate_cap(actor_id, "manage_access", "rename_group", nil, fn ->
+    case group_gate(actor_id, id, "rename_group", nil, fn ->
            Identity.rename_group(id, name)
          end) do
       {:error, :not_found} -> :not_found
@@ -89,10 +102,13 @@ defmodule Swarm.Admin do
     end
   end
 
-  @doc "Delete a first-class group (`manage_access`); non-empty groups require confirmation."
+  @doc """
+  Delete a first-class group (`manage_access`; Superuser superadmin-only); non-empty
+  groups require confirmation.
+  """
   @spec delete_group(String.t(), String.t(), boolean()) :: result() | :not_found | :not_confirmed
   def delete_group(actor_id, id, confirm) do
-    if "manage_access" in Identity.caps_for(actor_id) do
+    if group_authorized?(actor_id, id) do
       cond do
         not Identity.group_exists?(id) ->
           audit(actor_id, "delete_group", "denied")
@@ -115,13 +131,35 @@ defmodule Swarm.Admin do
 
   # ── group role grants (superadmin-only) ─────────────────────────────────
 
-  @doc "Set a role conferred by group membership (superadmin-only)."
+  @doc """
+  Set a role conferred by group membership (superadmin-only). `superadmin` is
+  bindable ONLY to the Superuser group (ADR-19); any other target is rejected.
+  """
   @spec set_group_role(String.t(), String.t(), String.t()) ::
-          result() | :not_found | {:error, :invalid_role}
+          result() | :not_found | {:error, :invalid_role | :superadmin_superuser_only}
   def set_group_role(actor_id, id, role) do
+    if superadmin_binding_ok?(id, role),
+      do: do_set_group_role(actor_id, id, role),
+      else: deny_superadmin_binding(actor_id)
+  end
+
+  # `superadmin` may be bound ONLY to the Superuser group (ADR-19); any other role
+  # binds anywhere. Extracted so `set_group_role` stays under the complexity/nesting gates.
+  @spec superadmin_binding_ok?(String.t(), String.t()) :: boolean()
+  defp superadmin_binding_ok?(id, role), do: role != "superadmin" or id == @superuser_group
+
+  @spec do_set_group_role(String.t(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_role}
+  defp do_set_group_role(actor_id, id, role) do
     gate_superadmin(actor_id, "set_group_role", nil, fn ->
       validated_group_role(id, role, fn -> Identity.set_group_role(id, role) end)
     end)
+  end
+
+  @spec deny_superadmin_binding(String.t()) :: {:error, :superadmin_superuser_only}
+  defp deny_superadmin_binding(actor_id) do
+    audit(actor_id, "set_group_role", "denied", reason: "superadmin_superuser_only")
+    {:error, :superadmin_superuser_only}
   end
 
   @doc "Clear a role conferred by group membership (superadmin-only)."
@@ -285,11 +323,17 @@ defmodule Swarm.Admin do
   a silently created mapping.
   """
   @spec put_sso_map(String.t(), String.t(), String.t(), String.t()) ::
-          result() | {:error, :unknown_group}
+          result() | {:error, :unknown_group | :sso_superuser_forbidden}
   def put_sso_map(actor_id, provider, incoming, our_group_id) do
-    gate_cap(actor_id, "manage_access", "put_sso_map", nil, fn ->
-      Identity.put_sso_group_map(provider, incoming, our_group_id)
-    end)
+    if our_group_id == @superuser_group do
+      # ADR-19: Superuser is local-only — an SSO group must never map into it.
+      audit(actor_id, "put_sso_map", "denied", reason: "sso_superuser_forbidden")
+      {:error, :sso_superuser_forbidden}
+    else
+      gate_cap(actor_id, "manage_access", "put_sso_map", nil, fn ->
+        Identity.put_sso_group_map(provider, incoming, our_group_id)
+      end)
+    end
   end
 
   @doc "Delete an SSO group mapping (`manage_access`)."
@@ -301,6 +345,28 @@ defmodule Swarm.Admin do
   end
 
   # ── gates ────────────────────────────────────────────────────────────────
+
+  # ADR-19: ops on the Superuser group are superadmin-only (an `admin` must not be able
+  # to touch it — else they could add themselves and inherit `superadmin`); every other
+  # group is `manage_access`.
+  @spec group_gate(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::
+          result() | {:error, atom()}
+  defp group_gate(actor_id, group_id, action, target, fun) do
+    if group_id == @superuser_group do
+      gate_superadmin(actor_id, action, target, fun)
+    else
+      gate_cap(actor_id, "manage_access", action, target, fun)
+    end
+  end
+
+  @spec group_authorized?(String.t(), String.t()) :: boolean()
+  defp group_authorized?(actor_id, group_id) do
+    if group_id == @superuser_group do
+      "superadmin" in Identity.roles_for(actor_id)
+    else
+      "manage_access" in Identity.caps_for(actor_id)
+    end
+  end
 
   @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::
           result() | {:error, atom()}

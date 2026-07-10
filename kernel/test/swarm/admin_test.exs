@@ -36,6 +36,18 @@ defmodule Swarm.AdminTest do
     u
   end
 
+  defp local_user(login) do
+    {:ok, u} =
+      Identity.upsert_from_claims(%{
+        provider: "local",
+        subject: "local-#{login}",
+        login: login,
+        groups: []
+      })
+
+    u
+  end
+
   defp superadmin do
     {:ok, u} =
       Identity.seed_superadmin(%{
@@ -49,9 +61,14 @@ defmodule Swarm.AdminTest do
   defp assertion(login), do: Actor.sign(%{"sub" => "sub-#{login}", "provider" => "keycloak"})
   defp local_assertion(login), do: Actor.sign(%{"sub" => login, "provider" => "local"})
 
+  # ADR-19: an admin is made by MEMBERSHIP in the admins group (which confers the
+  # admin role), never by a per-user role grant.
   defp admin_user(login) do
+    root = superadmin()
     u = user(login)
-    :ok = Admin.grant_role(superadmin(), u.id, "admin")
+    :ok = Admin.create_group(root, "admins", "Admins", nil)
+    :ok = Admin.set_group_role(root, "admins", "admin")
+    :ok = Admin.grant_group(root, u.id, "admins")
     u
   end
 
@@ -68,25 +85,69 @@ defmodule Swarm.AdminTest do
     )
   end
 
-  describe "role grants (superadmin-only — privilege management)" do
-    test "a superadmin grants and revokes the admin role, audited" do
+  describe "roles come from groups, never per-user (ADR-19)" do
+    test "per-user role grant/revoke is FORBIDDEN even for a superadmin — rejected, audited, nothing conferred" do
       root = superadmin()
       u = user("penta")
-      assert :ok = Admin.grant_role(root, u.id, "admin")
-      assert "admin" in Identity.roles_for(u.id)
-      assert Enum.any?(Audit.for_actor(root), &(&1.action == "grant"))
-
-      assert :ok = Admin.revoke_role(root, u.id, "admin")
+      assert {:error, :role_on_user_forbidden} = Admin.grant_role(root, u.id, "admin")
       refute "admin" in Identity.roles_for(u.id)
-      assert Enum.any?(Audit.for_actor(root), &(&1.action == "revoke"))
+
+      assert {:error, :role_on_user_forbidden} = Admin.revoke_role(root, u.id, "admin")
+
+      rows = Audit.for_actor(root)
+      assert Enum.any?(rows, &(&1.action == "grant_role" and &1.decision == "denied"))
+      assert Enum.any?(rows, &(&1.action == "revoke_role" and &1.decision == "denied"))
     end
 
-    test "a plain admin cannot grant roles (no self-escalation) — :not_authorized, audited" do
-      admin = admin_user("adm")
-      victim = user("victim")
-      assert Admin.grant_role(admin.id, victim.id, "superadmin") == :not_authorized
-      refute "superadmin" in Identity.roles_for(victim.id)
+    test "the admin role is conferred by membership in the admins group" do
+      admin = admin_user("adm-via-group")
+      assert "admin" in Identity.roles_for(admin.id)
+      assert "manage_access" in Identity.caps_for(admin.id)
+    end
+  end
+
+  describe "ADR-19 Superuser + role guards" do
+    setup do
+      root = superadmin()
+      :ok = Admin.create_group(root, "superuser", "Superuser", nil)
+      :ok = Admin.set_group_role(root, "superuser", "superadmin")
+      %{root: root}
+    end
+
+    test "superadmin role binds ONLY to the Superuser group", %{root: root} do
+      :ok = Admin.create_group(root, "ops", "Ops", nil)
+      assert {:error, :superadmin_superuser_only} = Admin.set_group_role(root, "ops", "superadmin")
+      refute "superadmin" in (Identity.list_groups() |> Enum.find(&(&1.id == "ops"))).granted_roles
+
+      su = Identity.list_groups() |> Enum.find(&(&1.id == "superuser"))
+      assert "superadmin" in su.granted_roles
+    end
+
+    test "Superuser takes local-provider users only", %{root: root} do
+      loc = local_user("localadmin")
+      kc = user("kcadmin")
+      assert :ok = Admin.grant_group(root, loc.id, "superuser")
+      assert {:error, :superuser_local_only} = Admin.grant_group(root, kc.id, "superuser")
+      refute "superuser" in Identity.groups_for(kc.id)
+    end
+
+    test "an admin (not superadmin) cannot touch the Superuser group", %{root: _root} do
+      admin = admin_user("plain-admin")
+      loc = local_user("target")
+      assert Admin.grant_group(admin.id, loc.id, "superuser") == :not_authorized
+      assert Admin.set_group_scopes(admin.id, "superuser", ["src:wiki"]) == :not_authorized
+      refute "superuser" in Identity.groups_for(loc.id)
       assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
+    end
+
+    test "an SSO group cannot map into Superuser", %{root: root} do
+      assert {:error, :sso_superuser_forbidden} =
+               Admin.put_sso_map(root, "keycloak", "admins", "superuser")
+
+      assert Enum.any?(
+               Audit.for_actor(root),
+               &(&1.action == "put_sso_map" and &1.decision == "denied")
+             )
     end
   end
 
@@ -592,7 +653,8 @@ defmodule Swarm.AdminTest do
       admin = admin_user("role-reader")
       admin_two = user("admin-two")
       root = superadmin()
-      :ok = Admin.grant_role(root, admin_two.id, "admin")
+      # a second admin, conferred by group membership (ADR-19), not a direct grant
+      :ok = Admin.grant_group(root, admin_two.id, "admins")
 
       assert {:ok, roles} = Admin.list_roles(admin.id)
 
@@ -625,7 +687,9 @@ defmodule Swarm.AdminTest do
     test "deactivate disables login and strips role grants; learned content stays" do
       admin = admin_user("adm")
       u = user("penta")
-      :ok = Admin.grant_role(superadmin(), u.id, "admin")
+      # u's admin comes from group membership (ADR-19); deactivate must strip it
+      :ok = Admin.grant_group(superadmin(), u.id, "admins")
+      assert "admin" in Identity.roles_for(u.id)
       {:ok, c} = Conversations.create(u.id, %{title: "theirs"})
 
       assert :ok = Admin.deactivate_user(admin.id, u.id)

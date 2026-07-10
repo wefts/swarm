@@ -19,6 +19,7 @@ defmodule Swarm.CoreIdentityRpcTest do
     ListConversationsRequest,
     LogConversationRequest,
     ManageAccessRequest,
+    ManageGroupRequest,
     ManageUserRequest,
     ProvisionActorRequest,
     ResolveActorRequest
@@ -47,6 +48,39 @@ defmodule Swarm.CoreIdentityRpcTest do
       })
 
     {u, Actor.sign(%{"sub" => u.login, "provider" => "local"})}
+  end
+
+  # ADR-19: admin is conferred by group membership, never a per-user role grant.
+  defp make_admin(root_t, user_id) do
+    Server.manage_group(
+      %ManageGroupRequest{
+        assertion: root_t,
+        op: :GROUP_CREATE,
+        group_id: "admins",
+        name: "Admins"
+      },
+      nil
+    )
+
+    Server.manage_group(
+      %ManageGroupRequest{
+        assertion: root_t,
+        op: :GROUP_SET_ROLE,
+        group_id: "admins",
+        role: "admin"
+      },
+      nil
+    )
+
+    Server.manage_access(
+      %ManageAccessRequest{
+        assertion: root_t,
+        op: :GRANT_GROUP,
+        target_user_id: user_id,
+        group_id: "admins"
+      },
+      nil
+    )
   end
 
   describe "ResolveActor" do
@@ -371,11 +405,12 @@ defmodule Swarm.CoreIdentityRpcTest do
   end
 
   describe "admin RPCs (ManageAccess / ManageUser)" do
-    test "superadmin grants a role via ManageAccess; a plain user is NOT_AUTHORIZED" do
+    test "per-user GRANT_ROLE is forbidden; admin comes from group membership (ADR-19)" do
       {_root, root_t} = superadmin_assertion()
       u = provision("penta", "sub-penta")
 
-      ok =
+      # per-user role grants are forbidden for everyone, even superadmin
+      forbidden =
         Server.manage_access(
           %ManageAccessRequest{
             assertion: root_t,
@@ -386,18 +421,23 @@ defmodule Swarm.CoreIdentityRpcTest do
           nil
         )
 
-      assert ok.status == :CALL_OK
+      assert forbidden.status == :CALL_BAD_REQUEST
+      refute "admin" in Identity.roles_for(u.id)
+
+      # the model path: membership in a role-bearing group
+      assert make_admin(root_t, u.id).status == :CALL_OK
       assert "admin" in Identity.roles_for(u.id)
 
+      # a plain (non-admin) user cannot confer group membership either
       provision("mallory", "sub-mallory")
 
       denied =
         Server.manage_access(
           %ManageAccessRequest{
             assertion: assertion("sub-mallory"),
-            op: :GRANT_ROLE,
+            op: :GRANT_GROUP,
             target_user_id: u.id,
-            role: "superadmin"
+            group_id: "admins"
           },
           nil
         )
@@ -441,15 +481,7 @@ defmodule Swarm.CoreIdentityRpcTest do
       {_root, root_t} = superadmin_assertion()
       penta = provision("penta", "sub-penta")
 
-      Server.manage_access(
-        %ManageAccessRequest{
-          assertion: root_t,
-          op: :GRANT_ROLE,
-          target_user_id: penta.id,
-          role: "admin"
-        },
-        nil
-      )
+      make_admin(root_t, penta.id)
 
       inv =
         Server.manage_user(
@@ -501,7 +533,7 @@ defmodule Swarm.CoreIdentityRpcTest do
       assert list.conversations == []
     end
 
-    test "ManageAccess rejects a bogus role before hitting the DB CHECK" do
+    test "ManageAccess rejects any per-user role grant (ADR-19: roles hang on groups)" do
       {_root, root_t} = superadmin_assertion()
       u = provision("penta", "sub-penta")
 
@@ -511,7 +543,7 @@ defmodule Swarm.CoreIdentityRpcTest do
             assertion: root_t,
             op: :GRANT_ROLE,
             target_user_id: u.id,
-            role: "owner"
+            role: "admin"
           },
           nil
         )
@@ -552,15 +584,7 @@ defmodule Swarm.CoreIdentityRpcTest do
       {_root, root_t} = superadmin_assertion()
       penta = provision("penta", "sub-penta")
 
-      Server.manage_access(
-        %ManageAccessRequest{
-          assertion: root_t,
-          op: :GRANT_ROLE,
-          target_user_id: penta.id,
-          role: "admin"
-        },
-        nil
-      )
+      make_admin(root_t, penta.id)
 
       t = assertion("sub-penta")
 

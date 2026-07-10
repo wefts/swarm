@@ -91,9 +91,11 @@ defmodule Swarm.PersonTest do
         )
       end
 
-      # an admin (holds manage_users) deletes the target account
+      # an admin (holds manage_users) deletes the target account — admin via group (ADR-19)
       mgr = user("mgr")
-      :ok = Admin.grant_role(root, mgr.id, "admin")
+      :ok = Admin.create_group(root, "admins", "Admins", nil)
+      :ok = Admin.set_group_role(root, "admins", "admin")
+      :ok = Admin.grant_group(root, mgr.id, "admins")
       assert :ok = Admin.delete_user(mgr.id, target.id)
 
       # person node persists, still private (never discoverable)
