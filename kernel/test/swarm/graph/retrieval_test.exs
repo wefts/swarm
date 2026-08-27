@@ -273,11 +273,11 @@ defmodule Swarm.Graph.RetrievalTest do
   describe "concept-synonymy query expansion (ADR-17 slice 2)" do
     setup do
       # the canonical page's body uses the CORPUS's words, never the acronym
-      page = node!("Password Reset Guide", "group")
+      page = node!("Password Reset Guide", test_src())
       chunk!(page, 0, "Reset it via the Self Service Password portal", 0)
       # the concept nodes + the reversible synonym link
-      Store.upsert_node("concept", "SSP", scope: "group")
-      Store.upsert_node("concept", "Self Service Password", scope: "group")
+      Store.upsert_node("concept", "SSP", scope: test_src())
+      Store.upsert_node("concept", "Self Service Password", scope: test_src())
       {:ok, _} = Swarm.Synonymy.link("SSP", "Self Service Password")
       %{page: "Password Reset Guide"}
     end
@@ -286,7 +286,7 @@ defmodule Swarm.Graph.RetrievalTest do
       # lexical-only (test env: dense off, native arm). Without expansion the acronym
       # 'SSP' appears in no chunk → miss.
       assert %{status: :not_found} =
-               Retrieval.search("how do I use SSP", ["group"],
+               Retrieval.search("how do I use SSP", [test_src()],
                  dense: false,
                  expand: false,
                  synonym_expansion: false
@@ -294,7 +294,7 @@ defmodule Swarm.Graph.RetrievalTest do
 
       # with expansion the query gains 'Self Service Password' → the chunk matches.
       %{status: :found, memories: mems} =
-        Retrieval.search("how do I use SSP", ["group"],
+        Retrieval.search("how do I use SSP", [test_src()],
           dense: false,
           expand: false,
           synonym_expansion: true
@@ -316,14 +316,14 @@ defmodule Swarm.Graph.RetrievalTest do
       # the deployed corpus has NO concept nodes — synonyms live in entity/article.
       # Prove Retrieval.search (default synonym_types) now reaches the canonical page
       # via an ENTITY synonym, which the concept-only default would have missed.
-      page = node!("VPN Setup Guide", "group")
+      page = node!("VPN Setup Guide", test_src())
       chunk!(page, 0, "Connect using the Virtual Private Network client", 0)
-      Store.upsert_node("entity", "VPN", scope: "group")
-      Store.upsert_node("entity", "Virtual Private Network", scope: "group")
+      Store.upsert_node("entity", "VPN", scope: test_src())
+      Store.upsert_node("entity", "Virtual Private Network", scope: test_src())
       {:ok, _} = Swarm.Synonymy.link("VPN", "Virtual Private Network", type: "entity")
 
       %{status: :found, memories: mems} =
-        Retrieval.search("how do I use VPN", ["group"],
+        Retrieval.search("how do I use VPN", [test_src()],
           dense: false,
           expand: false,
           synonym_expansion: true

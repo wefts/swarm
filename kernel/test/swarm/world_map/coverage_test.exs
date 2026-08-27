@@ -45,7 +45,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       v = variant([step(1, "open portal"), step(2, "set password")], origin: "wiki:reset-runbook")
 
       d =
-        Coverage.describe("how do I reset my password", ["group"],
+        Coverage.describe("how do I reset my password", [Swarm.GraphCase.test_src()],
           candidate_keys: ["password reset"],
           procedure_fun: proc_fun([v]),
           profile: profile([])
@@ -66,7 +66,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       v = variant([step(1, "a"), step(1, "b")], collision?: true)
 
       d =
-        Coverage.describe("how to reset", ["group"],
+        Coverage.describe("how to reset", [Swarm.GraphCase.test_src()],
           candidate_keys: ["reset"],
           procedure_fun: proc_fun([v]),
           profile: profile([])
@@ -81,7 +81,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       v2 = variant([step(1, "b")], origin: "wiki:b")
 
       d =
-        Coverage.describe("steps to configure", ["group"],
+        Coverage.describe("steps to configure", [Swarm.GraphCase.test_src()],
           candidate_keys: ["configure"],
           procedure_fun: proc_fun([v1, v2]),
           profile: profile([])
@@ -100,7 +100,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       end
 
       d =
-        Coverage.describe("how do I do proc a", ["group"],
+        Coverage.describe("how do I do proc a", [Swarm.GraphCase.test_src()],
           candidate_keys: ["proc-a", "proc-b"],
           procedure_fun: keyed,
           profile: profile([])
@@ -113,7 +113,7 @@ defmodule Swarm.WorldMap.CoverageTest do
 
     test "a procedure cue with NO clean variant ESCALATES (never a phantom serve)" do
       d =
-        Coverage.describe("how do I reset the password", ["group"],
+        Coverage.describe("how do I reset the password", [Swarm.GraphCase.test_src()],
           candidate_keys: ["password reset"],
           procedure_fun: proc_fun([]),
           profile: profile([])
@@ -127,7 +127,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       # cue present, no procedure variant, BUT entity coverage exists — must still
       # escalate, not serve entity facts for a "how do I" question.
       d =
-        Coverage.describe("how do I reset the password", ["group"],
+        Coverage.describe("how do I reset the password", [Swarm.GraphCase.test_src()],
           candidate_keys: ["password reset"],
           procedure_fun: proc_fun([]),
           profile: profile([group("is_a", [{"a secret", 3}])])
@@ -141,7 +141,12 @@ defmodule Swarm.WorldMap.CoverageTest do
   describe "describe/3 + validate/1 — entity_profile intent" do
     test "corroborated claim groups ⇒ served (counts as citations, no source identity)" do
       p = profile([group("is_a", [{"a load balancer", 2}]), group("runs_on", [{"k8s", 1}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
+
+      d =
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
+          profile: p,
+          entity_serve: true
+        )
 
       assert %Descriptor{intent: :entity_profile, blockers: []} = d
 
@@ -154,7 +159,12 @@ defmodule Swarm.WorldMap.CoverageTest do
 
     test "zero-corroboration groups ⇒ no citable source ⇒ escalate" do
       p = profile([group("is_a", [{"guess", 0}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
+
+      d =
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
+          profile: p,
+          entity_serve: true
+        )
 
       assert d.blockers == [:no_corroboration]
       assert {:error, [:no_corroboration]} = Coverage.validate(d)
@@ -164,7 +174,12 @@ defmodule Swarm.WorldMap.CoverageTest do
       # a group mixing a corroborated object with a bare guess — only the citable one
       # survives into the validated atoms; the uncitable guess is never served.
       p = profile([group("is_a", [{"a load balancer", 2}, {"a guess", 0}])])
-      d = Coverage.describe("what is the ingress", ["group"], profile: p, entity_serve: true)
+
+      d =
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
+          profile: p,
+          entity_serve: true
+        )
 
       assert {:ok, %Validated{atoms: [g]}} = Coverage.validate(d)
       assert Enum.map(g.objects, & &1.object) == ["a load balancer"]
@@ -174,7 +189,7 @@ defmodule Swarm.WorldMap.CoverageTest do
       p = profile([group("is_a", [{"a database", 3}])])
 
       d =
-        Coverage.describe("tell me about postgres", ["group"],
+        Coverage.describe("tell me about postgres", [Swarm.GraphCase.test_src()],
           candidate_keys: ["postgres"],
           # even if a procedure_fun would return a variant, no cue ⇒ not probed
           procedure_fun: proc_fun([variant([step(1, "x")])]),
@@ -188,7 +203,7 @@ defmodule Swarm.WorldMap.CoverageTest do
 
     test "entity coverage ESCALATES by default (entity_serve OFF — live false-serve guard)" do
       p = profile([group("is_a", [{"a database", 3}])])
-      d = Coverage.describe("what is postgres", ["group"], profile: p)
+      d = Coverage.describe("what is postgres", [Swarm.GraphCase.test_src()], profile: p)
       assert d.intent == :unknown
       assert {:error, [:unknown_intent]} = Coverage.validate(d)
     end
@@ -202,7 +217,7 @@ defmodule Swarm.WorldMap.CoverageTest do
     end
 
     test "no structure at all ⇒ unknown ⇒ escalate" do
-      d = Coverage.describe("what is X", ["group"], profile: profile([]))
+      d = Coverage.describe("what is X", [Swarm.GraphCase.test_src()], profile: profile([]))
       assert d.intent == :unknown
       assert {:error, [:unknown_intent]} = Coverage.validate(d)
     end

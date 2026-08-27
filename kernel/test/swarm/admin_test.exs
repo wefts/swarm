@@ -1,14 +1,14 @@
 defmodule Swarm.AdminTest do
   @moduledoc """
-  Workspace ADR-16 step 5 + ADR-19 — access grants + user management, kernel-owned,
-  admin-mutable, audited. Capabilities (default-deny): admin = {manage_access,
-  invite_users, manage_users}; superadmin = all + read_any_conversation. ADR-19:
-  roles are GROUP-derived (per-user role grants forbidden); superadmin only via the
-  Superuser group (local-only); admin does NOT get chat-read nor another user's own KB.
+  Workspace ADR-16 step 5 + ADR-20 §6 — the admin capability boundary, kernel-owned,
+  audited. `admin` (via the `admins` group): manage_access / invite_users / manage_users /
+  manage_projects. `superadmin` = a live, session-bound elevation of a local Wheel member:
+  + read_any_conversation / manage_wheel / manage_roles / manage_auth / manage_publicness.
+  Self-escalation is closed structurally; the last Wheel member is never removed.
   """
   use Swarm.IdentityCase, async: false
 
-  alias Swarm.{Actor, Admin, Audit, Conversations}
+  alias Swarm.{Actor, Admin, Audit, Conversations, Elevation, Projects}
   alias Swarm.Core.Server
 
   alias Swarm.Core.V1.{
@@ -19,16 +19,13 @@ defmodule Swarm.AdminTest do
     ManageSsoMapRequest
   }
 
+  @sid "sess"
+
   defp user(login, overrides \\ %{}) do
     {:ok, u} =
       Identity.upsert_from_claims(
         Map.merge(
-          %{
-            provider: "keycloak",
-            subject: "sub-#{login}",
-            login: login,
-            groups: []
-          },
+          %{provider: "keycloak", subject: "sub-#{login}", login: login, groups: []},
           overrides
         )
       )
@@ -37,711 +34,470 @@ defmodule Swarm.AdminTest do
   end
 
   defp local_user(login) do
-    {:ok, u} =
-      Identity.upsert_from_claims(%{
-        provider: "local",
-        subject: "local-#{login}",
-        login: login,
-        groups: []
-      })
-
+    {:ok, u} = Identity.invite_user(%{login: login})
     u
   end
 
-  defp superadmin do
-    {:ok, u} =
-      Identity.seed_superadmin(%{
-        id: Identity.uuid7(),
-        login: "root#{System.unique_integer([:positive])}"
-      })
+  # A Wheel member (local; in admins too) — NOT elevated.
+  defp wheel(login \\ "root#{System.unique_integer([:positive])}") do
+    {:ok, u} = Identity.seed_wheel(%{id: Identity.uuid7(), login: login})
+    u
+  end
 
-    u.id
+  # An ELEVATED actor ref for a Wheel member: {uuid, sid} with a live elevation.
+  defp elevated(u) do
+    proof =
+      Actor.sign(
+        %{
+          "aud" => Actor.reauth_audience(),
+          "sub" => u.login,
+          "provider" => "local",
+          "sid" => @sid,
+          "jti" => "jti-#{System.unique_integer([:positive])}",
+          "auth_time" => System.system_time(:second)
+        },
+        exp_in: 60
+      )
+
+    {:ok, _} = Elevation.request(%{uuid: u.id, sid: @sid}, "test", proof)
+    {u.id, @sid}
+  end
+
+  defp admin_user(login) do
+    u = user(login)
+    :ok = Identity.add_to_group(u.id, "admins")
+    u
   end
 
   defp assertion(login), do: Actor.sign(%{"sub" => "sub-#{login}", "provider" => "keycloak"})
-  defp local_assertion(login), do: Actor.sign(%{"sub" => login, "provider" => "local"})
 
-  # ADR-19: an admin is made by MEMBERSHIP in the admins group (which confers the
-  # admin role), never by a per-user role grant.
-  defp admin_user(login) do
-    root = superadmin()
-    u = user(login)
-    :ok = Admin.create_group(root, "admins", "Admins", nil)
-    :ok = Admin.set_group_role(root, "admins", "admin")
-    :ok = Admin.grant_group(root, u.id, "admins")
-    u
-  end
+  defp denied?(actor_id, action),
+    do: Enum.any?(Audit.for_actor(actor_id), &(&1.action == action and &1.decision == "denied"))
 
-  defp put_map(token, provider, incoming, group) do
-    Server.manage_sso_map(
-      %ManageSsoMapRequest{
-        assertion: token,
-        op: :SSO_MAP_PUT,
-        provider: provider,
-        incoming_group: incoming,
-        our_group_id: group
-      },
-      nil
-    )
-  end
-
-  describe "roles come from groups, never per-user (ADR-19)" do
-    test "per-user role grant/revoke is FORBIDDEN even for a superadmin — rejected, audited, nothing conferred" do
-      root = superadmin()
+  describe "roles come from groups, never per-user; groups never grant scopes" do
+    test "per-user role grant/revoke and group scope grants are rejected + audited, even elevated" do
+      root = elevated(wheel())
+      {uuid, _} = root
       u = user("penta")
       assert {:error, :role_on_user_forbidden} = Admin.grant_role(root, u.id, "admin")
-      refute "admin" in Identity.roles_for(u.id)
-
       assert {:error, :role_on_user_forbidden} = Admin.revoke_role(root, u.id, "admin")
-
-      rows = Audit.for_actor(root)
-      assert Enum.any?(rows, &(&1.action == "grant_role" and &1.decision == "denied"))
-      assert Enum.any?(rows, &(&1.action == "revoke_role" and &1.decision == "denied"))
+      assert {:error, :group_scopes_forbidden} = Admin.set_group_scopes(root, "staff", ["public"])
+      refute "admin" in Identity.roles_for(u.id)
+      assert denied?(uuid, "grant_role") and denied?(uuid, "set_group_scopes")
     end
 
-    test "the admin role is conferred by membership in the admins group" do
-      admin = admin_user("adm-via-group")
-      assert "admin" in Identity.roles_for(admin.id)
-      assert "manage_access" in Identity.caps_for(admin.id)
-    end
-  end
-
-  describe "ADR-19 Superuser + role guards" do
-    setup do
-      root = superadmin()
-      :ok = Admin.create_group(root, "superuser", "Superuser", nil)
-      :ok = Admin.set_group_role(root, "superuser", "superadmin")
-      %{root: root}
-    end
-
-    test "superadmin role binds ONLY to the Superuser group", %{root: root} do
-      :ok = Admin.create_group(root, "ops", "Ops", nil)
-
-      assert {:error, :superadmin_superuser_only} =
-               Admin.set_group_role(root, "ops", "superadmin")
-
-      refute "superadmin" in (Identity.list_groups()
-                              |> Enum.find(&(&1.id == "ops"))).granted_roles
-
-      su = Identity.list_groups() |> Enum.find(&(&1.id == "superuser"))
-      assert "superadmin" in su.granted_roles
-    end
-
-    test "Superuser takes local-provider users only", %{root: root} do
-      loc = local_user("localadmin")
-      kc = user("kcadmin")
-      assert :ok = Admin.grant_group(root, loc.id, "superuser")
-      assert {:error, :superuser_local_only} = Admin.grant_group(root, kc.id, "superuser")
-      refute "superuser" in Identity.groups_for(kc.id)
-    end
-
-    test "an admin (not superadmin) cannot touch the Superuser group", %{root: _root} do
-      admin = admin_user("plain-admin")
-      loc = local_user("target")
-      assert Admin.grant_group(admin.id, loc.id, "superuser") == :not_authorized
-      assert Admin.set_group_scopes(admin.id, "superuser", ["src:wiki"]) == :not_authorized
-      refute "superuser" in Identity.groups_for(loc.id)
-      assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
-    end
-
-    test "seed_superadmin confers superadmin via Superuser membership, not a direct grant" do
-      id = Identity.uuid7()
-
-      {:ok, _} =
-        Identity.seed_superadmin(%{
-          id: id,
-          login: "seedcheck-#{System.unique_integer([:positive])}"
-        })
-
-      assert "superadmin" in Identity.roles_for(id)
-      assert "superuser" in Identity.groups_for(id)
-
-      assert [[0]] =
-               Swarm.Repo.query!(
-                 "SELECT count(*)::int FROM role_grant WHERE user_id = $1",
-                 [Ecto.UUID.dump!(id)]
-               ).rows
-    end
-
-    test "an SSO group cannot map into Superuser", %{root: root} do
-      assert {:error, :sso_superuser_forbidden} =
-               Admin.put_sso_map(root, "keycloak", "admins", "superuser")
-
-      assert Enum.any?(
-               Audit.for_actor(root),
-               &(&1.action == "put_sso_map" and &1.decision == "denied")
-             )
+    test "the group set is fixed: create / rename / delete are rejected + audited" do
+      root = elevated(wheel())
+      assert {:error, :fixed_group_set} = Admin.create_group(root, "ops", "Ops", nil)
+      assert {:error, :fixed_group_set} = Admin.rename_group(root, "staff", "Everyone")
+      assert {:error, :fixed_group_set} = Admin.delete_group(root, "staff", true)
+      assert Enum.map(Identity.list_groups(), & &1.id) == ["admins", "staff", "wheel"]
     end
   end
 
-  describe "manage_access — group membership + scope map (shared-resource access)" do
-    test "an admin adds a user to a group and maps the group's scopes; access is conferred" do
+  describe "the admin boundary (ADR-20 D11)" do
+    test "an admin manages admins/staff membership but cannot touch wheel" do
       admin = admin_user("adm")
       u = user("penta")
-      assert :ok = Admin.set_group_scopes(admin.id, "nebula", ["public", "group"])
-      assert :ok = Admin.grant_group(admin.id, u.id, "nebula")
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["group", "public"]
-      assert :ok = Admin.revoke_group(admin.id, u.id, "nebula")
-      assert Identity.scopes_for(u.id) == ["public"]
+      loc = local_user("loc")
+
+      assert :ok = Admin.grant_group(admin.id, u.id, "admins")
+      assert :ok = Admin.revoke_group(admin.id, u.id, "admins")
+      assert :ok = Admin.revoke_group(admin.id, u.id, "staff")
+      assert Admin.grant_group(admin.id, loc.id, "wheel") == :not_authorized
+      refute "wheel" in Identity.groups_for(loc.id)
+      assert denied?(admin.id, "grant")
     end
 
-    test "a user without manage_access cannot change access — :not_authorized" do
-      mallory = user("mallory")
-      u = user("penta")
-      assert Admin.grant_group(mallory.id, u.id, "nebula") == :not_authorized
-      assert Admin.set_group_scopes(mallory.id, "nebula", ["group"]) == :not_authorized
+    test "an elevated Wheel member manages wheel; wheel stays local-only" do
+      root = elevated(wheel())
+      loc = local_user("loc")
+      kc = user("kc")
+      assert :ok = Admin.grant_group(root, loc.id, "wheel")
+      assert {:error, :wheel_local_only} = Admin.grant_group(root, kc.id, "wheel")
+      assert :ok = Admin.revoke_group(root, loc.id, "wheel")
     end
 
-    test "even an admin cannot grant private — rejected, audited, nothing conferred" do
+    test "the LAST active local Wheel member can never be removed, deactivated or deleted" do
+      w = wheel("only")
+      root = elevated(w)
+      assert {:error, :last_wheel_member} = Admin.revoke_group(root, w.id, "wheel")
+      assert {:error, :last_wheel_member} = Admin.deactivate_user(root, w.id)
+      assert {:error, :last_wheel_member} = Admin.delete_user(root, w.id)
+      assert Identity.active_local_wheel_count() == 1
+
+      # with a second member, the first may leave
+      second = local_user("second")
+      :ok = Admin.grant_group(root, second.id, "wheel")
+
+      Repo.query!("UPDATE app_user SET status = 'active' WHERE id = $1", [
+        Ecto.UUID.dump!(second.id)
+      ])
+
+      assert :ok = Admin.revoke_group(root, w.id, "wheel")
+    end
+
+    test "ANY lifecycle mutation of a Wheel member needs an elevation (council: gemini)" do
       admin = admin_user("adm")
-      u = user("penta")
-      :ok = Admin.grant_group(admin.id, u.id, "nebula")
+      w = wheel("rootuser")
+      w2 = wheel("rootuser2")
+      assert Admin.deactivate_user(admin.id, w.id) == :not_authorized
+      assert Admin.delete_user(admin.id, w.id) == :not_authorized
+      assert Identity.get_user(w.id).status == "active"
+      # an elevated Wheel member can (not the last one)
+      assert :ok = Admin.deactivate_user(elevated(w2), w.id)
+      assert Identity.get_user(w.id).status == "disabled"
+    end
 
-      assert Admin.set_group_scopes(admin.id, "nebula", ["group", "private"]) ==
-               {:error, :ungrantable_scope}
+    test "role bindings and the SSO map are elevation-only; superadmin is never bindable" do
+      admin = admin_user("adm")
+      assert Admin.set_group_role(admin.id, "staff", "admin") == :not_authorized
+      assert Admin.put_sso_map(admin.id, "keycloak", "DSI", "admins") == :not_authorized
+      assert Admin.delete_sso_map(admin.id, "keycloak", "DSI") == :not_authorized
+      # reads stay open to any admin cap
+      assert {:ok, []} = Admin.list_sso_map(admin.id)
 
-      assert Identity.scopes_for(u.id) == ["public"]
-      assert Enum.any?(Audit.for_actor(admin.id), &(&1.decision == "denied"))
+      root = elevated(wheel())
+      assert :ok = Admin.put_sso_map(root, "keycloak", "DSI", "admins")
+      assert {:error, :sso_wheel_forbidden} = Admin.put_sso_map(root, "keycloak", "root", "wheel")
+      assert {:error, :unknown_group} = Admin.put_sso_map(root, "keycloak", "x", "nope")
+      assert {:error, :invalid_role} = Admin.set_group_role(root, "staff", "superadmin")
+      assert :ok = Admin.set_group_role(root, "staff", "admin")
+      assert :ok = Admin.clear_group_role(root, "staff", "admin")
+      assert Admin.set_group_role(root, "nope", "admin") == :not_found
+    end
+
+    test "an unelevated Wheel member is just an admin: no break-glass, no wheel management" do
+      w = wheel()
+      loc = local_user("loc")
+      assert Admin.grant_group(w.id, loc.id, "wheel") == :not_authorized
+      assert Admin.grant_group({w.id, "cold-session"}, loc.id, "wheel") == :not_authorized
+      {:ok, c} = Conversations.create(loc.id, %{title: "theirs"})
+      assert Conversations.admin_read(w.id, c.id, "peek") == :not_authorized
+      assert Conversations.admin_read({w.id, @sid}, c.id, "peek") == :not_authorized
+    end
+
+    test "break-glass works ONLY under the elevated session and is audited before return" do
+      w = wheel()
+      loc = local_user("loc")
+      {:ok, c} = Conversations.create(loc.id, %{title: "theirs"})
+      root = elevated(w)
+      assert {:ok, %{conversation: %{id: id}}} = Conversations.admin_read(root, c.id, "ticket")
+      assert id == c.id
+      # the same user's OTHER session is not elevated
+      assert Conversations.admin_read({w.id, "other"}, c.id, "ticket") == :not_authorized
     end
   end
 
-  describe "invite_users" do
-    test "an admin invites a local user (status invited, local link), audited" do
+  describe "invite_users / manage_users" do
+    test "an admin invites a local user or a guest, audited; a plain user cannot" do
       admin = admin_user("adm")
       assert {:ok, u} = Admin.invite_user(admin.id, %{login: "newbie", first_name: "New"})
-      assert u.status == "invited"
-      assert Identity.by_login("newbie").id == u.id
-      # a local identity_link exists so the channel can set a password + they can log in
-      assert Identity.user_by_link("local", "newbie").id == u.id
+      assert u.status == "invited" and Identity.groups_for(u.id) == ["staff"]
+      assert {:ok, g} = Admin.invite_user(admin.id, %{login: "visitor", external: true})
+      assert g.external and Identity.groups_for(g.id) == []
       assert Enum.any?(Audit.for_actor(admin.id), &(&1.action == "invite"))
-    end
 
-    test "a user without invite_users cannot invite — :not_authorized" do
       mallory = user("mallory")
       assert Admin.invite_user(mallory.id, %{login: "x"}) == :not_authorized
       assert Identity.by_login("x") == nil
     end
+
+    test "deactivate/delete an ordinary user: authority dies, content stays" do
+      admin = admin_user("adm")
+      u = user("penta")
+      :ok = Identity.add_to_group(u.id, "admins")
+      {:ok, c} = Conversations.create(u.id, %{title: "theirs"})
+
+      assert :ok = Admin.deactivate_user(admin.id, u.id)
+      assert Identity.get_user(u.id).status == "disabled"
+      assert Identity.roles_for(u.id) == []
+      assert {:ok, _} = Conversations.get(u.id, c.id)
+
+      assert :ok = Admin.delete_user(admin.id, u.id)
+      assert Identity.get_user(u.id).status == "deleted"
+      assert Identity.user_by_link("keycloak", "sub-penta") == nil
+
+      mallory = user("mallory")
+      assert Admin.deactivate_user(mallory.id, admin.id) == :not_authorized
+    end
   end
 
-  describe "list_users — the admin-console roster (admin-cleanup epic)" do
-    test "an admin lists users: uuid, status, roles, groups, providers; login-ordered" do
+  describe "reads (any admin cap; denials audited, successes not)" do
+    test "roster, detail, groups, roles, sso map" do
       admin = admin_user("lister")
       _u = user("bravo")
       _u2 = user("alpha")
 
       assert {:ok, {users, total}} = Admin.list_users(admin.id)
       logins = Enum.map(users, & &1.login)
-      assert "alpha" in logins and "bravo" in logins
-      assert total == length(users)
-      # deterministic order (login, id)
+      assert "alpha" in logins and "bravo" in logins and total == length(users)
       assert logins == Enum.sort(logins)
 
-      me = Enum.find(users, &(&1.login == "lister"))
-      # the uuid ManageUser/ManageAccess actually target
-      assert me.id == admin.id
-      assert me.status == "active"
-      assert "admin" in me.roles
-      assert "keycloak" in me.providers
-    end
+      assert {:ok, {[needle], 1}} = Admin.list_users(admin.id, query: "alp")
+      assert needle.login == "alpha"
 
-    test "a plain user is denied AND the denial is audited; success is NOT audited" do
-      plain = user("nobody")
-      assert Admin.list_users(plain.id) == :not_authorized
-      assert Admin.get_user(plain.id, plain.id) == :not_authorized
+      assert {:ok, view} = Admin.get_user(admin.id, admin.id)
+      assert view.roles == ["admin"]
+      assert Admin.get_user(admin.id, Identity.uuid7()) == :not_found
 
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "list_users" and &1.decision == "denied")
-             )
+      assert {:ok, groups} = Admin.list_groups(admin.id)
+      assert Enum.map(groups, & &1.id) == ["admins", "staff", "wheel"]
 
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "get_user" and &1.decision == "denied")
-             )
+      assert {:ok, %{group: %{id: "staff"}, members: members}} =
+               Admin.get_group(admin.id, "staff")
 
-      admin = admin_user("quiet")
+      assert length(members) == 3
+      assert Admin.get_group(admin.id, "nope") == :not_found
+      assert {:ok, roles} = Admin.list_roles(admin.id)
+      assert Enum.map(roles, & &1.name) == ["user", "admin", "superadmin"]
+
       before = length(Audit.for_actor(admin.id))
-      assert {:ok, _} = Admin.list_users(admin.id)
-      # roster reads don't drown the audit
+      {:ok, _} = Admin.list_users(admin.id)
       assert length(Audit.for_actor(admin.id)) == before
     end
 
-    test "deleted users are tombstoned out unless explicitly included" do
-      root = superadmin()
-      ghost = user("ghost")
-      :ok = Admin.delete_user(root, ghost.id)
-
-      assert {:ok, {users, _total}} = Admin.list_users(root)
-      refute Enum.any?(users, &(&1.login == "ghost"))
-
-      assert {:ok, {all, _total}} = Admin.list_users(root, include_deleted: true)
-      g = Enum.find(all, &(&1.login == "ghost"))
-      assert g && g.status == "deleted"
-    end
-
-    test "search filters server-side and total reflects the filtered count" do
-      admin = admin_user("lister")
-      _u = user("haystack")
-      _u2 = user("needle", %{first_name: "Ariadne"})
-      _u3 = user("another")
-
-      assert {:ok, {users, 1}} = Admin.list_users(admin.id, query: "ARI")
-      assert Enum.map(users, & &1.login) == ["needle"]
-    end
-
-    test "limit and offset page the filtered roster while total stays pre-page" do
-      admin = admin_user("pager")
-      _u = user("page-alpha")
-      _u2 = user("page-bravo")
-
-      assert {:ok, {first_page, 2}} = Admin.list_users(admin.id, query: "page-", limit: 1)
-      assert Enum.map(first_page, & &1.login) == ["page-alpha"]
-
-      assert {:ok, {second_page, 2}} =
-               Admin.list_users(admin.id, query: "page-", limit: 1, offset: 1)
-
-      assert Enum.map(second_page, & &1.login) == ["page-bravo"]
-    end
-
-    test "LIKE metacharacters in search are treated literally" do
-      admin = admin_user("literal")
-      _u = user("under_score")
-      _u2 = user("underXscore")
-
-      assert {:ok, {users, 1}} = Admin.list_users(admin.id, query: "_")
-      assert Enum.map(users, & &1.login) == ["under_score"]
-    end
-
-    test "get_user returns the aggregated detail view with emails" do
-      admin = admin_user("detail-admin")
-      :ok = Identity.create_group("staff", "staff", nil)
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-
-      u =
-        user("detail-target", %{
-          emails: [
-            %{email: "target-secondary@example.test", verified: true, primary: false},
-            %{email: "target@example.test", verified: true, primary: true}
-          ],
-          groups: ["staff"]
-        })
-
-      assert {:ok, view} = Admin.get_user(admin.id, u.id)
-      assert view.id == u.id
-      assert view.login == "detail-target"
-      assert view.groups == ["staff"]
-      assert view.providers == ["keycloak"]
-      # Order is DB-collation dependent (not a contract) — assert the set.
-      assert Enum.sort(view.emails) ==
-               Enum.sort(["target-secondary@example.test", "target@example.test"])
-    end
-
-    test "get_user returns :not_found for unknown and tombstoned users" do
-      root = superadmin()
-      ghost = user("detail-ghost")
-
-      assert Admin.get_user(root, Identity.uuid7()) == :not_found
-
-      :ok = Admin.delete_user(root, ghost.id)
-      assert Admin.get_user(root, ghost.id) == :not_found
-    end
-  end
-
-  describe "list_groups — the admin-console group read model" do
-    test "members-only and scopes-only groups both appear with counts, scopes, and empty roles" do
-      admin = admin_user("group-reader")
-      u1 = user("group-member-a")
-      u2 = user("group-member-b")
-
-      :ok = Identity.add_to_group(u1.id, "members-only")
-      :ok = Identity.add_to_group(u2.id, "members-only")
-      :ok = Identity.put_group_scopes("scopes-only", ["public"])
-
-      assert {:ok, groups} = Admin.list_groups(admin.id)
-
-      members_only = Enum.find(groups, &(&1.id == "members-only"))
-      assert members_only.name == nil
-      assert members_only.description == nil
-      assert members_only.member_count == 2
-      assert members_only.granted_scopes == []
-      assert members_only.granted_roles == []
-
-      scopes_only = Enum.find(groups, &(&1.id == "scopes-only"))
-      assert scopes_only.name == nil
-      assert scopes_only.description == nil
-      assert scopes_only.member_count == 0
-      assert scopes_only.granted_scopes == ["public"]
-      assert scopes_only.granted_roles == []
-    end
-
-    test "a plain user is denied and the denial is audited" do
-      plain = user("group-denied")
-
+    test "a plain user is denied every read and each denial is audited" do
+      plain = user("nobody")
+      assert Admin.list_users(plain.id) == :not_authorized
+      assert Admin.get_user(plain.id, plain.id) == :not_authorized
       assert Admin.list_groups(plain.id) == :not_authorized
+      assert Admin.list_roles(plain.id) == :not_authorized
+      assert Admin.get_group(plain.id, "staff") == :not_authorized
+      assert Admin.list_sso_map(plain.id) == :not_authorized
 
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "list_groups" and &1.decision == "denied")
-             )
+      for action <- ~w(list_users get_user list_groups list_roles get_group list_sso_map),
+          do: assert(denied?(plain.id, action), action)
     end
   end
 
-  describe "manage_group — first-class group lifecycle" do
-    test "create and rename surface through ListGroups with name and description; scopes confer" do
-      admin = admin_user("group-manager")
-      token = assertion("group-manager")
+  describe "Projects — the sole data-access container" do
+    test "an admin creates a Project (becoming its owner), adds a Source and members; a plain user cannot" do
+      admin = admin_user("adm")
+      u = user("penta")
+
+      assert {:ok, p} = Admin.create_project(admin.id, %{name: "Team wiki"})
+      assert Projects.owner?(p.id, admin.id)
+      assert {:ok, s} = Admin.add_source(admin.id, p.id, %{kind: "wiki"})
+      assert :ok = Admin.add_project_member(admin.id, p.id, %{user_id: u.id})
+      assert :ok = Admin.add_project_member(admin.id, p.id, %{group_id: "staff"})
+      assert s.scope in Identity.scopes_for(u.id)
+
+      assert :ok = Admin.rename_project(admin.id, p.id, "Team wiki v2")
+      assert :ok = Admin.describe_project(admin.id, p.id, "the team's pages")
+      assert Projects.get_project(p.id).name == "Team wiki v2"
+
+      assert :ok = Admin.remove_project_member(admin.id, p.id, %{user_id: u.id})
+      assert Admin.remove_project_member(admin.id, p.id, %{user_id: u.id}) == :not_found
+      assert :ok = Admin.remove_source(admin.id, s.id)
+      assert Admin.delete_project(admin.id, p.id, false) == :ok
+
+      mallory = user("mallory")
+      assert Admin.create_project(mallory.id, %{name: "x"}) == :not_authorized
+      assert denied?(mallory.id, "create_project")
+    end
+
+    test "deleting a Project that owns Sources needs confirm; unknown ids are 404s" do
+      admin = admin_user("adm")
+      {:ok, p} = Admin.create_project(admin.id, %{name: "P"})
+      {:ok, _} = Admin.add_source(admin.id, p.id, %{kind: "wiki"})
+      assert Admin.delete_project(admin.id, p.id, false) == :not_confirmed
+      assert Admin.delete_project(admin.id, p.id, true) == :ok
+      assert Admin.delete_project(admin.id, Identity.uuid7(), true) == :not_found
+      assert Admin.rename_project(admin.id, Identity.uuid7(), "x") == :not_found
+      assert Admin.add_source(admin.id, Identity.uuid7(), %{kind: "wiki"}) == :not_found
+      assert Admin.remove_source(admin.id, Identity.uuid7()) == :not_found
+
+      assert Admin.add_project_member(admin.id, Identity.uuid7(), %{group_id: "staff"}) ==
+               :not_found
+    end
+
+    test "SELF-GRANT guard: an admin cannot add themselves or their own group to someone else's Project" do
+      admin = admin_user("adm")
+      other = admin_user("other")
+      {:ok, p} = Admin.create_project(other.id, %{name: "Other's"})
+      {:ok, s} = Admin.add_source(other.id, p.id, %{kind: "confluence"})
+
+      assert {:error, :self_grant} =
+               Admin.add_project_member(admin.id, p.id, %{user_id: admin.id})
+
+      # `staff` contains the admin ⇒ also a self-grant; `wheel` does not
+      assert {:error, :self_grant} =
+               Admin.add_project_member(admin.id, p.id, %{group_id: "staff"})
+
+      assert :ok = Admin.add_project_member(admin.id, p.id, %{group_id: "wheel"})
+      refute s.scope in Identity.scopes_for(admin.id)
+      assert denied?(admin.id, "add_project_member")
+
+      # the Project OWNER may share it with a cohort they belong to; so may an elevated actor
+      assert :ok = Admin.add_project_member(other.id, p.id, %{group_id: "staff"})
+      assert s.scope in Identity.scopes_for(admin.id)
+      :ok = Admin.remove_project_member(other.id, p.id, %{group_id: "staff"})
+      root = elevated(wheel())
+      {root_id, _} = root
+      assert :ok = Admin.add_project_member(root, p.id, %{user_id: root_id})
+    end
+
+    test "PUBLICNESS is elevation-only: create-as-public, set to/from public, add a Source to a public Project" do
+      admin = admin_user("adm")
+
+      assert Admin.create_project(admin.id, %{name: "Pub", visibility: "public"}) ==
+               :not_authorized
+
+      {:ok, p} = Admin.create_project(admin.id, %{name: "Shared"})
+      assert Admin.set_project_visibility(admin.id, p.id, "public") == :not_authorized
+      assert :ok = Admin.set_project_visibility(admin.id, p.id, "personal")
+
+      root = elevated(wheel())
+      assert :ok = Admin.set_project_visibility(root, p.id, "public")
+      # now the Project is public: the admin (even as owner) cannot add a Source or flip it back
+      assert Admin.add_source(admin.id, p.id, %{kind: "wiki"}) == :not_authorized
+      assert Admin.set_project_visibility(admin.id, p.id, "shared") == :not_authorized
+      assert Admin.delete_project(admin.id, p.id, true) == :not_authorized
+      assert {:ok, s} = Admin.add_source(root, p.id, %{kind: "wiki"})
+      # every authenticated actor derives it; nobody had to be a member
+      assert s.scope in Identity.scopes_for(user("anyone").id)
+      assert :ok = Admin.set_project_visibility(root, p.id, "shared")
+      refute s.scope in Identity.scopes_for(user("anyone2").id)
+    end
+
+    test "a Project OWNER (not an admin) manages their own Project; a member only sees it" do
+      admin = admin_user("adm")
+      owner = user("owner")
+      member = user("member")
+      stranger = user("stranger")
+      {:ok, p} = Admin.create_project(admin.id, %{name: "Delegated"})
+      :ok = Admin.add_project_member(admin.id, p.id, %{user_id: owner.id}, role: "owner")
+
+      assert {:ok, _} = Admin.add_source(owner.id, p.id, %{kind: "wiki"})
+      assert :ok = Admin.add_project_member(owner.id, p.id, %{user_id: member.id})
+      assert :ok = Admin.rename_project(owner.id, p.id, "Delegated!")
+      assert Admin.set_project_visibility(owner.id, p.id, "public") == :not_authorized
+
+      assert Admin.add_project_member(member.id, p.id, %{user_id: stranger.id}) == :not_authorized
+      assert {:ok, %{project: %{id: pid}}} = Admin.get_project(member.id, p.id)
+      assert pid == p.id
+      assert Admin.get_project(stranger.id, p.id) == :not_found
+      assert Enum.map(Admin.list_projects(member.id), & &1.id) == [p.id]
+      assert Admin.list_projects(stranger.id) == []
+      assert length(Admin.list_projects(admin.id)) == 1
+    end
+  end
+
+  describe "over the wire (ManageGroup / SSO map / GetGroup / ListGroups)" do
+    test "GROUP_CREATE / SET_SCOPES are BAD_REQUEST; SET_ROLE needs an elevation; superadmin is unbindable" do
+      admin = admin_user("group-admin")
+      token = assertion("group-admin")
 
       assert Server.manage_group(
                %ManageGroupRequest{
                  assertion: token,
                  op: :GROUP_CREATE,
                  group_id: "ops",
-                 name: "Operations",
-                 description: "Operational access"
+                 name: "Ops"
                },
                nil
-             ).status == :CALL_OK
-
-      listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
-      assert listed.status == :CALL_OK
-      created = Enum.find(listed.groups, &(&1.id == "ops"))
-      assert created.name == "Operations"
-      assert created.description == "Operational access"
-
-      assert Server.manage_group(
-               %ManageGroupRequest{
-                 assertion: token,
-                 op: :GROUP_RENAME,
-                 group_id: "ops",
-                 name: "Platform Ops"
-               },
-               nil
-             ).status == :CALL_OK
-
-      renamed =
-        Server.list_groups(%ListGroupsRequest{assertion: token}, nil).groups
-        |> Enum.find(&(&1.id == "ops"))
-
-      assert renamed.name == "Platform Ops"
-      assert renamed.description == "Operational access"
+             ).status == :CALL_BAD_REQUEST
 
       assert Server.manage_group(
                %ManageGroupRequest{
                  assertion: token,
                  op: :GROUP_SET_SCOPES,
-                 group_id: "ops",
-                 scopes: ["public", "src:wiki"]
+                 group_id: "staff",
+                 scopes: ["public"]
                },
                nil
-             ).status == :CALL_OK
-
-      u = user("ops-member")
-      assert :ok = Admin.grant_group(admin.id, u.id, "ops")
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
-    end
-
-    test "a group-conferred admin role gives a plain member admin capabilities" do
-      root = superadmin()
-      u = user("group-role-member")
-
-      assert :ok = Admin.create_group(root, "operators", "Operators", nil)
-      assert :ok = Admin.set_group_role(root, "operators", "admin")
-      assert :ok = Admin.grant_group(root, u.id, "operators")
-
-      assert "admin" in Identity.roles_for(u.id)
-      assert "manage_access" in Identity.caps_for(u.id)
-      assert "invite_users" in Identity.caps_for(u.id)
-      assert "manage_users" in Identity.caps_for(u.id)
-    end
-
-    test "group role operations are superadmin-only and denials are audited" do
-      root = superadmin()
-      admin = admin_user("group-role-admin")
-
-      assert :ok = Admin.create_group(root, "privileged", "Privileged", nil)
-      assert Admin.set_group_role(admin.id, "privileged", "admin") == :not_authorized
-      assert Admin.clear_group_role(admin.id, "privileged", "admin") == :not_authorized
-
-      rows = Audit.for_actor(admin.id)
-      assert Enum.any?(rows, &(&1.action == "set_group_role" and &1.decision == "denied"))
-      assert Enum.any?(rows, &(&1.action == "clear_group_role" and &1.decision == "denied"))
-    end
-
-    test "non-empty delete requires confirm, and confirmed delete cascades membership" do
-      admin = admin_user("group-delete-admin")
-      u = user("group-delete-member")
-
-      assert :ok = Admin.create_group(admin.id, "doomed", "Doomed", nil)
-      assert :ok = Admin.set_group_scopes(admin.id, "doomed", ["src:wiki"])
-      assert :ok = Admin.grant_group(admin.id, u.id, "doomed")
-
-      assert Admin.delete_group(admin.id, "doomed", false) == :not_confirmed
-
-      assert Enum.any?(
-               Audit.for_actor(admin.id),
-               &(&1.action == "delete_group" and &1.decision == "denied" and
-                   &1.reason == "not_confirmed")
-             )
-
-      assert Identity.group_exists?("doomed")
-
-      assert Admin.delete_group(admin.id, "doomed", true) == :ok
-      refute Identity.group_exists?("doomed")
-      refute "doomed" in Identity.groups_for(u.id)
-    end
-
-    test "a non-admin ManageGroup request is NOT_AUTHORIZED and audited" do
-      plain = user("group-rpc-denied")
-
-      resp =
-        Server.manage_group(
-          %ManageGroupRequest{
-            assertion: assertion("group-rpc-denied"),
-            op: :GROUP_CREATE,
-            group_id: "blocked",
-            name: "Blocked"
-          },
-          nil
-        )
-
-      assert resp.status == :CALL_NOT_AUTHORIZED
-
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "create_group" and &1.decision == "denied")
-             )
-
-      refute Identity.group_exists?("blocked")
-    end
-
-    test "ListGroups includes granted_roles after ManageGroup SET_ROLE" do
-      root = superadmin()
-      token = local_assertion(Identity.get_user(root).login)
-
-      assert Server.manage_group(
-               %ManageGroupRequest{
-                 assertion: token,
-                 op: :GROUP_CREATE,
-                 group_id: "role-backed",
-                 name: "Role-backed"
-               },
-               nil
-             ).status == :CALL_OK
+             ).status == :CALL_BAD_REQUEST
 
       assert Server.manage_group(
                %ManageGroupRequest{
                  assertion: token,
                  op: :GROUP_SET_ROLE,
-                 group_id: "role-backed",
+                 group_id: "staff",
                  role: "admin"
                },
                nil
-             ).status == :CALL_OK
+             ).status == :CALL_NOT_AUTHORIZED
 
-      listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
-      group = Enum.find(listed.groups, &(&1.id == "role-backed"))
-      assert group.granted_roles == ["admin"]
-    end
-  end
-
-  describe "SSO group mapping — list_sso_map / manage_sso_map (ADR-18 ps-4)" do
-    test "put/upsert/delete/list round-trip through the RPC, ordered provider then incoming" do
-      root = superadmin()
-      _admin = admin_user("sso-map-admin")
-      token = assertion("sso-map-admin")
-      assert :ok = Admin.create_group(root, "staff", "Staff", nil)
-      assert :ok = Admin.create_group(root, "ops", "Ops", nil)
-
-      for {provider, incoming, group} <- [
-            {"keycloak", "DSI", "ops"},
-            {"keycloak", "All-Staff", "staff"},
-            {"okta", "Everyone", "staff"}
-          ] do
-        assert put_map(token, provider, incoming, group).status == :CALL_OK
-      end
-
-      listed = Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil)
-      assert listed.status == :CALL_OK
-
-      assert Enum.map(listed.mappings, &{&1.provider, &1.incoming_group, &1.our_group_id}) ==
-               [
-                 {"keycloak", "All-Staff", "staff"},
-                 {"keycloak", "DSI", "ops"},
-                 {"okta", "Everyone", "staff"}
-               ]
-
-      # re-PUT re-points an existing (provider, incoming) pair — upsert, not a dup
-      assert put_map(token, "keycloak", "DSI", "staff").status == :CALL_OK
-      after_upsert = Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings
-      assert length(after_upsert) == 3
-      assert Enum.find(after_upsert, &(&1.incoming_group == "DSI")).our_group_id == "staff"
-
-      assert Server.manage_sso_map(
-               %ManageSsoMapRequest{
+      assert Server.manage_group(
+               %ManageGroupRequest{
                  assertion: token,
-                 op: :SSO_MAP_DELETE,
-                 provider: "keycloak",
-                 incoming_group: "DSI"
+                 op: :GROUP_SET_ROLE,
+                 group_id: "staff",
+                 role: "superadmin"
                },
                nil
-             ).status == :CALL_OK
+             ).status == :CALL_BAD_REQUEST
 
-      remaining =
-        Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings
-        |> Enum.map(& &1.incoming_group)
-
-      refute "DSI" in remaining
-      assert length(remaining) == 2
+      listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
+      assert listed.status == :CALL_OK
+      assert Enum.map(listed.groups, & &1.id) == ["admins", "staff", "wheel"]
+      refute Map.has_key?(hd(listed.groups), :granted_scopes)
+      assert denied?(admin.id, "create_group")
     end
 
-    test "PUT onto a non-existent group is BAD_REQUEST and maps nothing" do
-      _admin = admin_user("sso-map-unknown")
-      token = assertion("sso-map-unknown")
-
-      assert put_map(token, "keycloak", "Ghost", "no-such-group").status == :CALL_BAD_REQUEST
-      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings == []
-    end
-
-    test "an empty required field is BAD_REQUEST (no half-written mapping)" do
-      root = superadmin()
-      _admin = admin_user("sso-map-empty")
-      token = assertion("sso-map-empty")
-      assert :ok = Admin.create_group(root, "staff", "Staff", nil)
-
-      assert put_map(token, "keycloak", "", "staff").status == :CALL_BAD_REQUEST
-      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).mappings == []
-    end
-
-    test "a non-admin is NOT_AUTHORIZED for list and manage, and denials are audited" do
-      plain = user("sso-map-denied")
-      token = assertion("sso-map-denied")
-
-      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).status ==
-               :CALL_NOT_AUTHORIZED
-
-      assert put_map(token, "keycloak", "X", "staff").status == :CALL_NOT_AUTHORIZED
-
-      rows = Audit.for_actor(plain.id)
-      assert Enum.any?(rows, &(&1.action == "list_sso_map" and &1.decision == "denied"))
-      assert Enum.any?(rows, &(&1.action == "put_sso_map" and &1.decision == "denied"))
-    end
-  end
-
-  describe "get_group — group detail with members (ADR-19)" do
-    test "returns the group view + members (login + providers), login-ordered, tombstones out" do
-      root = superadmin()
+    test "GetGroup returns members (login-ordered, tombstones out); non-admins are NOT_AUTHORIZED" do
       admin = admin_user("gg-admin")
       token = assertion("gg-admin")
-      assert :ok = Admin.create_group(root, "platform", "Platform", nil)
-      assert :ok = Admin.set_group_scopes(root, "platform", ["src:wiki"])
-      zoe = user("zoe")
-      amy = user("amy")
-      assert :ok = Admin.grant_group(admin.id, zoe.id, "platform")
-      assert :ok = Admin.grant_group(admin.id, amy.id, "platform")
+      _zoe = user("zoe")
+      _amy = user("amy")
 
-      resp = Server.get_group(%GetGroupRequest{assertion: token, group_id: "platform"}, nil)
+      resp = Server.get_group(%GetGroupRequest{assertion: token, group_id: "staff"}, nil)
       assert resp.status == :CALL_OK
-      assert resp.group.id == "platform"
-      assert resp.group.granted_scopes == ["src:wiki"]
-      assert Enum.map(resp.members, & &1.login) == ["amy", "zoe"]
-      assert "keycloak" in Enum.find(resp.members, &(&1.login == "amy")).providers
-    end
-
-    test "unknown group is NOT_FOUND" do
-      _admin = admin_user("gg-admin2")
-      token = assertion("gg-admin2")
+      assert Enum.map(resp.members, & &1.login) == ["amy", "gg-admin", "zoe"]
 
       assert Server.get_group(%GetGroupRequest{assertion: token, group_id: "nope"}, nil).status ==
                :CALL_NOT_FOUND
-    end
 
-    test "a non-admin is NOT_AUTHORIZED and the denial is audited" do
-      root = superadmin()
-      assert :ok = Admin.create_group(root, "platform", "Platform", nil)
-      plain = user("gg-denied")
-      token = assertion("gg-denied")
+      plain = user("plain")
 
-      assert Server.get_group(%GetGroupRequest{assertion: token, group_id: "platform"}, nil).status ==
+      assert Server.get_group(
+               %GetGroupRequest{assertion: assertion("plain"), group_id: "staff"},
+               nil
+             ).status ==
                :CALL_NOT_AUTHORIZED
 
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "get_group" and &1.decision == "denied")
-             )
-    end
-  end
-
-  describe "list_roles — the admin-console role read model" do
-    test "known roles include derived capabilities and distinct explicit holder counts" do
-      admin = admin_user("role-reader")
-      admin_two = user("admin-two")
-      root = superadmin()
-      # a second admin, conferred by group membership (ADR-19), not a direct grant
-      :ok = Admin.grant_group(root, admin_two.id, "admins")
-
-      assert {:ok, roles} = Admin.list_roles(admin.id)
-
-      user_role = Enum.find(roles, &(&1.name == "user"))
-      assert user_role.capabilities == []
-      assert user_role.holder_count == 0
-
-      admin_role = Enum.find(roles, &(&1.name == "admin"))
-      assert admin_role.capabilities == Identity.caps_for(admin.id)
-      assert admin_role.holder_count == 2
-
-      superadmin_role = Enum.find(roles, &(&1.name == "superadmin"))
-      assert "read_any_conversation" in superadmin_role.capabilities
-      assert superadmin_role.holder_count == 2
+      assert denied?(plain.id, "get_group")
+      refute denied?(admin.id, "get_group")
     end
 
-    test "a plain user is denied and the denial is audited" do
-      plain = user("role-denied")
+    test "ManageSsoMap over the wire: an admin is NOT_AUTHORIZED; wheel/unknown targets are BAD_REQUEST when elevated" do
+      _admin = admin_user("sso-admin")
+      token = assertion("sso-admin")
 
-      assert Admin.list_roles(plain.id) == :not_authorized
+      put = fn t, incoming, group ->
+        Server.manage_sso_map(
+          %ManageSsoMapRequest{
+            assertion: t,
+            op: :SSO_MAP_PUT,
+            provider: "keycloak",
+            incoming_group: incoming,
+            our_group_id: group
+          },
+          nil
+        )
+      end
 
-      assert Enum.any?(
-               Audit.for_actor(plain.id),
-               &(&1.action == "list_roles" and &1.decision == "denied")
-             )
-    end
-  end
+      assert put.(token, "DSI", "admins").status == :CALL_NOT_AUTHORIZED
+      assert Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil).status == :CALL_OK
 
-  describe "manage_users — deactivate / delete (auth dies, learned content persists)" do
-    test "deactivate disables login and strips role grants; learned content stays" do
-      admin = admin_user("adm")
-      u = user("penta")
-      # u's admin comes from group membership (ADR-19); deactivate must strip it
-      :ok = Admin.grant_group(superadmin(), u.id, "admins")
-      assert "admin" in Identity.roles_for(u.id)
-      {:ok, c} = Conversations.create(u.id, %{title: "theirs"})
+      w = wheel("rootsso")
+      _ = elevated(w)
+      root_t = Actor.sign(%{"sub" => "rootsso", "provider" => "local", "sid" => @sid})
+      assert put.(root_t, "DSI", "admins").status == :CALL_OK
+      assert put.(root_t, "root", "wheel").status == :CALL_BAD_REQUEST
+      assert put.(root_t, "x", "nope").status == :CALL_BAD_REQUEST
+      assert put.(root_t, "", "admins").status == :CALL_BAD_REQUEST
 
-      assert :ok = Admin.deactivate_user(admin.id, u.id)
-      assert Identity.get_user(u.id).status == "disabled"
-      assert Identity.roles_for(u.id) == []
-      # the account's conversation persists (D11 — not right-to-erasure)
-      assert {:ok, _} = Conversations.get(u.id, c.id)
-      assert Enum.any?(Audit.for_actor(admin.id), &(&1.action == "deactivate"))
-    end
+      listed = Server.list_sso_map(%ListSsoMapRequest{assertion: token}, nil)
 
-    test "delete kills every login path (status deleted, no identity_link) but keeps content" do
-      admin = admin_user("adm")
-      u = user("penta")
-      {:ok, c} = Conversations.create(u.id, %{title: "theirs"})
+      assert Enum.map(listed.mappings, &{&1.incoming_group, &1.our_group_id}) == [
+               {"DSI", "admins"}
+             ]
 
-      assert :ok = Admin.delete_user(admin.id, u.id)
-      assert Identity.get_user(u.id).status == "deleted"
-      assert Identity.user_by_link("keycloak", "sub-penta") == nil
-      # the row persists (FK + audit integrity) and their conversation persists
-      assert {:ok, _} = Conversations.get(u.id, c.id)
-      assert Enum.any?(Audit.for_actor(admin.id), &(&1.action == "delete"))
-    end
-
-    test "a user without manage_users cannot deactivate/delete — :not_authorized" do
-      mallory = user("mallory")
-      u = user("penta")
-      assert Admin.deactivate_user(mallory.id, u.id) == :not_authorized
-      assert Admin.delete_user(mallory.id, u.id) == :not_authorized
-      assert Identity.get_user(u.id).status == "active"
+      # the same Wheel member from a COLD session is not elevated
+      cold_t = Actor.sign(%{"sub" => "rootsso", "provider" => "local", "sid" => "cold"})
+      assert put.(cold_t, "Other", "staff").status == :CALL_NOT_AUTHORIZED
     end
   end
 end

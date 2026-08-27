@@ -35,7 +35,7 @@ defmodule Swarm.WorldMap.GateTest do
   end
 
   defp clean_procedure do
-    Coverage.describe("how do I reset my password", ["group"],
+    Coverage.describe("how do I reset my password", [Swarm.GraphCase.test_src()],
       candidate_keys: ["reset password procedure"],
       procedure_fun: proc_fun([variant([step(1, "open portal"), step(2, "set password")])]),
       profile: profile([])
@@ -85,7 +85,7 @@ defmodule Swarm.WorldMap.GateTest do
 
     test "corroborated entity coverage + entailment YES ⇒ SERVE (counts as citations)" do
       d =
-        Coverage.describe("what is the ingress", ["group"],
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
           profile: profile([group("is_a", [{"a load balancer", 2}])]),
           entity_serve: true
         )

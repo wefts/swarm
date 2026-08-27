@@ -20,10 +20,10 @@ defmodule Swarm.DeliberationTest do
   end
 
   test "persist then fetch by owner within scope returns the panel view" do
-    ref = Deliberation.maybe_persist(verdict(), "alice", ["public", "group"])
+    ref = Deliberation.maybe_persist(verdict(), "alice", ["public", test_src()])
     assert ref != ""
 
-    assert {:ok, d} = Deliberation.fetch(ref, "alice", ["public", "group"])
+    assert {:ok, d} = Deliberation.fetch(ref, "alice", ["public", test_src()])
     assert d.answer == "synthesized"
     assert d.confidence == 0.82
     assert d.disagreement == 0.14
@@ -44,11 +44,11 @@ defmodule Swarm.DeliberationTest do
   end
 
   test "current scopes must cover the asking scopes (no stale-auth bypass)" do
-    ref = Deliberation.maybe_persist(verdict(), "alice", ["public", "group"])
+    ref = Deliberation.maybe_persist(verdict(), "alice", ["public", test_src()])
     # alice has since lost `group` → cannot re-open a group-derived deliberation
     assert Deliberation.fetch(ref, "alice", ["public"]) == :not_found
     # covering scopes still works
-    assert {:ok, _} = Deliberation.fetch(ref, "alice", ["public", "group", "private"])
+    assert {:ok, _} = Deliberation.fetch(ref, "alice", ["public", test_src(), "private"])
   end
 
   test "an unknown ask_ref ⇒ :not_found" do

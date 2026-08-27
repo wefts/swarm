@@ -25,17 +25,17 @@ defmodule Swarm.Graph.ProcedureTest do
 
   describe "steps/3" do
     test "reconstructs an ordered procedure from one source" do
-      p = ent("password reset", "group")
-      s1 = step_node("open the portal", "group")
-      s2 = step_node("enter your login", "group")
-      s3 = step_node("set a new password", "group")
+      p = ent("password reset", test_src())
+      s1 = step_node("open the portal", test_src())
+      s2 = step_node("enter your login", test_src())
+      s3 = step_node("set a new password", test_src())
       # inserted out of order — the view must sort by ordinal
-      has_step(p, s3, 3, "wiki:reset", "group")
-      has_step(p, s1, 1, "wiki:reset", "group")
-      has_step(p, s2, 2, "wiki:reset", "group")
+      has_step(p, s3, 3, "wiki:reset", test_src())
+      has_step(p, s1, 1, "wiki:reset", test_src())
+      has_step(p, s2, 2, "wiki:reset", test_src())
 
       assert [%{origin: "wiki:reset", steps: steps}] =
-               Procedure.steps("password reset", ["group"])
+               Procedure.steps("password reset", [test_src()])
 
       assert Enum.map(steps, & &1.ordinal) == [1, 2, 3]
 
@@ -47,15 +47,15 @@ defmodule Swarm.Graph.ProcedureTest do
     end
 
     test "groups by origin FIRST — two sources' steps never interleave" do
-      p = ent("password reset", "group")
-      a1 = step_node("A step one", "group")
-      a2 = step_node("A step two", "group")
-      b1 = step_node("B step one", "group")
-      has_step(p, a1, 1, "wiki:a", "group")
-      has_step(p, a2, 2, "wiki:a", "group")
-      has_step(p, b1, 1, "wiki:b", "group")
+      p = ent("password reset", test_src())
+      a1 = step_node("A step one", test_src())
+      a2 = step_node("A step two", test_src())
+      b1 = step_node("B step one", test_src())
+      has_step(p, a1, 1, "wiki:a", test_src())
+      has_step(p, a2, 2, "wiki:a", test_src())
+      has_step(p, b1, 1, "wiki:b", test_src())
 
-      variants = Procedure.steps("password reset", ["group"])
+      variants = Procedure.steps("password reset", [test_src()])
       assert length(variants) == 2
       a = Enum.find(variants, &(&1.origin == "wiki:a"))
       b = Enum.find(variants, &(&1.origin == "wiki:b"))
@@ -64,28 +64,28 @@ defmodule Swarm.Graph.ProcedureTest do
     end
 
     test "scope-enforced — a public-only reader gets nothing for a group procedure" do
-      p = ent("password reset", "group")
-      s = step_node("secret step", "group")
-      has_step(p, s, 1, "wiki:reset", "group")
+      p = ent("password reset", test_src())
+      s = step_node("secret step", test_src())
+      has_step(p, s, 1, "wiki:reset", test_src())
 
       assert Procedure.steps("password reset", ["public"]) == []
-      assert Procedure.steps("password reset", ["group"]) != []
+      assert Procedure.steps("password reset", [test_src()]) != []
     end
 
     test "refuted step edges (reward<0) are excluded" do
-      p = ent("password reset", "group")
-      s = step_node("bad step", "group")
-      has_step(p, s, 1, "wiki:reset", "group")
+      p = ent("password reset", test_src())
+      s = step_node("bad step", test_src())
+      has_step(p, s, 1, "wiki:reset", test_src())
       %{rows: [[eid]]} = Swarm.Repo.query!("SELECT id FROM edge WHERE type='has_step' LIMIT 1")
       Store.set_reward(eid, -1.0)
 
-      assert Procedure.steps("password reset", ["group"]) == []
+      assert Procedure.steps("password reset", [test_src()]) == []
     end
 
     test "an unknown or step-less entity yields no variants" do
-      ent("empty concept", "group")
-      assert Procedure.steps("empty concept", ["group"]) == []
-      assert Procedure.steps("does not exist", ["group"]) == []
+      ent("empty concept", test_src())
+      assert Procedure.steps("empty concept", [test_src()]) == []
+      assert Procedure.steps("does not exist", [test_src()]) == []
     end
 
     test "empty scopes ⇒ nothing (default-deny)" do
@@ -93,26 +93,29 @@ defmodule Swarm.Graph.ProcedureTest do
     end
 
     test "a step reinforced by a 2nd event of the same origin appears ONCE (code review)" do
-      p = ent("password reset", "group")
-      s = step_node("the one step", "group")
-      has_step(p, s, 1, "wiki:reset", "group")
+      p = ent("password reset", test_src())
+      s = step_node("the one step", test_src())
+      has_step(p, s, 1, "wiki:reset", test_src())
       # re-emit the SAME has_step edge with a fresh provenance under the same origin
       {:ok, _} =
         Store.add_edge(p, s, "has_step", "ev2",
-          scope: "group",
+          scope: test_src(),
           origin: "wiki:reset",
           evidence_kind: "claim",
           step_ordinal: 1
         )
 
-      [%{origin: "wiki:reset", steps: steps}] = Procedure.steps("password reset", ["group"])
+      [%{origin: "wiki:reset", steps: steps}] = Procedure.steps("password reset", [test_src()])
       assert length(steps) == 1
     end
 
     test "step_ordinal is NULLed for a non-has_step edge (write-boundary invariant)" do
-      a = ent("A", "group")
-      b = step_node("B", "group")
-      {:ok, %{id: eid}} = Store.add_edge(a, b, "mentions", "ev", scope: "group", step_ordinal: 7)
+      a = ent("A", test_src())
+      b = step_node("B", test_src())
+
+      {:ok, %{id: eid}} =
+        Store.add_edge(a, b, "mentions", "ev", scope: test_src(), step_ordinal: 7)
+
       %{rows: [[ord]]} = Swarm.Repo.query!("SELECT step_ordinal FROM edge WHERE id = $1", [eid])
       assert ord == nil
     end
@@ -120,41 +123,42 @@ defmodule Swarm.Graph.ProcedureTest do
 
   describe "candidates/3 (ADR-17 #2 — direct procedure-entity lookup for the gate)" do
     test "returns an entity that carries has_step edges and matches query terms" do
-      p = ent("password reset portal", "group")
-      s = step_node("open it", "group")
-      has_step(p, s, 1, "wiki:reset", "group")
-      has_step(p, step_node("do it", "group"), 2, "wiki:reset", "group")
+      p = ent("password reset portal", test_src())
+      s = step_node("open it", test_src())
+      has_step(p, s, 1, "wiki:reset", test_src())
+      has_step(p, step_node("do it", test_src()), 2, "wiki:reset", test_src())
 
       assert "password reset portal" in Procedure.candidates("how do I reset my password", [
-               "group"
+               test_src()
              ])
     end
 
     test "does NOT return a plain entity with no has_step edges (even if the key matches)" do
-      ent("password facts", "group")
-      refute "password facts" in Procedure.candidates("tell me password facts", ["group"])
+      ent("password facts", test_src())
+      refute "password facts" in Procedure.candidates("tell me password facts", [test_src()])
     end
 
     test "scope-enforced + default-deny" do
-      p = ent("group procedure thing", "group")
-      has_step(p, step_node("x", "group"), 1, "w", "group")
-      has_step(p, step_node("y", "group"), 2, "w", "group")
+      p = ent("group procedure thing", test_src())
+      has_step(p, step_node("x", test_src()), 1, "w", test_src())
+      has_step(p, step_node("y", test_src()), 2, "w", test_src())
 
       assert Procedure.candidates("procedure thing", ["public"]) == []
       assert Procedure.candidates("procedure thing", []) == []
-      refute "group procedure thing" in Procedure.candidates("nothing relevant here", ["group"])
+
+      refute "group procedure thing" in Procedure.candidates("nothing relevant here", [test_src()])
     end
   end
 
   describe "has_generation_collision? (ADR-17 §2 Correction 3 — two-generation belt)" do
     test "a clean single-generation variant is NOT flagged" do
-      p = ent("password reset", "group")
-      s1 = step_node("open the portal", "group")
-      s2 = step_node("enter your login", "group")
-      has_step(p, s1, 1, "wiki:reset", "group")
-      has_step(p, s2, 2, "wiki:reset", "group")
+      p = ent("password reset", test_src())
+      s1 = step_node("open the portal", test_src())
+      s2 = step_node("enter your login", test_src())
+      has_step(p, s1, 1, "wiki:reset", test_src())
+      has_step(p, s2, 2, "wiki:reset", test_src())
 
-      [variant] = Procedure.steps("password reset", ["group"])
+      [variant] = Procedure.steps("password reset", [test_src()])
       assert variant.has_generation_collision? == false
     end
 
@@ -163,29 +167,29 @@ defmodule Swarm.Graph.ProcedureTest do
       # under the SAME origin until GC. Distinct step TEXT at the same ordinal ⇒ the
       # ordering would splice generations (1,1,2,2). The view must flag it so the gate
       # escalates — never serve a spliced procedure even if GC is delayed.
-      p = ent("password reset", "group")
+      p = ent("password reset", test_src())
       # generation 1 (original page)
-      has_step(p, step_node("old: open portal", "group"), 1, "wiki:reset", "group")
-      has_step(p, step_node("old: enter login", "group"), 2, "wiki:reset", "group")
+      has_step(p, step_node("old: open portal", test_src()), 1, "wiki:reset", test_src())
+      has_step(p, step_node("old: enter login", test_src()), 2, "wiki:reset", test_src())
       # generation 2 (re-ingested, changed page — new step text, same ordinals/origin)
-      has_step(p, step_node("new: open portal v2", "group"), 1, "wiki:reset", "group")
-      has_step(p, step_node("new: enter login v2", "group"), 2, "wiki:reset", "group")
+      has_step(p, step_node("new: open portal v2", test_src()), 1, "wiki:reset", test_src())
+      has_step(p, step_node("new: enter login v2", test_src()), 2, "wiki:reset", test_src())
 
-      [variant] = Procedure.steps("password reset", ["group"])
+      [variant] = Procedure.steps("password reset", [test_src()])
       assert variant.origin == "wiki:reset"
       assert variant.has_generation_collision? == true
     end
 
     test "collision is per-origin — a clean origin is not tainted by a collided sibling" do
-      p = ent("password reset", "group")
+      p = ent("password reset", test_src())
       # clean origin
-      has_step(p, step_node("A step one", "group"), 1, "wiki:a", "group")
-      has_step(p, step_node("A step two", "group"), 2, "wiki:a", "group")
+      has_step(p, step_node("A step one", test_src()), 1, "wiki:a", test_src())
+      has_step(p, step_node("A step two", test_src()), 2, "wiki:a", test_src())
       # collided origin (two texts at ordinal 1)
-      has_step(p, step_node("B step one", "group"), 1, "wiki:b", "group")
-      has_step(p, step_node("B step one v2", "group"), 1, "wiki:b", "group")
+      has_step(p, step_node("B step one", test_src()), 1, "wiki:b", test_src())
+      has_step(p, step_node("B step one v2", test_src()), 1, "wiki:b", test_src())
 
-      variants = Procedure.steps("password reset", ["group"])
+      variants = Procedure.steps("password reset", [test_src()])
       a = Enum.find(variants, &(&1.origin == "wiki:a"))
       b = Enum.find(variants, &(&1.origin == "wiki:b"))
       assert a.has_generation_collision? == false

@@ -10,8 +10,10 @@ defmodule Swarm.Graph.Contract do
 
   Rules:
 
-  - **Scope** is a lattice: `private` is bottom, `public` is top, and `src:*`
-    plus legacy `group` are incomparable mid-band tags.
+  - **Scope** is a lattice: `private` is bottom, `public` is top, and each
+    `src:<source_uuid>` is an incomparable mid-band tag (workspace ADR-20: the
+    stable Source id is the security coordinate; human labels such as `wiki` are
+    never scope keys; the legacy `group` scope is retired).
   - **Visibility invariant (ADR-5 workspace):** an edge's scope must be less
     than or equal to the greatest lower bound of its endpoints. Enforced here,
     at the boundary — not by individual callers.
@@ -28,6 +30,10 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
+  # v11 — project access (workspace ADR-20): the source scope key becomes the STABLE source id
+  # `src:<source_uuid>` (a `source` row owned by a `project`); `src:<name>` labels and the
+  # transitional `group` scope are migrated away and the CHECK constraints tightened to
+  # {private, public, src:<uuid>}. Effective scopes derive from Project membership (Swarm.Projects).
   # v10 — per-source scope (ADR-18): scope value space {private,group,public} → {private,public,
   # src:*}; the `group` scope is migrated to per-source `src:<name>` (transitional CHECK still admits
   # `group`); scope ordering becomes the lattice (private=⊥, public=⊤, src:* incomparable mid-band).
@@ -41,10 +47,11 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 10
-  @scope_rank %{"private" => 0, "group" => 1, "public" => 2}
-  @scopes Map.keys(@scope_rank)
-  @src_format ~r/^src:[a-z0-9_-]+$/
+  @schema_version 11
+  @scopes ~w(private public)
+  # A source scope is `src:` + the source's lowercase hyphenated UUID — never a label.
+  @uuid_re "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  @src_format ~r/^src:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
   @type_format ~r/^[a-z][a-z0-9_]*$/
   # The closed node-type vocabulary (swarm ADR-14 §3.1) — the entity-kind/identity
   # axis. Connectors map their source units onto exactly one of these; a node with
@@ -62,16 +69,14 @@ defmodule Swarm.Graph.Contract do
   # lifecycle classes. Each kind may carry its own TTL/compaction policy.
   @kinds ~w(observation claim hypothesis coordination lease derived presentation durable_fact)
 
-  @doc "The closed scope vocabulary."
+  @doc "The closed base scope vocabulary (`private`, `public`); source scopes are `src:<uuid>`."
   @spec scopes() :: [String.t()]
   def scopes, do: @scopes
 
-  @doc "Deny-ordering rank of a scope (`private` = 0, widest = highest), or nil."
-  @spec scope_rank(String.t()) :: non_neg_integer() | nil
-  def scope_rank(scope), do: Map.get(@scope_rank, scope)
-
   @doc """
-  True if a scope is admissible: the closed base vocab OR a well-formed `src:<name>`.
+  True if a scope is admissible: the closed base vocab OR a well-formed source scope
+  (`src:` + a lowercase hyphenated UUID). A human label (`src:wiki`) is NOT admissible
+  (workspace ADR-20 D2 — labels are never security keys).
   """
   @spec valid_scope?(String.t()) :: boolean()
   def valid_scope?(scope) when is_binary(scope) do
@@ -80,27 +85,45 @@ defmodule Swarm.Graph.Contract do
 
   def valid_scope?(_), do: false
 
-  @doc """
-  Map an ingest `origin` to its source scope (`src:<name>`), or `:inherit` for DERIVED-fact origins
-  (enrichment / synonymy — the fact takes the anchor node's scope, operator 2026-07-08), or `:unknown`
-  for an unrecognized origin (the migration flags these; never silently public). Single source of truth
-  for the origin→src derivation.
-  """
-  @spec origin_to_src(String.t()) :: String.t() | :inherit | :unknown
-  def origin_to_src(origin) when is_binary(origin) do
-    origin |> String.split(":", parts: 2) |> hd() |> segment_to_src()
+  @doc "True iff `scope` is a well-formed source scope (`src:<uuid>`)."
+  @spec source_scope?(term()) :: boolean()
+  def source_scope?(scope) when is_binary(scope), do: scope =~ @src_format
+  def source_scope?(_), do: false
+
+  @doc "The source scope for a source id: `\"src:\" <> uuid` (raises on a malformed uuid)."
+  @spec source_scope(String.t()) :: String.t()
+  def source_scope(source_id) when is_binary(source_id) do
+    scope = "src:" <> String.downcase(source_id)
+
+    if scope =~ @src_format,
+      do: scope,
+      else: raise(ArgumentError, "not a source uuid: #{source_id}")
   end
 
-  def origin_to_src(_), do: :unknown
+  @doc "The source id behind a source scope, or `nil` for a non-source scope."
+  @spec scope_source_id(term()) :: String.t() | nil
+  def scope_source_id("src:" <> id = scope) when is_binary(scope) do
+    if scope =~ @src_format, do: id, else: nil
+  end
 
-  # First origin segment → source scope. `enrich`/`synonymy` are DERIVED-fact origins → `:inherit`
-  # (the fact takes its anchor node's scope). Unrecognized → `:unknown` (migration flags; never public).
-  defp segment_to_src(seg) when seg in ~w(wiki mediawiki wikipedia), do: "src:wiki"
-  defp segment_to_src("confluence"), do: "src:confluence"
-  defp segment_to_src("iac"), do: "src:iac"
-  defp segment_to_src("ldap"), do: "src:ldap"
-  defp segment_to_src(seg) when seg in ~w(enrich synonymy), do: :inherit
-  defp segment_to_src(_), do: :unknown
+  def scope_source_id(_), do: nil
+
+  @doc "The SQL regex (POSIX) a source scope must match — for CHECK constraints and migrations."
+  @spec source_scope_sql_regex() :: String.t()
+  def source_scope_sql_regex, do: "^src:" <> @uuid_re <> "$"
+
+  @doc """
+  True for a DERIVED-fact origin (`enrich:*` / `synonymy*`): such a fact inherits its anchor
+  node's scope — it never mints or widens one (operator 2026-07-08; ADR-20 D12). Content origins
+  (`wiki:*`, `confluence:*`, `ldap:*`, `iac:*`, …) are labels only: their scope is whatever
+  registered Source the connector was told to write under (`Swarm.Projects.scope!/1`).
+  """
+  @spec derived_origin?(term()) :: boolean()
+  def derived_origin?(origin) when is_binary(origin) do
+    (origin |> String.split(":", parts: 2) |> hd()) in ~w(enrich synonymy)
+  end
+
+  def derived_origin?(_), do: false
 
   @doc """
   Lattice partial order: `private` ≤ everything, everything ≤ `public`, else only equal scopes are ≤.
@@ -112,7 +135,7 @@ defmodule Swarm.Graph.Contract do
 
   @doc """
   Greatest lower bound in the scope lattice — the write-time clamp for an edge's endpoints.
-  Two DIFFERENT mid-band tags (src:* or group) have GLB `private`.
+  Two DIFFERENT source scopes have GLB `private` (the accepted cross-source-edge cost, ADR-18 F3).
   """
   @spec glb(String.t(), String.t()) :: String.t()
   def glb(a, b) when is_binary(a) and is_binary(b) do

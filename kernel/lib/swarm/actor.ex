@@ -6,7 +6,7 @@ defmodule Swarm.Actor do
   boundary: a channel bug / stale session / confused deputy could spoof it). Each
   request instead carries a **signed** actor assertion; the kernel verifies it and
   **derives** the effective `{uuid, scopes, caps}` from its OWN records
-  (`identity_link → app_user → group_scope_map / role_grant`). The channel says
+  (`identity_link → app_user → Project memberships / group roles / live elevation`, ADR-20). The channel says
   *who authenticated*; the kernel decides *what they may do*. This is what makes
   the kernel the real sole authority on the single box.
 
@@ -59,7 +59,9 @@ defmodule Swarm.Actor do
           login: String.t(),
           scopes: [String.t()],
           caps: [String.t()],
-          sid: String.t() | nil
+          sid: String.t() | nil,
+          external: boolean(),
+          elevation_expires_at: DateTime.t() | nil
         }
   @type reason ::
           :no_secret
@@ -88,13 +90,20 @@ defmodule Swarm.Actor do
          {:ok, provider, subject} <- identity_claims(claims),
          %{} = user <- Identity.user_by_link(provider, subject) || {:error, :unknown_actor},
          :active <- account_status(user) do
+      sid = Map.get(claims, "sid")
+      # Capabilities are derived for THIS session: an elevation is bound to the `sid` that
+      # requested it (ADR-20 §5), so another session of the same user is not elevated.
+      elevation = Swarm.Elevation.active(user.id, sid)
+
       {:ok,
        %{
          uuid: user.id,
          login: user.login,
          scopes: Identity.scopes_for(user.id),
-         caps: Identity.caps_for(user.id),
-         sid: Map.get(claims, "sid")
+         caps: Identity.caps_for({user.id, sid}),
+         sid: sid,
+         external: user.external,
+         elevation_expires_at: if(elevation, do: elevation.expires_at, else: nil)
        }}
     else
       {:error, reason} -> {:error, reason}
@@ -127,10 +136,20 @@ defmodule Swarm.Actor do
   end
 
   @provision_audience "swarm.provision.v1"
+  @reauth_audience "swarm.reauth.v1"
 
   @doc "The provision-token audience (ADR-16 D3 wire contract)."
   @spec provision_audience() :: String.t()
   def provision_audience, do: @provision_audience
+
+  @doc """
+  The re-authentication-proof audience (ADR-20 elevation). The channel signs
+  `{sub, provider: "local", sid, jti, auth_time, iat, exp}` with this audience right after
+  re-verifying the local password; `Swarm.Elevation.request/4` verifies it. A distinct
+  audience means an actor assertion can never pass as a re-auth proof or vice versa.
+  """
+  @spec reauth_audience() :: String.t()
+  def reauth_audience, do: @reauth_audience
 
   @doc """
   Verify a **provision token** (aud `swarm.provision.v1`) and return the bound,

@@ -35,7 +35,6 @@ defmodule Swarm.Enrichment.WhoMap do
   class) is only the BACKSTOP if the daily cron stops.
   """
 
-  alias Swarm.Graph.Contract
   alias Swarm.Graph.Freshness
   alias Swarm.Graph.Store
   alias Swarm.Ingest.Content
@@ -44,7 +43,6 @@ defmodule Swarm.Enrichment.WhoMap do
   @entity_type "entity"
   @marker_type "concept"
   @origin "ldap:directory"
-  @who_scope Contract.origin_to_src(@origin)
   @lineage "ldap:directory"
   @reliability 0.9
   @evidence_kind "observation"
@@ -159,7 +157,10 @@ defmodule Swarm.Enrichment.WhoMap do
     reliability = Keyword.get(opts, :reliability, @reliability)
     evidence_kind = Keyword.get(opts, :evidence_kind, @evidence_kind)
     edge_opts = {reliability, evidence_kind, lineage}
-    scope = who_scope()
+    # ADR-20 §3: the who facts are written at the ANCHOR's scope — the loader created the
+    # anchor node under the registered LDAP Source (`Swarm.Projects.scope!/1`); the kernel
+    # never chooses a scope for a derived/content write (council: codex).
+    scope = who_scope(node)
 
     facts
     |> Enum.filter(&admissible?/1)
@@ -202,8 +203,8 @@ defmodule Swarm.Enrichment.WhoMap do
   @spec write_profile(map(), String.t(), keyword()) :: integer() | :error
   def write_profile(profile, provenance, opts \\ [])
 
-  def write_profile(%{"uid" => uid} = profile, _provenance, _opts) when is_binary(uid) do
-    scope = who_scope()
+  def write_profile(%{"uid" => uid} = profile, _provenance, opts) when is_binary(uid) do
+    scope = who_scope(opts)
     key = entity_key("person", uid)
 
     if String.trim(uid) == "" do
@@ -217,19 +218,22 @@ defmodule Swarm.Enrichment.WhoMap do
 
   def write_profile(_profile, _provenance, _opts), do: :error
 
-  @doc "Upsert a curated group node (who:group:<slug>) with name+aliases as searchable content."
-  @spec write_group(String.t(), String.t(), [String.t()]) :: integer()
-  def write_group(slug, name, aliases) when is_binary(slug) do
-    node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: who_scope())
+  @doc """
+  Upsert a curated group node (who:group:<slug>) with name+aliases as searchable content, at
+  the given source `scope` (the registered LDAP/curation Source — never chosen here).
+  """
+  @spec write_group(String.t(), String.t(), [String.t()], String.t()) :: integer()
+  def write_group(slug, name, aliases, scope) when is_binary(slug) and is_binary(scope) do
+    node_id = Store.upsert_node(@entity_type, entity_key("group", slug), scope: scope)
     body = Enum.join([name | List.wrap(aliases)], " · ")
     put_content(node_id, "group: " <> body)
     node_id
   end
 
-  @doc "Upsert a service node (who:service:<slug>) with name+aliases as searchable content."
-  @spec write_service(String.t(), String.t(), [String.t()]) :: integer()
-  def write_service(slug, name, aliases) when is_binary(slug) do
-    node_id = Store.upsert_node(@entity_type, entity_key("service", slug), scope: who_scope())
+  @doc "Upsert a service node (who:service:<slug>) with name+aliases as searchable content, at `scope`."
+  @spec write_service(String.t(), String.t(), [String.t()], String.t()) :: integer()
+  def write_service(slug, name, aliases, scope) when is_binary(slug) and is_binary(scope) do
+    node_id = Store.upsert_node(@entity_type, entity_key("service", slug), scope: scope)
     put_content(node_id, "service: " <> Enum.join([name | List.wrap(aliases)], " · "))
     node_id
   end
@@ -539,9 +543,21 @@ defmodule Swarm.Enrichment.WhoMap do
     end
   end
 
-  # Who facts are LDAP content facts, not derivatives from the caller's anchor scope.
-  @spec who_scope() :: String.t()
-  defp who_scope, do: @who_scope
+  # The write scope is the anchor node's scope (`%{scope: _}`), or an explicit `:scope` option
+  # for the anchor-less profile/group/service writers — REQUIRED, never defaulted to a label
+  # (ADR-20 D2: `src:ldap` is a label, not a key). Fail loud when missing.
+  @spec who_scope(map() | keyword()) :: String.t()
+  defp who_scope(%{scope: scope}) when is_binary(scope), do: scope
+
+  defp who_scope(opts) when is_list(opts) do
+    case Keyword.get(opts, :scope) do
+      scope when is_binary(scope) and scope != "" -> scope
+      _ -> raise ArgumentError, "WhoMap: a source :scope is required (Swarm.Projects.scope!/1)"
+    end
+  end
+
+  defp who_scope(other),
+    do: raise(ArgumentError, "WhoMap: anchor without scope: #{inspect(other)}")
 
   @spec valid_signature?(String.t(), String.t(), String.t()) :: boolean()
   defp valid_signature?(rel, sk, ok) do

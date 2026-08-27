@@ -36,7 +36,7 @@ defmodule Swarm.EntityResolution.CandidatesTest do
       # distant vector → excluded by the cosine gate
       entity("Quarterly Report", unit(1))
       # cross-scope (same key family, high cosine) → never proposed across scopes
-      entity("Apollo Capsule", unit(0), "group")
+      entity("Apollo Capsule", unit(0), test_src())
 
       pairs = Candidates.propose(vec_threshold: 0.85, lex_threshold: 0.2)
 

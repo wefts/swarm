@@ -66,12 +66,12 @@ defmodule Swarm.Enrichment.ProceduresTest do
 
   describe "write/3 + Procedure.steps/3" do
     test "writes a procedure entity + ordered has_step→step edges, readable by the view" do
-      n = src_node("group")
+      n = src_node(test_src())
       procs = [%{name: "reset password", steps: ["open the portal", "set a new password"]}]
       ids = Procedures.write(n, procs, "enrich:node:#{n.id}")
       assert length(ids) == 2
 
-      [%{origin: _, steps: steps}] = Procedure.steps("reset password", ["group"])
+      [%{origin: _, steps: steps}] = Procedure.steps("reset password", [test_src()])
       assert Enum.map(steps, & &1.key) == ["open the portal", "set a new password"]
       # steps are their OWN type, not concept (kept out of the synonymy/aggregation space)
       assert is_integer(node_id_of("step", "open the portal"))
@@ -79,25 +79,25 @@ defmodule Swarm.Enrichment.ProceduresTest do
     end
 
     test "a genuine REORDER re-inserts fresh ordinals (no stale-ordinal trap)" do
-      n = src_node("group")
+      n = src_node(test_src())
       prov = "enrich:node:#{n.id}"
       Procedures.write(n, [%{name: "p", steps: ["A", "B", "C"]}], prov)
       # re-enrich: same steps, new order A, C, B
       Procedures.write(n, [%{name: "p", steps: ["A", "C", "B"]}], prov)
 
-      [%{steps: steps}] = Procedure.steps("p", ["group"])
+      [%{steps: steps}] = Procedure.steps("p", [test_src()])
       assert Enum.map(steps, & &1.key) == ["A", "C", "B"]
       # exactly 3 has_step edges remain (no stale duplicates)
       assert length(steps) == 3
     end
 
     test "re-enrich with FEWER steps clears the dropped step" do
-      n = src_node("group")
+      n = src_node(test_src())
       prov = "enrich:node:#{n.id}"
       Procedures.write(n, [%{name: "p", steps: ["A", "B", "C"]}], prov)
       Procedures.write(n, [%{name: "p", steps: ["A", "B"]}], prov)
 
-      [%{steps: steps}] = Procedure.steps("p", ["group"])
+      [%{steps: steps}] = Procedure.steps("p", [test_src()])
       assert Enum.map(steps, & &1.key) == ["A", "B"]
     end
   end

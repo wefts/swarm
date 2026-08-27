@@ -339,7 +339,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
 
     test "a Stage-1 blocker is never recovered by a YES entailment (asymmetry, procedure path)" do
       d =
-        Coverage.describe("how do I reset my password", ["group"],
+        Coverage.describe("how do I reset my password", [Swarm.GraphCase.test_src()],
           candidate_keys: ["reset password"],
           procedure_fun: proc_fun([]),
           profile: profile()

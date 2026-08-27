@@ -23,16 +23,16 @@ defmodule Swarm.Graph.ChunkScopeMirrorTest do
       Repo.query!("INSERT INTO chunk (node_id, ordinal, text) VALUES ($1, 0, 'body')", [node_id])
 
   test "a new chunk mirrors its node's scope and key on insert" do
-    nid = Store.upsert_node("article", "Public IP", scope: "group")
+    nid = Store.upsert_node("article", "Public IP", scope: test_src())
     insert_chunk!(nid)
 
-    assert {"group", "Public IP"} == chunk_mirror(nid)
+    assert {test_src(), "Public IP"} == chunk_mirror(nid)
   end
 
   test "changing node.scope propagates to its chunks (no stale-permissive mirror)" do
-    nid = Store.upsert_node("article", "Secret", scope: "group")
+    nid = Store.upsert_node("article", "Secret", scope: test_src())
     insert_chunk!(nid)
-    assert {"group", "Secret"} == chunk_mirror(nid)
+    assert {test_src(), "Secret"} == chunk_mirror(nid)
 
     Repo.query!("UPDATE node SET scope = 'private' WHERE id = $1", [nid])
 

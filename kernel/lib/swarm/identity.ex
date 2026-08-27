@@ -1,29 +1,31 @@
 defmodule Swarm.Identity do
   @moduledoc """
-  The kernel identity store (workspace ADR-16, step 1). The kernel owns the
-  minimal **authorization** record — `uuid` + `login` + emails + identity-links +
-  group/scope grants + roles — and is the sole authority for who-may-do-what. The
-  channel (hive) owns **authentication only** (password hashes, OIDC exchange,
-  sessions) and never reads these tables.
+  The kernel identity store (workspace ADR-16 step 1, access model ADR-20). The kernel owns the
+  minimal **authorization** record — `uuid` + `login` + emails + identity-links + group
+  memberships + Project memberships — and is the sole authority for who-may-see-what and
+  who-may-do-what. The channel (hive) owns **authentication only** (password hashes, OIDC
+  exchange, sessions) and never reads these tables.
 
-  Provisioning is **JIT from already-verified claims**: `upsert_from_claims/1`
-  takes the OIDC-shaped claim map the channel forwards *after* the kernel has
-  cryptographically verified the actor assertion (that verification is ADR-16
-  step 2 / Decision 9 — this store trusts its caller to have verified). Matching
-  is on the stable `(provider, subject)` link, never on login or email, so an SSO
-  login and a later rename resolve to **one** uuid (account-linking).
+  Provisioning is **JIT from already-verified claims**: `upsert_from_claims/1` takes the
+  OIDC-shaped claim map the channel forwards *after* the kernel has cryptographically verified
+  the actor assertion (ADR-16 D9 — this store trusts its caller to have verified). Matching is
+  on the stable `(provider, subject)` link, never on login or email.
 
-  Scopes and roles are **derived** here from the kernel's own records
-  (`group_scope_map`, `role_grant`) — never taken from a channel-supplied field.
-  Default-deny throughout: a group with no scope-map confers nothing; a user with
-  no `role_grant` holds no capabilities.
-
-  Credentials and IdP secrets never live here. `identity_link.subject` is the
-  opaque IdP `sub`, not a secret; password hashes stay channel-side.
+  **Derivation (ADR-20).** Scopes come from Project membership (`Swarm.Projects.effective_scopes/1`
+  — a user, or a group the user is in, is a member of a Project that owns Sources), never from a
+  group grant; the fixed groups `wheel` / `admins` / `staff` carry ROLES only. Capabilities come
+  from the group-conferred `admin` role plus, for a live `Swarm.Elevation` bound to the actor's
+  session, the `superadmin` set. Default-deny throughout: no membership ⇒ exactly `["public"]`;
+  no role ⇒ no capability. Credentials and IdP secrets never live here.
   """
 
-  alias Swarm.Graph.Contract
-  alias Swarm.Repo
+  alias Swarm.{Elevation, Projects, Repo}
+
+  @wheel "wheel"
+  @admins "admins"
+  @staff "staff"
+  @fixed_groups [{@wheel, "Wheel"}, {@admins, "Admins"}, {@staff, "Staff"}]
+  @fixed_group_ids Enum.map(@fixed_groups, &elem(&1, 0))
 
   @type claims :: %{
           required(:provider) => String.t(),
@@ -47,10 +49,17 @@ defmodule Swarm.Identity do
           last_name: String.t() | nil,
           nickname: String.t() | nil,
           status: String.t(),
+          external: boolean(),
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           last_login_at: DateTime.t() | nil
         }
+  @typedoc """
+  Who is acting: a bare uuid (never elevated), or `{uuid, sid}` / `%{uuid: _, sid: _}` from a
+  resolved assertion — the session an elevation may be bound to.
+  """
+  @type actor_ref ::
+          String.t() | {String.t(), String.t() | nil} | %{required(:uuid) => String.t()}
 
   # ── UUIDv7 (ADR-16 D1) ────────────────────────────────────────────────
 
@@ -72,14 +81,71 @@ defmodule Swarm.Identity do
     |> Enum.map_join("-", &Base.encode16(&1, case: :lower))
   end
 
+  # ── the fixed groups (ADR-20 D7) ───────────────────────────────────────
+
+  @doc "The fixed group ids: `wheel`, `admins`, `staff` (ADR-20 — no arbitrary group lifecycle)."
+  @spec fixed_groups() :: [String.t()]
+  def fixed_groups, do: @fixed_group_ids
+
+  @doc "The Wheel group id (local-only break-glass cohort; members may elevate)."
+  @spec wheel() :: String.t()
+  def wheel, do: @wheel
+
+  @doc "The Admins group id (confers the `admin` role)."
+  @spec admins() :: String.t()
+  def admins, do: @admins
+
+  @doc "The Staff group id (the default internal cohort; confers no role)."
+  @spec staff() :: String.t()
+  def staff, do: @staff
+
+  @doc """
+  Ensure the three fixed groups and the `admins → admin` role binding exist (idempotent). The
+  migration seeds them; this is the fresh-boot / test belt so a JIT provision can never find
+  its default cohort missing.
+  """
+  @spec ensure_fixed_groups() :: :ok
+  def ensure_fixed_groups do
+    for {id, name} <- @fixed_groups do
+      Repo.query!(
+        """
+        INSERT INTO access_group (id, source, name) VALUES ($1, 'local', $2)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        [id, name]
+      )
+    end
+
+    Repo.query!(
+      "INSERT INTO group_role (group_id, role) VALUES ($1, 'admin') ON CONFLICT (group_id, role) DO NOTHING",
+      [@admins]
+    )
+
+    :ok
+  end
+
+  @doc """
+  The default internal cohort every NON-external account joins at provisioning
+  (`config :swarm, :identity, default_cohort` — `"staff"`; `nil`/`""` disables). Guests
+  (`external = true`) never join it (ADR-20 Guests).
+  """
+  @spec default_cohort_group() :: String.t() | nil
+  def default_cohort_group do
+    case Application.get_env(:swarm, :identity, [])[:default_cohort] do
+      g when is_binary(g) and g != "" -> g
+      _ -> nil
+    end
+  end
+
   # ── JIT provisioning ──────────────────────────────────────────────────
 
   @doc """
   Find-or-create the user for a set of *verified* claims, idempotently, matching
   on `(provider, subject)`. Updates the mutable attributes (login, names),
   promotes `invited → active` on first authenticated login, touches
-  `last_login_at`, and reconciles emails + group memberships to the claim set
-  (a group dropped from the claims is revoked — default-deny). Returns the user.
+  `last_login_at`, reconciles emails + IdP group memberships to the claim set (a group
+  dropped from the claims is revoked — default-deny) and joins the default cohort
+  (`staff`) unless the account is a guest. Returns the user.
   """
   @spec upsert_from_claims(claims()) :: {:ok, user()}
   def upsert_from_claims(claims) do
@@ -88,6 +154,7 @@ defmodule Swarm.Identity do
         user_id = find_or_create_user(claims)
         sync_emails(user_id, Map.get(claims, :emails, []))
         sync_groups(user_id, Map.get(claims, :provider), Map.get(claims, :groups, []))
+        ensure_default_cohort(user_id)
         user_id
       end)
 
@@ -269,9 +336,10 @@ defmodule Swarm.Identity do
           FROM sso_group_map
          WHERE provider = $1
            AND incoming_group = ANY($2::text[])
+           AND our_group_id <> $3
          ORDER BY our_group_id
         """,
-        [provider, incoming]
+        [provider, incoming, @wheel]
       ).rows
       |> List.flatten()
 
@@ -300,16 +368,39 @@ defmodule Swarm.Identity do
     :ok
   end
 
-  # ── Superadmin seed (the root/uid-0 mechanism, ADR-16 D7) ──────────────
+  # The default internal cohort (ADR-20 "Staff is the default internal cohort"): a
+  # non-guest joins it at provisioning; the membership is `source = 'default'` so an IdP
+  # group re-sync never revokes it. A guest never joins.
+  @spec ensure_default_cohort(String.t()) :: :ok
+  defp ensure_default_cohort(user_id) do
+    with group when is_binary(group) <- default_cohort_group(),
+         false <- external?(user_id) do
+      ensure_fixed_groups()
+
+      Repo.query!(
+        """
+        INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'default')
+        ON CONFLICT (user_id, group_id) DO NOTHING
+        """,
+        [cast_to_uuid(user_id), group]
+      )
+
+      :ok
+    else
+      _ -> :ok
+    end
+  end
+
+  # ── Wheel bootstrap (the root/uid-0 mechanism, ADR-20) ─────────────────
 
   @doc """
-  Idempotently seed a superadmin: a local, active user with the given (vanity)
-  UUIDv7 `id` and `login`, plus a `superadmin` `role_grant`. The concrete id +
-  login are deployment config (hive seeds them at bootstrap) — the kernel ships
-  only the mechanism, never a literal name.
+  Idempotently seed a local Wheel member: an active local user with the given (vanity)
+  UUIDv7 `id` and `login`, a member of `wheel` (may elevate) AND `admins` (daily admin
+  without elevating). No standing superadmin is conferred — that exists only as an
+  elevation. The concrete id + login are deployment config (hive seeds them at bootstrap).
   """
-  @spec seed_superadmin(%{id: String.t(), login: String.t()}) :: {:ok, user()}
-  def seed_superadmin(%{id: id, login: login}) do
+  @spec seed_wheel(%{id: String.t(), login: String.t()}) :: {:ok, user()}
+  def seed_wheel(%{id: id, login: login}) do
     {:ok, _} =
       Repo.transaction(fn ->
         Repo.query!(
@@ -321,21 +412,14 @@ defmodule Swarm.Identity do
           [cast_to_uuid(id), login]
         )
 
-        # ADR-19: superadmin is conferred by MEMBERSHIP in the Superuser group, NEVER a
-        # direct role grant. Ensure the group + its superadmin binding, then add this user
-        # (fresh-boot bootstrap — the migration handles existing deployments).
-        Repo.query!(
-          "INSERT INTO access_group (id, source, name) VALUES ('superuser', 'local', 'Superuser') ON CONFLICT (id) DO NOTHING"
-        )
+        ensure_fixed_groups()
 
-        Repo.query!(
-          "INSERT INTO group_role (group_id, role) VALUES ('superuser', 'superadmin') ON CONFLICT (group_id, role) DO NOTHING"
-        )
-
-        Repo.query!(
-          "INSERT INTO user_group (user_id, group_id, source) VALUES ($1, 'superuser', 'local') ON CONFLICT (user_id, group_id) DO NOTHING",
-          [cast_to_uuid(id)]
-        )
+        for group <- [@wheel, @admins] do
+          Repo.query!(
+            "INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'local') ON CONFLICT (user_id, group_id) DO NOTHING",
+            [cast_to_uuid(id), group]
+          )
+        end
 
         # A local account resolves via the SAME identity_link path as SSO (uniform
         # resolution): provider "local", subject = login.
@@ -347,6 +431,8 @@ defmodule Swarm.Identity do
           """,
           [cast_to_uuid(id), login]
         )
+
+        ensure_default_cohort(id)
       end)
 
     {:ok, get_user(id)}
@@ -354,121 +440,116 @@ defmodule Swarm.Identity do
 
   # ── Mutations (the audited, cap-gated callers live in Swarm.Admin) ─────
 
-  @doc "Grant a role (idempotent). `source` ∈ direct|group|sso_group."
-  @spec grant_role(String.t(), String.t(), String.t(), String.t() | nil) :: :ok
-  def grant_role(user_id, role, source, granted_by \\ nil) do
-    Repo.query!(
-      """
-      INSERT INTO role_grant (user_id, role, source, granted_by)
-      VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, role, source) DO NOTHING
-      """,
-      [cast_to_uuid(user_id), role, source, opt_uuid(granted_by)]
-    )
-
-    :ok
-  end
-
-  @doc "Revoke a role (all sources)."
-  @spec revoke_role(String.t(), String.t()) :: :ok
-  def revoke_role(user_id, role) do
-    Repo.query!("DELETE FROM role_grant WHERE user_id = $1 AND role = $2", [
-      cast_to_uuid(user_id),
-      role
-    ])
-
-    :ok
-  end
-
-  @doc "Add a user to a group (idempotent; ensures the group exists)."
-  @spec add_to_group(String.t(), String.t()) :: :ok
+  @doc """
+  Add a user to one of the fixed groups (idempotent). `wheel` takes local-only users
+  (no external IdP link — ADR-19 D4/D8 carried into ADR-20) — the deepest belt behind
+  the `Swarm.Admin` gate.
+  """
+  @spec add_to_group(String.t(), String.t()) ::
+          :ok | {:error, :unknown_group | :wheel_local_only}
   def add_to_group(user_id, group_id) do
-    Repo.query!(
-      "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
-      [group_id]
-    )
+    cond do
+      not group_exists?(group_id) ->
+        {:error, :unknown_group}
 
-    Repo.query!(
-      """
-      INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'local')
-      ON CONFLICT (user_id, group_id) DO NOTHING
-      """,
-      [cast_to_uuid(user_id), group_id]
-    )
+      group_id == @wheel and not local_only?(user_id) ->
+        {:error, :wheel_local_only}
 
-    :ok
-  end
+      true ->
+        Repo.query!(
+          """
+          INSERT INTO user_group (user_id, group_id, source) VALUES ($1, $2, 'local')
+          ON CONFLICT (user_id, group_id) DO NOTHING
+          """,
+          [cast_to_uuid(user_id), group_id]
+        )
 
-  @doc """
-  Create or update a first-class local group. The group id is immutable; existing
-  rows keep their source while `name` and `description` are replaced.
-  """
-  @spec create_group(String.t(), String.t() | nil, String.t() | nil) :: :ok
-  def create_group(id, name, description) do
-    Repo.query!(
-      """
-      INSERT INTO access_group (id, source, name, description)
-      VALUES ($1, 'local', $2, $3)
-      ON CONFLICT (id) DO UPDATE
-        SET name = EXCLUDED.name,
-            description = EXCLUDED.description
-      """,
-      [id, name, description]
-    )
-
-    :ok
-  end
-
-  @doc "Rename a group without changing its immutable id."
-  @spec rename_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
-  def rename_group(id, name) do
-    case Repo.query!("UPDATE access_group SET name = $2 WHERE id = $1", [id, name]) do
-      %{num_rows: 0} -> {:error, :not_found}
-      _ -> :ok
-    end
-  end
-
-  @doc "Replace a group's description."
-  @spec describe_group(String.t(), String.t() | nil) :: :ok | {:error, :not_found}
-  def describe_group(id, description) do
-    case Repo.query!(
-           "UPDATE access_group SET description = $2 WHERE id = $1",
-           [id, description]
-         ) do
-      %{num_rows: 0} -> {:error, :not_found}
-      _ -> :ok
+        :ok
     end
   end
 
   @doc """
-  Delete a group. Foreign keys cascade membership, scope-map and group-role rows.
+  Remove a user from a group. Leaving `wheel` revokes the user's live elevations in the
+  same transaction (an elevation cannot outlive the eligibility that granted it).
   """
-  @spec delete_group(String.t()) :: :ok
-  def delete_group(id) do
-    Repo.query!("DELETE FROM access_group WHERE id = $1", [id])
+  @spec remove_from_group(String.t(), String.t()) :: :ok
+  def remove_from_group(user_id, group_id) do
+    {:ok, _} =
+      Repo.transaction(fn ->
+        Repo.query!("DELETE FROM user_group WHERE user_id = $1 AND group_id = $2", [
+          cast_to_uuid(user_id),
+          group_id
+        ])
+
+        if group_id == @wheel, do: Elevation.revoke_all(user_id)
+      end)
+
     :ok
   end
 
-  @grantable_group_roles ~w(admin superadmin)
+  @doc "Whether a group exists (the fixed set, plus any group row the store still holds)."
+  @spec group_exists?(String.t()) :: boolean()
+  def group_exists?(id) when is_binary(id) do
+    case Repo.query!("SELECT 1 FROM access_group WHERE id = $1", [id]) do
+      %{rows: [[1]]} -> true
+      %{rows: []} -> false
+    end
+  end
+
+  def group_exists?(_), do: false
+
+  @doc "Whether the user is a member of `wheel`."
+  @spec wheel_member?(String.t()) :: boolean()
+  def wheel_member?(user_id), do: @wheel in groups_for(user_id)
 
   @doc """
-  Add a role conferred by group membership. `user` is implicit and is rejected as
-  a stored group role.
+  Active, local-only members of `wheel` — the break-glass cohort that must never become
+  empty (the bootstrap invariant, `Swarm.Admin` refuses the op that would empty it).
   """
-  @spec set_group_role(String.t(), String.t()) :: :ok | {:error, :invalid_role}
-  def set_group_role(id, role) do
-    if role in @grantable_group_roles do
+  @spec active_local_wheel_count() :: non_neg_integer()
+  def active_local_wheel_count do
+    [[n]] =
       Repo.query!(
         """
-        INSERT INTO group_role (group_id, role)
-        VALUES ($1, $2)
-        ON CONFLICT (group_id, role) DO NOTHING
+        SELECT count(*)::int
+          FROM app_user u
+          JOIN user_group ug ON ug.user_id = u.id AND ug.group_id = $1
+         WHERE u.status = 'active'
+           AND EXISTS (SELECT 1 FROM identity_link l WHERE l.user_id = u.id AND l.provider = 'local')
+           AND NOT EXISTS (SELECT 1 FROM identity_link l WHERE l.user_id = u.id AND l.provider <> 'local')
         """,
-        [id, role]
-      )
+        [@wheel]
+      ).rows
 
-      :ok
-    else
-      {:error, :invalid_role}
+    n
+  end
+
+  @grantable_group_roles ~w(admin)
+
+  @doc """
+  Bind a role to a group. Only `admin` is bindable (ADR-20 D9: `superadmin` is never a
+  standing role — it exists only as an elevation).
+  """
+  @spec set_group_role(String.t(), String.t()) :: :ok | {:error, :invalid_role | :unknown_group}
+  def set_group_role(id, role) do
+    cond do
+      role not in @grantable_group_roles ->
+        {:error, :invalid_role}
+
+      not group_exists?(id) ->
+        {:error, :unknown_group}
+
+      true ->
+        Repo.query!(
+          """
+          INSERT INTO group_role (group_id, role)
+          VALUES ($1, $2)
+          ON CONFLICT (group_id, role) DO NOTHING
+          """,
+          [id, role]
+        )
+
+        :ok
     end
   end
 
@@ -488,36 +569,32 @@ defmodule Swarm.Identity do
     count
   end
 
-  @doc "Whether a group exists in the first-class group registry."
-  @spec group_exists?(String.t()) :: boolean()
-  def group_exists?(id) do
-    case Repo.query!("SELECT 1 FROM access_group WHERE id = $1", [id]) do
-      %{rows: [[1]]} -> true
-      %{rows: []} -> false
-    end
-  end
-
   @doc """
-  Map an incoming SSO group claim to a kernel-owned access group.
-
-  The target group must already exist; unmapped incoming groups grant nothing.
+  Map an incoming SSO group claim to a kernel-owned access group. The target must exist and
+  must not be `wheel` (local-only, never IdP-reachable); unmapped incoming groups grant nothing.
   """
-  @spec put_sso_group_map(String.t(), String.t(), String.t()) :: :ok | {:error, :unknown_group}
+  @spec put_sso_group_map(String.t(), String.t(), String.t()) ::
+          :ok | {:error, :unknown_group | :wheel_not_mappable}
   def put_sso_group_map(provider, incoming, our_group_id) do
-    if group_exists?(our_group_id) do
-      Repo.query!(
-        """
-        INSERT INTO sso_group_map (provider, incoming_group, our_group_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (provider, incoming_group) DO UPDATE
-          SET our_group_id = EXCLUDED.our_group_id
-        """,
-        [provider, incoming, our_group_id]
-      )
+    cond do
+      our_group_id == @wheel ->
+        {:error, :wheel_not_mappable}
 
-      :ok
-    else
-      {:error, :unknown_group}
+      not group_exists?(our_group_id) ->
+        {:error, :unknown_group}
+
+      true ->
+        Repo.query!(
+          """
+          INSERT INTO sso_group_map (provider, incoming_group, our_group_id)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (provider, incoming_group) DO UPDATE
+            SET our_group_id = EXCLUDED.our_group_id
+          """,
+          [provider, incoming, our_group_id]
+        )
+
+        :ok
     end
   end
 
@@ -547,40 +624,32 @@ defmodule Swarm.Identity do
     end)
   end
 
-  @doc "Remove a user from a group."
-  @spec remove_from_group(String.t(), String.t()) :: :ok
-  def remove_from_group(user_id, group_id) do
-    Repo.query!("DELETE FROM user_group WHERE user_id = $1 AND group_id = $2", [
-      cast_to_uuid(user_id),
-      group_id
-    ])
-
-    :ok
-  end
-
   @doc """
   Create an invited local user (no credential — the channel sets the password) with
   a local `identity_link` so local login resolves. `attrs`: `:login` (required),
-  `:first_name`, `:last_name`, `:nickname`.
+  `:first_name`, `:last_name`, `:nickname`, `:external` (a GUEST — never joins the default
+  cohort, receives no internal visibility unless explicitly added to a Project).
   """
   @spec invite_user(map()) :: {:ok, user()}
   def invite_user(attrs) do
     id = uuid7()
     login = Map.fetch!(attrs, :login)
+    external = Map.get(attrs, :external, false) == true
 
     {:ok, _} =
       Repo.transaction(fn ->
         Repo.query!(
           """
-          INSERT INTO app_user (id, login, first_name, last_name, nickname, status)
-          VALUES ($1, $2, $3, $4, $5, 'invited')
+          INSERT INTO app_user (id, login, first_name, last_name, nickname, status, external)
+          VALUES ($1, $2, $3, $4, $5, 'invited', $6)
           """,
           [
             cast_to_uuid(id),
             login,
             Map.get(attrs, :first_name),
             Map.get(attrs, :last_name),
-            Map.get(attrs, :nickname)
+            Map.get(attrs, :nickname),
+            external
           ]
         )
 
@@ -588,86 +657,95 @@ defmodule Swarm.Identity do
           "INSERT INTO identity_link (user_id, provider, subject) VALUES ($1, 'local', $2)",
           [cast_to_uuid(id), login]
         )
+
+        ensure_default_cohort(id)
       end)
 
     {:ok, get_user(id)}
   end
 
   @doc """
-  Deactivate an account: `status = disabled` + strip role grants (privilege dies).
-  Login is blocked (`Swarm.Actor.resolve` rejects non-active). Group memberships and
-  learned content are retained (reversible; D11).
+  Deactivate an account: `status = disabled`; every authority source dies with it — group
+  memberships, direct Project memberships and live elevations (login is blocked by
+  `Swarm.Actor.resolve`). Learned content is retained (D11).
   """
   @spec deactivate_user(String.t()) :: :ok
   def deactivate_user(user_id) do
-    Repo.transaction(fn ->
-      Repo.query!(
-        "UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = $1",
-        [cast_to_uuid(user_id)]
-      )
+    {:ok, _} =
+      Repo.transaction(fn ->
+        Repo.query!(
+          "UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = $1",
+          [cast_to_uuid(user_id)]
+        )
 
-      # Kill ALL authority sources: direct grants AND group memberships (ADR-19 —
-      # roles/access are group-derived, so a disabled account must hold no group).
-      Repo.query!("DELETE FROM role_grant WHERE user_id = $1", [cast_to_uuid(user_id)])
-      Repo.query!("DELETE FROM user_group WHERE user_id = $1", [cast_to_uuid(user_id)])
-    end)
+        kill_authority(user_id)
+      end)
 
     :ok
   end
 
   @doc """
-  Delete an account: `status = deleted` + every login path removed (role grants, group
-  memberships, identity links; credential is channel-side). The `app_user` row PERSISTS
-  (FK + audit integrity) and learned/derived content persists — this is a self-hosted
-  instance, not a right-to-erasure (D11; raw-conversation purge is the deferred policy).
+  Delete an account: `status = deleted` + every login path removed (group + Project
+  memberships, elevations, identity links; credential is channel-side). The `app_user` row
+  PERSISTS (FK + audit integrity) and learned/derived content persists — a self-hosted
+  instance, not a right-to-erasure (D11).
   """
   @spec delete_user(String.t()) :: :ok
   def delete_user(user_id) do
-    Repo.transaction(fn ->
-      Repo.query!(
-        "UPDATE app_user SET status = 'deleted', updated_at = now() WHERE id = $1",
-        [cast_to_uuid(user_id)]
-      )
+    {:ok, _} =
+      Repo.transaction(fn ->
+        Repo.query!(
+          "UPDATE app_user SET status = 'deleted', updated_at = now() WHERE id = $1",
+          [cast_to_uuid(user_id)]
+        )
 
-      Repo.query!("DELETE FROM role_grant WHERE user_id = $1", [cast_to_uuid(user_id)])
-      Repo.query!("DELETE FROM user_group WHERE user_id = $1", [cast_to_uuid(user_id)])
-      Repo.query!("DELETE FROM identity_link WHERE user_id = $1", [cast_to_uuid(user_id)])
-    end)
+        kill_authority(user_id)
+        Repo.query!("DELETE FROM identity_link WHERE user_id = $1", [cast_to_uuid(user_id)])
+      end)
+
+    :ok
+  end
+
+  @spec kill_authority(String.t()) :: :ok
+  defp kill_authority(user_id) do
+    Elevation.revoke_all(user_id)
+    Repo.query!("DELETE FROM user_group WHERE user_id = $1", [cast_to_uuid(user_id)])
+
+    Repo.query!("DELETE FROM project_membership WHERE user_id = $1", [cast_to_uuid(user_id)])
 
     :ok
   end
 
   # ── Reads (derivation happens here, never from a channel field) ────────
 
+  @user_cols "id, login, first_name, last_name, nickname, status, external, created_at, updated_at, last_login_at"
+
   @doc "Fetch a user by uuid, or `nil`."
   @spec get_user(String.t()) :: user() | nil
   def get_user(id) do
-    case Repo.query!(
-           """
-           SELECT id, login, first_name, last_name, nickname, status,
-                  created_at, updated_at, last_login_at
-             FROM app_user WHERE id = $1
-           """,
-           [cast_to_uuid(id)]
-         ) do
-      %{rows: [row]} -> to_user(row)
-      %{rows: []} -> nil
+    with {:ok, bin} <- Ecto.UUID.dump(id),
+         %{rows: [row]} <- Repo.query!("SELECT #{@user_cols} FROM app_user WHERE id = $1", [bin]) do
+      to_user(row)
+    else
+      _ -> nil
     end
   end
 
   @doc "Fetch a user by `login`, or `nil`."
   @spec by_login(String.t()) :: user() | nil
   def by_login(login) do
-    case Repo.query!(
-           """
-           SELECT id, login, first_name, last_name, nickname, status,
-                  created_at, updated_at, last_login_at
-             FROM app_user WHERE login = $1
-           """,
-           [login]
-         ) do
+    case Repo.query!("SELECT #{@user_cols} FROM app_user WHERE login = $1", [login]) do
       %{rows: [row]} -> to_user(row)
       %{rows: []} -> nil
+    end
+  end
+
+  @doc "Whether the account is a guest (`external = true`)."
+  @spec external?(String.t()) :: boolean()
+  def external?(user_id) do
+    case get_user(user_id) do
+      %{external: e} -> e
+      nil -> false
     end
   end
 
@@ -676,12 +754,11 @@ defmodule Swarm.Identity do
   @list_users_cap 500
 
   @doc """
-  The user roster for an admin console (admin-cleanup epic): each row aggregates
-  roles, groups and identity-link providers. Tombstones (status=deleted) are
-  excluded unless `include_deleted: true` (council: normal operator workflows must
-  not act on deleted identities). Supports literal case-insensitive substring
-  search over names/login and offset paging. Deterministic order (login, id),
-  SQL-bounded. Returns `{rows, total}` where `total` is pre-page count.
+  The user roster for an admin console: each row aggregates roles (group-conferred),
+  groups and identity-link providers. Tombstones (status=deleted) are excluded unless
+  `include_deleted: true`. Supports literal case-insensitive substring search over
+  names/login and offset paging. Deterministic order (login, id), SQL-bounded. Returns
+  `{rows, total}` where `total` is the pre-page count.
   """
   @spec list_users(keyword()) :: {[map()], non_neg_integer()}
   def list_users(opts \\ []) do
@@ -694,15 +771,11 @@ defmodule Swarm.Identity do
     rows =
       Repo.query!(
         """
-        SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at,
+        SELECT u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.external, u.last_login_at,
                coalesce((
-                 SELECT array_agg(DISTINCT role ORDER BY role) FROM (
-                   SELECT role FROM role_grant WHERE user_id = u.id
-                   UNION
-                   SELECT gr.role FROM group_role gr
-                     JOIN user_group ug ON ug.group_id = gr.group_id
-                    WHERE ug.user_id = u.id
-                 ) rr
+                 SELECT array_agg(DISTINCT gr.role ORDER BY gr.role) FROM group_role gr
+                   JOIN user_group ug ON ug.group_id = gr.group_id
+                  WHERE ug.user_id = u.id
                ), '{}'),
                coalesce(array_agg(DISTINCT g.group_id) FILTER (WHERE g.group_id IS NOT NULL), '{}'),
                coalesce(array_agg(DISTINCT l.provider) FILTER (WHERE l.provider IS NOT NULL), '{}'),
@@ -715,7 +788,7 @@ defmodule Swarm.Identity do
                    OR u.first_name ILIKE $3 ESCAPE '\\'
                    OR u.last_name ILIKE $3 ESCAPE '\\'
                    OR u.nickname ILIKE $3 ESCAPE '\\')
-         GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.last_login_at
+         GROUP BY u.id, u.login, u.first_name, u.last_name, u.nickname, u.status, u.external, u.last_login_at
          ORDER BY u.login, u.id
          LIMIT $4 OFFSET $5
         """,
@@ -730,6 +803,7 @@ defmodule Swarm.Identity do
                           last,
                           nick,
                           status,
+                          external,
                           last_login,
                           roles,
                           groups,
@@ -743,6 +817,7 @@ defmodule Swarm.Identity do
           last_name: last,
           nickname: nick,
           status: status,
+          external: external,
           last_login_at: last_login,
           roles: roles,
           groups: groups,
@@ -752,7 +827,7 @@ defmodule Swarm.Identity do
 
     total =
       case rows do
-        [[_, _, _, _, _, _, _, _, _, _, n] | _] -> n
+        [row | _] -> List.last(row)
         [] -> 0
       end
 
@@ -760,10 +835,9 @@ defmodule Swarm.Identity do
   end
 
   @doc """
-  Read-only group registry for the admin console. Includes every group known from
-  the registry, membership rows, or scope-map rows; groups without members or
-  scopes are preserved. First-class group metadata comes from `access_group`;
-  group roles come from `group_role`.
+  Read-only group registry for the admin console: the fixed groups (plus any group row the
+  store still holds) with member counts and the roles they confer. Groups grant NO scopes
+  (ADR-20 D3) — there is no scope column any more.
   """
   @spec list_groups() :: [
           %{
@@ -771,52 +845,26 @@ defmodule Swarm.Identity do
             name: String.t() | nil,
             description: String.t() | nil,
             member_count: non_neg_integer(),
-            granted_scopes: [String.t()],
             granted_roles: [String.t()]
           }
         ]
   def list_groups do
     Repo.query!(
       """
-      WITH groups AS (
-        SELECT id AS group_id FROM access_group
-        UNION
-        SELECT group_id FROM user_group
-        UNION
-        SELECT group_id FROM group_scope_map
-      ),
-      member_counts AS (
-        SELECT group_id, count(*)::int AS member_count
-          FROM user_group
-         GROUP BY group_id
-      ),
-      role_grants AS (
-        SELECT group_id, array_agg(DISTINCT role ORDER BY role) AS granted_roles
-          FROM group_role
-         GROUP BY group_id
-      )
-      SELECT g.group_id,
-             ag.name,
-             ag.description,
-             coalesce(mc.member_count, 0),
-             coalesce(m.scopes, '{}'::text[]),
-             coalesce(rg.granted_roles, '{}'::text[])
-        FROM groups g
-        LEFT JOIN access_group ag ON ag.id = g.group_id
-        LEFT JOIN member_counts mc ON mc.group_id = g.group_id
-        LEFT JOIN group_scope_map m ON m.group_id = g.group_id
-        LEFT JOIN role_grants rg ON rg.group_id = g.group_id
-       ORDER BY g.group_id
+      SELECT ag.id, ag.name, ag.description,
+             (SELECT count(*)::int FROM user_group ug WHERE ug.group_id = ag.id),
+             coalesce((SELECT array_agg(DISTINCT role ORDER BY role) FROM group_role gr WHERE gr.group_id = ag.id), '{}'::text[])
+        FROM access_group ag
+       ORDER BY ag.id
       """,
       []
     ).rows
-    |> Enum.map(fn [id, name, description, member_count, granted_scopes, granted_roles] ->
+    |> Enum.map(fn [id, name, description, member_count, granted_roles] ->
       %{
         id: id,
         name: name,
         description: description,
         member_count: member_count,
-        granted_scopes: granted_scopes,
         granted_roles: granted_roles
       }
     end)
@@ -825,7 +873,7 @@ defmodule Swarm.Identity do
   @doc """
   One group with its view (as in `list_groups/0`) plus its member list
   (login + providers + status, tombstones excluded, login-ordered). `nil` when the
-  group is unknown. ADR-19: backs the admin group detail page.
+  group is unknown.
   """
   @spec get_group(String.t()) :: %{group: map(), members: [map()]} | nil
   def get_group(id) do
@@ -861,33 +909,23 @@ defmodule Swarm.Identity do
   @known_roles ~w(user admin superadmin)
 
   @doc """
-  Read-only role list for the admin console. Roles are ordered by ascending
-  privilege; capabilities are derived from the same role policy as `caps_for/1`.
-  `user` is implicit and is never stored in `role_grant`, so its holder count is 0.
+  Read-only role list for the admin console. `user` is implicit (holder count 0); `admin`
+  holders are the members of role-bearing groups; `superadmin` holders are the users with a
+  LIVE elevation right now (never a standing set).
   """
   @spec list_roles() :: [
           %{name: String.t(), capabilities: [String.t()], holder_count: non_neg_integer()}
         ]
   def list_roles do
-    # Holders = DISTINCT users who hold the role via a direct grant OR via group
-    # membership (ADR-19: roles are group-derived, so a group-conferred role must
-    # count). Mirrors `roles_for/1`.
-    counts =
-      Repo.query!(
-        """
-        SELECT role, count(DISTINCT user_id)::int FROM (
-          SELECT role, user_id FROM role_grant WHERE role = ANY($1)
-          UNION
-          SELECT gr.role, ug.user_id
-            FROM group_role gr
-            JOIN user_group ug ON ug.group_id = gr.group_id
-           WHERE gr.role = ANY($1)
-        ) t
-        GROUP BY role
-        """,
-        [@known_roles]
-      ).rows
-      |> Map.new(fn [role, count] -> {role, count} end)
+    [[admins]] =
+      Repo.query!("""
+      SELECT count(DISTINCT ug.user_id)::int
+        FROM group_role gr
+        JOIN user_group ug ON ug.group_id = gr.group_id
+       WHERE gr.role = 'admin'
+      """).rows
+
+    counts = %{"admin" => admins, "superadmin" => Elevation.active_holder_count()}
 
     Enum.map(@known_roles, fn role ->
       %{
@@ -955,8 +993,8 @@ defmodule Swarm.Identity do
   end
 
   @doc """
-  Full admin-visible view for one active/non-deleted user, including emails.
-  Returns `nil` for an unknown or tombstoned user.
+  Full admin-visible view for one non-deleted user, including emails and the Projects the
+  user can see (membership or public). Returns `nil` for an unknown or tombstoned user.
   """
   @spec get_user_view(String.t()) :: map() | nil
   def get_user_view(id) do
@@ -975,102 +1013,71 @@ defmodule Swarm.Identity do
           last_name: user.last_name,
           nickname: user.nickname,
           status: user.status,
+          external: user.external,
           last_login_at: user.last_login_at,
           roles: roles_for(user.id),
           groups: groups_for(user.id),
           providers: providers_for(user.id),
-          emails: user.id |> emails_for() |> Enum.map(& &1.email)
+          emails: user.id |> emails_for() |> Enum.map(& &1.email),
+          projects: user.id |> Projects.list_projects_for() |> Enum.map(& &1.id)
         }
     end
   end
 
   @doc """
-  The scopes a user is granted: the **authenticated baseline `public`** plus the
-  configured authenticated baseline group's scopes plus the scopes **derived**
-  from their groups via `group_scope_map` (unioned, deduped). Default-deny holds
-  for everything ABOVE the baseline: unmapped groups add nothing.
-
-  The baseline group id is read from `SWARM_AUTH_BASELINE_GROUP` and defaults to
-  `"everyone"`. It applies to every authenticated actor, even without group
-  membership, and confers SCOPES only — never a role or capability. If the
-  baseline group has no scope-map row, it contributes `[]` for backward
-  compatibility.
-
-  The baseline restores the channel's documented, council-reviewed semantic
-  ("ALWAYS includes public; groups add more" — `web_channel/auth.scopes_for`)
-  that the D9 kernel-derivation move silently dropped: with an unseeded
-  `group_scope_map`, every signed actor derived `[]` and the ENTIRE knowledge
-  base was invisible (found live on staging, 2026-07-03). `public` is public
-  knowledge — any authenticated, active actor may read it; this also matches
-  the anonymous/legacy path (`norm_scopes([]) ⇒ ["public"]`). A JIT-provisioned
-  subject with no groups therefore lands exactly at public.
-
-  `private` is clamped out even if present in the map (the belt behind the
-  `put_group_scopes/2` grant boundary — a legacy/raw-SQL row can never confer
-  the per-user privacy scope).
+  The scopes a user derives: the **authenticated baseline `public`** plus the source scopes
+  of the Projects they are a member of — directly or through a group — plus every `public`
+  Project's Sources (`Swarm.Projects.effective_scopes/1`). No membership ⇒ exactly
+  `["public"]`. `private` never enters (the per-user chat-privacy scope is not derivable —
+  person-scope-leak-guard belt).
   """
   @spec scopes_for(String.t()) :: [String.t()]
   def scopes_for(id) do
-    derived =
-      Repo.query!(
-        """
-        SELECT DISTINCT unnest(m.scopes) AS scope
-          FROM user_group ug
-          JOIN group_scope_map m ON m.group_id = ug.group_id
-         WHERE ug.user_id = $1
-        """,
-        [cast_to_uuid(id)]
-      ).rows
-      |> List.flatten()
-      |> Enum.reject(&(&1 == "private"))
-
-    Enum.uniq(["public"] ++ baseline_scopes() ++ derived)
+    (["public"] ++ Projects.effective_scopes(id))
     |> Enum.reject(&(&1 == "private"))
-  end
-
-  @spec baseline_scopes() :: [String.t()]
-  defp baseline_scopes do
-    group_id = System.get_env("SWARM_AUTH_BASELINE_GROUP", "everyone")
-
-    Repo.query!(
-      """
-      SELECT DISTINCT unnest(scopes) AS scope
-        FROM group_scope_map
-       WHERE group_id = $1
-      """,
-      [group_id]
-    ).rows
-    |> List.flatten()
-    |> Enum.reject(&(&1 == "private"))
+    |> Enum.uniq()
   end
 
   @doc """
-  The roles a user holds from direct grants and group-role membership
-  (default-deny — `[]` when none granted).
+  The roles an actor holds: those conferred by their groups (`group_role` via `user_group`)
+  plus `superadmin` iff a live elevation is bound to the actor's session (ADR-20 D9 — never a
+  standing role). Default-deny — `[]` when none.
   """
-  @spec roles_for(String.t()) :: [String.t()]
-  def roles_for(id) do
-    Repo.query!(
-      """
-      SELECT DISTINCT role FROM (
-        SELECT role FROM role_grant WHERE user_id = $1
-        UNION
-        SELECT gr.role
+  @spec roles_for(actor_ref()) :: [String.t()]
+  def roles_for(actor) do
+    {uuid, sid} = actor_ref(actor)
+
+    group_roles =
+      Repo.query!(
+        """
+        SELECT DISTINCT gr.role
           FROM group_role gr
           JOIN user_group ug ON ug.group_id = gr.group_id
          WHERE ug.user_id = $1
-      ) t
-      ORDER BY role
-      """,
-      [cast_to_uuid(id)]
-    ).rows
-    |> List.flatten()
+         ORDER BY gr.role
+        """,
+        [cast_to_uuid(uuid)]
+      ).rows
+      |> List.flatten()
+
+    if Elevation.active?(uuid, sid),
+      do: Enum.sort(Enum.uniq(group_roles ++ ["superadmin"])),
+      else: group_roles
   end
 
-  # Role → capability policy (ADR-16 D7). superadmin ⊃ admin, and alone holds the
-  # break-glass `read_any_conversation`.
-  @admin_caps ~w(manage_access invite_users manage_users)
-  @superadmin_caps @admin_caps ++ ~w(read_any_conversation)
+  # Role → capability policy (ADR-16 D7, ADR-20 §5/§6). superadmin ⊃ admin, and alone holds
+  # the elevation-only capabilities (break-glass read, wheel, roles, auth config, publicness).
+  @admin_caps ~w(manage_access invite_users manage_users manage_projects)
+  @superadmin_caps @admin_caps ++
+                     ~w(read_any_conversation manage_wheel manage_roles manage_auth manage_publicness)
+
+  @doc "The capabilities the `admin` role confers."
+  @spec admin_caps() :: [String.t()]
+  def admin_caps, do: @admin_caps
+
+  @doc "The capabilities an ACTIVE elevation (`superadmin`) confers."
+  @spec superadmin_caps() :: [String.t()]
+  def superadmin_caps, do: @superadmin_caps
 
   @spec caps_for_role(String.t()) :: [String.t()]
   defp caps_for_role("superadmin"), do: @superadmin_caps
@@ -1078,22 +1085,32 @@ defmodule Swarm.Identity do
   defp caps_for_role(_), do: []
 
   @doc """
-  The capabilities a user holds, **derived** from their roles (default-deny — `[]`
-  when no role is granted). superadmin ⊃ admin + `read_any_conversation`.
+  The capabilities an actor holds, **derived** from `roles_for/1` at every call (default-deny —
+  `[]` when no role). An elevated capability disappears the moment the elevation does.
   """
-  @spec caps_for(String.t()) :: [String.t()]
-  def caps_for(id) do
-    id
+  @spec caps_for(actor_ref()) :: [String.t()]
+  def caps_for(actor) do
+    actor
     |> roles_for()
     |> Enum.flat_map(&caps_for_role/1)
     |> Enum.uniq()
     |> Enum.sort()
   end
 
+  @doc "The uuid behind an actor ref."
+  @spec actor_uuid(actor_ref()) :: String.t()
+  def actor_uuid(actor), do: actor |> actor_ref() |> elem(0)
+
+  @doc "Normalize an actor ref to `{uuid, sid | nil}`."
+  @spec actor_ref(actor_ref()) :: {String.t(), String.t() | nil}
+  def actor_ref({uuid, sid}) when is_binary(uuid), do: {uuid, sid}
+  def actor_ref(%{uuid: uuid} = a) when is_binary(uuid), do: {uuid, Map.get(a, :sid)}
+  def actor_ref(uuid) when is_binary(uuid), do: {uuid, nil}
+
   @doc """
-  True iff the user has a `local` identity_link and NO non-local link (ADR-19: the
-  Superuser group takes local-provider users only). A user with any external IdP
-  link is not local-only.
+  True iff the user has a `local` identity_link and NO non-local link: the `wheel` group takes
+  local-provider users only (a local break-glass account that links an SSO subject would hand
+  the IdP an indirect superadmin path).
   """
   @spec local_only?(String.t()) :: boolean()
   def local_only?(user_id) do
@@ -1126,46 +1143,6 @@ defmodule Swarm.Identity do
     n
   end
 
-  @doc """
-  The scopes a group grant may confer: the Contract vocabulary MINUS `private`.
-  `private` is the default-deny floor AND the per-user chat-privacy mechanism
-  (person-scope-leak-guard) — conferring it to any group would expose every
-  user's private facts, so it can never be granted.
-  """
-  @spec grantable_scopes() :: [String.t()]
-  def grantable_scopes, do: Contract.scopes() -- ["private"]
-
-  @doc """
-  Ensure a group exists and set its conferred scopes (the config-seeding
-  primitive; the audited admin-mutable path is ADR-16 step 5). Idempotent.
-
-  Validates at this — the deepest — grant boundary: every scope must be any valid
-  scope except `private`; on violation nothing is written. Seeding callers must
-  pattern-match `:ok =` so a rejected seed fails loud rather than leaving the
-  group scopeless (council gemini).
-  """
-  @spec put_group_scopes(String.t(), [String.t()]) :: :ok | {:error, :ungrantable_scope}
-  def put_group_scopes(group_id, scopes) do
-    if Enum.all?(scopes, &(Contract.valid_scope?(&1) and &1 != "private")) do
-      Repo.query!(
-        "INSERT INTO access_group (id, source) VALUES ($1, 'local') ON CONFLICT (id) DO NOTHING",
-        [group_id]
-      )
-
-      Repo.query!(
-        """
-        INSERT INTO group_scope_map (group_id, scopes) VALUES ($1, $2)
-        ON CONFLICT (group_id) DO UPDATE SET scopes = EXCLUDED.scopes
-        """,
-        [group_id, scopes]
-      )
-
-      :ok
-    else
-      {:error, :ungrantable_scope}
-    end
-  end
-
   # ── helpers ────────────────────────────────────────────────────────────
 
   # Postgrex returns a :uuid column as a 16-byte binary; render it as the string form.
@@ -1181,10 +1158,6 @@ defmodule Swarm.Identity do
     bin
   end
 
-  @spec opt_uuid(String.t() | nil) :: binary() | nil
-  defp opt_uuid(nil), do: nil
-  defp opt_uuid(str), do: cast_to_uuid(str)
-
   @spec to_user([term()]) :: user()
   defp to_user([
          id,
@@ -1193,6 +1166,7 @@ defmodule Swarm.Identity do
          last_name,
          nickname,
          status,
+         external,
          created_at,
          updated_at,
          last_login_at
@@ -1204,6 +1178,7 @@ defmodule Swarm.Identity do
       last_name: last_name,
       nickname: nickname,
       status: status,
+      external: external,
       created_at: created_at,
       updated_at: updated_at,
       last_login_at: last_login_at

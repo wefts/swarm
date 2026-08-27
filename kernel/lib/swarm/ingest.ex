@@ -76,7 +76,8 @@ defmodule Swarm.Ingest do
   @spec normalize(map()) :: {:ok, map()} | {:error, term()}
   defp normalize(event) do
     with {:ok, provenance} <- fetch_string(event, :provenance),
-         {:ok, occurred_at} <- to_utc(Map.get(event, :occurred_at)) do
+         {:ok, occurred_at} <- to_utc(Map.get(event, :occurred_at)),
+         :ok <- check_registered_sources(event) do
       {:ok,
        %{
          provenance: provenance,
@@ -92,6 +93,24 @@ defmodule Swarm.Ingest do
          entities: Enum.map(Map.get(event, :entities, []), &normalize_entity/1),
          relations: Enum.map(Map.get(event, :relations, []), &normalize_relation/1)
        }}
+    end
+  end
+
+  # ADR-20 §3: a `src:*` scope must name a REGISTERED Source (`Swarm.Projects`) — a connector
+  # cannot invent a scope, and no row is ever written under a coordinate nobody can derive
+  # (that would be a silent, unreadable write). Base scopes (`public`/`private`) pass; a
+  # malformed or unknown source scope quarantines the whole event, fail-loud.
+  @spec check_registered_sources(map()) :: :ok | {:error, {:unregistered_source_scope, term()}}
+  defp check_registered_sources(event) do
+    event
+    |> Map.get(:entities, [])
+    |> Enum.map(&Map.get(&1, :scope, "private"))
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 in Contract.scopes()))
+    |> Enum.find(fn scope -> not Swarm.Projects.registered_scope?(scope) end)
+    |> case do
+      nil -> :ok
+      bad -> {:error, {:unregistered_source_scope, bad}}
     end
   end
 

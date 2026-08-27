@@ -10,10 +10,15 @@ defmodule Swarm.NoLeakShipGateTest do
   """
   use Swarm.IdentityCase, async: false
 
-  alias Swarm.{Actor, Audit, Conversations, Core, Identity, Person, Repo}
+  alias Swarm.{Actor, Audit, Conversations, Core, Elevation, Identity, Person, Repo}
 
   alias Swarm.Core.{Auth, Server}
   alias Swarm.Graph.Store
+
+  # The fixed source scope behind the "Internal" Project the default cohort (staff) is a
+  # member of — the former `group` fixture (ADR-20: `src:<uuid>`, derived via Projects).
+  @src Swarm.GraphCase.test_src()
+  @sid "gate-sess"
 
   alias Swarm.Core.V1.{
     ActivityFeedRequest,
@@ -53,19 +58,25 @@ defmodule Swarm.NoLeakShipGateTest do
     u
   end
 
-  # A user who actually holds the `group` scope (so a signed assertion DERIVES
-  # ["group"] — meaningful for testing that `private` data is excluded from a real
-  # group-scoped read, not the trivial empty-scope case). Council (codex re-review).
+  # A user who actually DERIVES a source scope (so a signed assertion resolves to
+  # ["public", @src] — meaningful for testing that `private` data is excluded from a real
+  # scoped read, not the trivial empty-scope case). Council (codex re-review). ADR-20: the
+  # scope comes from an "Internal" Project whose member is the default cohort (staff).
   defp group_user(login) do
-    Identity.put_group_scopes("staff", ["group"])
-    :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
+    unless Swarm.Projects.registered_scope?(@src) do
+      register_source!(
+        name: "Internal",
+        id: String.replace_prefix(@src, "src:", ""),
+        members: [%{group_id: "staff"}]
+      )
+    end
 
     {:ok, u} =
       Identity.upsert_from_claims(%{
         provider: "keycloak",
         subject: "sub-#{login}",
         login: login,
-        groups: ["staff"]
+        groups: []
       })
 
     u
@@ -73,14 +84,27 @@ defmodule Swarm.NoLeakShipGateTest do
 
   defp assertion(login), do: Actor.sign(%{"sub" => "sub-#{login}", "provider" => "keycloak"})
 
-  defp superadmin do
-    {:ok, u} =
-      Identity.seed_superadmin(%{
-        id: Identity.uuid7(),
-        login: "root#{System.unique_integer([:positive])}"
-      })
+  # A local Wheel member with a LIVE elevation for session @sid: `{user, elevated_token}`.
+  # Break-glass (`read_any_conversation`) exists only under such an elevation (ADR-20 D9).
+  defp elevated_wheel do
+    login = "root#{System.unique_integer([:positive])}"
+    {:ok, u} = Identity.seed_wheel(%{id: Identity.uuid7(), login: login})
 
-    u
+    proof =
+      Actor.sign(
+        %{
+          "aud" => Actor.reauth_audience(),
+          "sub" => login,
+          "provider" => "local",
+          "sid" => @sid,
+          "jti" => "jti-#{System.unique_integer([:positive])}",
+          "auth_time" => System.system_time(:second)
+        },
+        exp_in: 60
+      )
+
+    {:ok, _} = Elevation.request(%{uuid: u.id, sid: @sid}, "ship-gate", proof)
+    {u, Actor.sign(%{"sub" => login, "provider" => "local", "sid" => @sid})}
   end
 
   describe "A cannot read B — the conversation module (every op)" do
@@ -109,7 +133,7 @@ defmodule Swarm.NoLeakShipGateTest do
 
     test "a deliberately group-scoped conversation is STILL owner-private", %{bob: bob} do
       alice = user("alice2")
-      {:ok, shared} = Conversations.create(alice.id, %{title: "shared?", scope: "group"})
+      {:ok, shared} = Conversations.create(alice.id, %{title: "shared?", scope: @src})
       # bob (also a group user) still cannot read it — owner axis is independent of scope
       assert Conversations.get(bob.id, shared.id) == :not_found
     end
@@ -207,13 +231,13 @@ defmodule Swarm.NoLeakShipGateTest do
     end
   end
 
-  describe "break-glass is superadmin-only + audited-before-return" do
-    test "a plain user cannot break-glass; a superadmin can, and every attempt is audited" do
+  describe "break-glass is elevation-only + audited-before-return" do
+    test "a plain user cannot break-glass; an ELEVATED Wheel member can, and every attempt is audited" do
       alice = user("alice")
       bob = user("bob")
       {:ok, c} = Conversations.create(alice.id, %{title: "a"})
       {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "hush"})
-      root = superadmin()
+      {root, root_t} = elevated_wheel()
 
       # plain user denied (audited), no data
       assert Server.admin_read_conversation(
@@ -228,11 +252,24 @@ defmodule Swarm.NoLeakShipGateTest do
 
       assert Enum.any?(Audit.for_actor(bob.id), &(&1.decision == "denied"))
 
-      # superadmin allowed, audited allowed + data_returned true, BEFORE data returned
+      # the Wheel member's COLD session (no elevation) is denied too — audited
+      cold =
+        Server.admin_read_conversation(
+          %AdminReadConversationRequest{
+            assertion: Actor.sign(%{"sub" => root.login, "provider" => "local", "sid" => "cold"}),
+            conversation_id: c.id,
+            reason: "peek"
+          },
+          nil
+        )
+
+      assert cold.status == :CALL_NOT_AUTHORIZED
+
+      # elevated session allowed, audited allowed + data_returned true, BEFORE data returned
       ok =
         Server.admin_read_conversation(
           %AdminReadConversationRequest{
-            assertion: Actor.sign(%{"sub" => root.login, "provider" => "local"}),
+            assertion: root_t,
             conversation_id: c.id,
             reason: "ticket-9"
           },
@@ -240,7 +277,7 @@ defmodule Swarm.NoLeakShipGateTest do
         )
 
       assert ok.status == :CALL_OK
-      [row | _] = Audit.for_actor(root.id)
+      [row | _] = Audit.for_actor(root.id) |> Enum.filter(&(&1.action == "read_conversation"))
       assert row.decision == "allowed" and row.data_returned == true
       assert row.target_conversation_id == c.id
     end
@@ -257,13 +294,13 @@ defmodule Swarm.NoLeakShipGateTest do
       # POSITIVE CONTROL (de-vacuous, architect review): the same needle seeded as a
       # graph node IS findable — so an empty result below is exclusion, not a dead
       # search path returning [] by construction.
-      Store.upsert_node("concept", "NEEDLEHAYSTACK corpus page", scope: "group")
-      control = Core.search("NEEDLEHAYSTACK", ["group"], limit: 20)
+      Store.upsert_node("concept", "NEEDLEHAYSTACK corpus page", scope: @src)
+      control = Core.search("NEEDLEHAYSTACK", [@src], limit: 20)
       assert Enum.map(control, & &1.key) == ["NEEDLEHAYSTACK corpus page"]
 
       # the conversation title/body itself never surfaces at any scope — every hit
       # is the control node, never conversation-derived
-      for scope <- [["public"], ["group"], ["private"], ["public", "group", "private"]] do
+      for scope <- [["public"], [@src], ["private"], ["public", @src, "private"]] do
         keys = Core.search("NEEDLEHAYSTACK", scope, limit: 20) |> Enum.map(& &1.key)
         assert keys -- ["NEEDLEHAYSTACK corpus page"] == []
       end
@@ -278,44 +315,32 @@ defmodule Swarm.NoLeakShipGateTest do
       # POSITIVE CONTROL: an equivalent fact arriving through the ORDINARY corpus
       # path at group scope IS found — proving the exclusion below is the private
       # pin doing its job, not the query missing both.
-      Store.upsert_node("concept", "QwertyChatSecret corpus twin", scope: "group")
+      Store.upsert_node("concept", "QwertyChatSecret corpus twin", scope: @src)
 
-      keys = Core.search("QwertyChatSecret", ["public", "group"], limit: 20) |> Enum.map(& &1.key)
+      keys = Core.search("QwertyChatSecret", ["public", @src], limit: 20) |> Enum.map(& &1.key)
       assert "QwertyChatSecret corpus twin" in keys
       refute "QwertyChatSecret" in keys
     end
   end
 
-  describe "private is not grantable — the person-scope leak-guard" do
-    test "a private grant is rejected at every boundary and reads stay excluded" do
+  describe "private is not derivable — the person-scope leak-guard" do
+    test "no Project membership can ever confer private; reads with derived scopes stay excluded" do
       alice = user("alice")
       :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "XkcdChatSecret")
 
-      # the grant boundary refuses private (Identity + Admin + the wire all route here)
-      assert Identity.put_group_scopes("staff", ["group", "private"]) ==
-               {:error, :ungrantable_scope}
-
-      # even if the scope map is CORRUPTED under the boundary (raw SQL), the derived
-      # scopes clamp private out — the belt behind the boundary
-      Identity.put_group_scopes("staff", ["group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-
-      {:ok, eve} =
-        Identity.upsert_from_claims(%{
-          provider: "keycloak",
-          subject: "sub-eve",
-          login: "eve",
-          groups: ["staff"]
-        })
-
-      Repo.query!("UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1", [
-        "staff",
-        ["group", "private"]
-      ])
-
+      # ADR-20: the only derivation path is Project → Source → `src:<uuid>`; a Source's scope
+      # is minted from its id, so `private` cannot be registered, granted or derived. Groups
+      # grant no scopes at all (the old grant boundary is gone, rejected + audited).
+      eve = group_user("eve")
       derived = Identity.scopes_for(eve.id)
+      assert Enum.sort(derived) == Enum.sort(["public", @src])
       refute "private" in derived
-      # and a read with exactly those derived scopes cannot see the chat fact
+      refute Swarm.Projects.registered_scope?("private")
+
+      assert {:error, :group_scopes_forbidden} =
+               Swarm.Admin.set_group_scopes(eve.id, "staff", ["private"])
+
+      # and a read with exactly the derived scopes cannot see the chat fact
       assert Core.search("XkcdChatSecret", derived, limit: 20) == []
     end
 
@@ -327,7 +352,7 @@ defmodule Swarm.NoLeakShipGateTest do
       Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
       on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
 
-      assert {:ok, ctx} = Auth.legacy_context("mallory", ["group", "private"])
+      assert {:ok, ctx} = Auth.legacy_context("mallory", [@src, "private"])
       refute "private" in ctx.scopes
 
       # private-only collapses to [] — fail-closed, sees nothing
@@ -338,12 +363,12 @@ defmodule Swarm.NoLeakShipGateTest do
   describe "Deliberation (ADR-15 retained panel) is owner-private too" do
     test "the owner CAN read their own deliberation (positive control)" do
       alice = group_user("alice")
-      ref = Swarm.Deliberation.maybe_persist(verdict(), alice.id, ["group"])
+      ref = Swarm.Deliberation.maybe_persist(verdict(), alice.id, [@src])
       assert ref != ""
 
       own =
         Server.deliberation(
-          %DeliberationRequest{ask_ref: ref, viewer: assertion("alice"), scopes: ["group"]},
+          %DeliberationRequest{ask_ref: ref, viewer: assertion("alice"), scopes: [@src]},
           nil
         )
 
@@ -354,13 +379,13 @@ defmodule Swarm.NoLeakShipGateTest do
     test "B cannot read A's deliberation; :strict closes the plaintext-viewer path" do
       alice = user("alice")
       user("bob")
-      ref = Swarm.Deliberation.maybe_persist(verdict(), alice.id, ["group"])
+      ref = Swarm.Deliberation.maybe_persist(verdict(), alice.id, [@src])
       assert ref != ""
 
       # B, with B's own SIGNED assertion, resolves to B ⇒ not the owner ⇒ NOT_FOUND
       bob_view =
         Server.deliberation(
-          %DeliberationRequest{ask_ref: ref, viewer: assertion("bob"), scopes: ["group"]},
+          %DeliberationRequest{ask_ref: ref, viewer: assertion("bob"), scopes: [@src]},
           nil
         )
 
@@ -375,7 +400,7 @@ defmodule Swarm.NoLeakShipGateTest do
 
       spoof =
         Server.deliberation(
-          %DeliberationRequest{ask_ref: ref, viewer: alice.id, scopes: ["group"]},
+          %DeliberationRequest{ask_ref: ref, viewer: alice.id, scopes: [@src]},
           nil
         )
 
@@ -389,13 +414,13 @@ defmodule Swarm.NoLeakShipGateTest do
       # PRIVATE center is excluded from a real group read, not the empty-scope case.
       alice = group_user("alice")
       assert {:ok, %{scopes: scopes}} = Auth.legacy_context(assertion("alice"), [])
-      assert "group" in scopes
+      assert @src in scopes
       :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "NborSecret")
       person_id = Person.node_id(alice.id)
 
       resp =
         Server.neighborhood(
-          %NeighborhoodRequest{node_id: person_id, scopes: ["group"], viewer: assertion("alice")},
+          %NeighborhoodRequest{node_id: person_id, scopes: [@src], viewer: assertion("alice")},
           nil
         )
 
@@ -409,16 +434,16 @@ defmodule Swarm.NoLeakShipGateTest do
       # POSITIVE CONTROL first (de-vacuous, architect review): a GROUP-scoped edge
       # write emits an outbox event that IS delivered to a group viewer — so the
       # exclusion below is scope-filtering, not an empty/unwired feed.
-      a = Store.upsert_node("article", "act-a", scope: "group")
-      b = Store.upsert_node("concept", "act-b", scope: "group")
-      {:ok, _} = Store.add_edge(a, b, "mentions", "act-ev-1", scope: "group")
+      a = Store.upsert_node("article", "act-a", scope: @src)
+      b = Store.upsert_node("concept", "act-b", scope: @src)
+      {:ok, _} = Store.add_edge(a, b, "mentions", "act-ev-1", scope: @src)
 
       # the private chat-derived fact also writes an edge (private) — must be dropped
       :ok = Person.record_chat_fact(alice.id, "works_on", "concept", "ActSecret")
 
       resp =
         Server.activity_feed(
-          %ActivityFeedRequest{scopes: ["group"], viewer: assertion("alice")},
+          %ActivityFeedRequest{scopes: [@src], viewer: assertion("alice")},
           nil
         )
 
@@ -433,8 +458,11 @@ defmodule Swarm.NoLeakShipGateTest do
   describe "KbSearch through the gRPC wire (dual-accept scope derivation)" do
     test "a signed assertion's DERIVED scopes replace the wire scopes entirely" do
       alice = group_user("alice")
-      user("bob")
-      Store.upsert_node("concept", "WireGroupFact", scope: "group")
+
+      # bob is NOT in the cohort that holds the Internal Project (ADR-20: no membership ⇒ public only)
+      bob = user("bob")
+      :ok = Identity.remove_from_group(bob.id, "staff")
+      Store.upsert_node("concept", "WireGroupFact", scope: @src)
       :ok = Person.record_chat_fact(alice.id, "works_on", "concept", "WirePrivFact")
 
       # alice signs; her wire scopes CLAIM public-only — but derivation wins and her
@@ -459,7 +487,7 @@ defmodule Swarm.NoLeakShipGateTest do
             %SearchRequest{
               query: q,
               assertion: assertion("bob"),
-              scopes: ["group", "private"]
+              scopes: [@src, "private"]
             },
             nil
           )
@@ -501,9 +529,8 @@ defmodule Swarm.NoLeakShipGateTest do
       assert length(Audit.for_actor(bob.id)) == 2
     end
 
-    test "a superadmin break-glass on a non-existent conversation ⇒ NOT_FOUND, still audited" do
-      root = superadmin()
-      root_t = Actor.sign(%{"sub" => root.login, "provider" => "local"})
+    test "an elevated break-glass on a non-existent conversation ⇒ NOT_FOUND, still audited" do
+      {root, root_t} = elevated_wheel()
 
       resp =
         Server.admin_read_conversation(
@@ -521,8 +548,7 @@ defmodule Swarm.NoLeakShipGateTest do
 
     test "a malformed conversation id at the break-glass RPC never 500s (no cast oracle)" do
       user("bob")
-      root = superadmin()
-      root_t = Actor.sign(%{"sub" => root.login, "provider" => "local"})
+      {root, root_t} = elevated_wheel()
 
       # plain user: cap check first ⇒ NOT_AUTHORIZED (no existence/format oracle)
       assert Server.admin_read_conversation(
@@ -534,7 +560,7 @@ defmodule Swarm.NoLeakShipGateTest do
                nil
              ).status == :CALL_NOT_AUTHORIZED
 
-      # superadmin: malformed id ⇒ NOT_FOUND (validated before the store; no 500), audited
+      # elevated: malformed id ⇒ NOT_FOUND (validated before the store; no 500), audited
       assert Server.admin_read_conversation(
                %AdminReadConversationRequest{
                  assertion: root_t,
@@ -551,25 +577,25 @@ defmodule Swarm.NoLeakShipGateTest do
   describe "audit-BEFORE-return ordering (D6) is structural, not incidental" do
     test "admin_read refuses to run inside a caller transaction (audit durability guard)" do
       alice = user("alice")
-      root = superadmin()
+      {root, _t} = elevated_wheel()
       {:ok, c} = Conversations.create(alice.id, %{title: "a"})
 
       # A caller transaction could roll the audit row back AFTER the data was read —
       # exactly the hole D6 forbids. The guard makes that shape impossible.
       assert_raise RuntimeError, ~r/must not run inside a transaction/, fn ->
         Repo.transaction(fn ->
-          Conversations.admin_read(root.id, c.id, "peek")
+          Conversations.admin_read({root.id, @sid}, c.id, "peek")
         end)
       end
     end
 
     test "the audit row is durably committed before the data returns (separate connection)" do
       alice = user("alice")
-      root = superadmin()
+      {root, _t} = elevated_wheel()
       {:ok, c} = Conversations.create(alice.id, %{title: "a"})
       {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "hush"})
 
-      assert {:ok, _} = Conversations.admin_read(root.id, c.id, "incident-42")
+      assert {:ok, _} = Conversations.admin_read({root.id, @sid}, c.id, "incident-42")
 
       # Visible from a COMPLETELY separate Postgres connection ⇒ the audit commit is
       # its own durable transaction, not pending state a caller could still discard.
@@ -652,9 +678,9 @@ defmodule Swarm.NoLeakShipGateTest do
       refute bypass?
 
       alice = user("alice")
-      root = superadmin()
+      {root, _t} = elevated_wheel()
       {:ok, c} = Conversations.create(alice.id, %{title: "a"})
-      {:ok, _} = Conversations.admin_read(root.id, c.id, "audit-belt-probe")
+      {:ok, _} = Conversations.admin_read({root.id, @sid}, c.id, "audit-belt-probe")
 
       # UPDATE / DELETE / TRUNCATE on the audit trail are DENIED at the DB for the
       # runtime role — tampering with break-glass evidence needs the privileged role.
@@ -708,9 +734,9 @@ defmodule Swarm.NoLeakShipGateTest do
         Repo.transaction(fn ->
           Repo.query!("SET LOCAL ROLE swarm_app")
           # graph write path (node + edge + outbox + provenance)
-          a = Store.upsert_node("article", "app-role-a", scope: "group")
-          b = Store.upsert_node("concept", "app-role-b", scope: "group")
-          {:ok, _} = Store.add_edge(a, b, "mentions", "app-role-ev", scope: "group")
+          a = Store.upsert_node("article", "app-role-a", scope: @src)
+          b = Store.upsert_node("concept", "app-role-b", scope: @src)
+          {:ok, _} = Store.add_edge(a, b, "mentions", "app-role-ev", scope: @src)
           # conversation choke-point path (RLS live for this role)
           {:ok, c} = Conversations.create(alice.id, %{title: "app-role"})
           {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "x"})
@@ -730,7 +756,7 @@ defmodule Swarm.NoLeakShipGateTest do
       on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
 
       user("alice")
-      assert Auth.legacy_context("alice", ["group", "private"]) == {:error, :unauthenticated}
+      assert Auth.legacy_context("alice", [@src, "private"]) == {:error, :unauthenticated}
       assert {:ok, %{}} = Auth.legacy_context(assertion("alice"), [])
     end
   end

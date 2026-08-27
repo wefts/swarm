@@ -1,14 +1,14 @@
 defmodule Swarm.Scope.PerSourceScopeMatrixTest do
   @moduledoc """
-  ADR-18 per-source scope ship gate.
+  ADR-18 per-source scope ship gate, re-proved under ADR-20 project-derived scopes.
 
-  Proves source-scope derivation and read visibility with positive controls:
-  a persona sees exactly its granted source scopes plus public, and no ungranted
+  Proves source-scope derivation and read visibility with positive controls: a persona sees
+  exactly the source scopes of the Projects it is a member of plus public, and no ungranted
   source scope leaks through the graph or activity feed.
   """
   use Swarm.IdentityCase, async: false
 
-  alias Swarm.{Activity, Graph}
+  alias Swarm.{Activity, Graph, Projects}
   alias Swarm.Graph.Store
 
   setup do
@@ -16,90 +16,80 @@ defmodule Swarm.Scope.PerSourceScopeMatrixTest do
     :ok
   end
 
-  defp claims(login, groups) do
+  defp claims(login) do
     %{
       provider: "keycloak",
       subject: "sub-#{login}",
       login: login,
       emails: [%{email: "#{login}@example.test", verified: true, primary: true}],
-      groups: groups
+      groups: []
     }
+  end
+
+  defp source!(project_name, kind) do
+    {:ok, p} = Projects.create_project(%{name: project_name})
+    {:ok, s} = Projects.add_source(p.id, %{kind: kind})
+    {p, s.scope}
   end
 
   defp visible_node_keys(scopes) do
     %{rows: rows} =
-      Repo.query!(
-        "SELECT key FROM node WHERE scope = ANY($1::text[]) ORDER BY key",
-        [scopes]
-      )
+      Repo.query!("SELECT key FROM node WHERE scope = ANY($1::text[]) ORDER BY key", [scopes])
 
     List.flatten(rows)
   end
 
-  defp activity_summary(page) do
-    Enum.map(page.events, &{&1.kind, &1.subject_type})
-  end
+  defp activity_summary(page), do: Enum.map(page.events, &{&1.kind, &1.subject_type})
 
   describe "per-source scope matrix" do
-    test "a user sees exactly its granted source scopes plus public" do
-      Store.upsert_node("article", "matrix-wiki", scope: "src:wiki")
-      Store.upsert_node("article", "matrix-ldap", scope: "src:ldap")
-      Store.upsert_node("article", "matrix-confluence", scope: "src:confluence")
-      Store.upsert_node("article", "matrix-iac", scope: "src:iac")
+    test "a user sees exactly the source scopes of their Projects plus public" do
+      {internal, wiki} = source!("Internal", "wiki")
+      {:ok, ldap_src} = Projects.add_source(internal.id, %{kind: "ldap"})
+      ldap = ldap_src.scope
+      {_ops, confluence} = source!("Operations", "confluence")
+      {_ops2, iac} = source!("Operations 2", "iac")
+
+      Store.upsert_node("article", "matrix-wiki", scope: wiki)
+      Store.upsert_node("article", "matrix-ldap", scope: ldap)
+      Store.upsert_node("article", "matrix-confluence", scope: confluence)
+      Store.upsert_node("article", "matrix-iac", scope: iac)
       Store.upsert_node("article", "matrix-public", scope: "public")
 
-      {:ok, everyone_user} = Identity.upsert_from_claims(claims("everyone-user", []))
-      {:ok, nobody_user} = Identity.upsert_from_claims(claims("nobody-user", []))
+      {:ok, member} = Identity.upsert_from_claims(claims("member-user"))
+      {:ok, nobody} = Identity.upsert_from_claims(claims("nobody-user"))
+      # a direct membership in the Internal Project — NOT the cohort, so this test proves
+      # per-membership isolation (a non-member sees only public)
+      :ok = Projects.add_member(internal.id, %{user_id: member.id})
 
-      # A MAPPED cohort (NOT the "everyone" baseline group — this test proves per-membership
-      # isolation: a member sees the cohort's scopes, a non-member sees only public). Using
-      # "everyone" here would collide with the authenticated-baseline (SWARM_AUTH_BASELINE_GROUP),
-      # which every authenticated actor gets regardless of membership.
-      :ok = Identity.put_group_scopes("wl-cohort", ["src:wiki", "src:ldap"])
-      :ok = Identity.add_to_group(everyone_user.id, "wl-cohort")
+      assert Identity.scopes_for(nobody.id) == ["public"]
 
-      assert Identity.scopes_for(nobody_user.id) == ["public"]
+      member_scopes = Identity.scopes_for(member.id)
+      assert Enum.sort(member_scopes) == Enum.sort(["public", ldap, wiki])
 
-      everyone_scopes = Identity.scopes_for(everyone_user.id)
-      assert Enum.sort(everyone_scopes) == ["public", "src:ldap", "src:wiki"]
-
-      assert visible_node_keys(everyone_scopes) == [
-               "matrix-ldap",
-               "matrix-public",
-               "matrix-wiki"
-             ]
-
-      assert visible_node_keys(Identity.scopes_for(nobody_user.id)) == ["matrix-public"]
+      assert visible_node_keys(member_scopes) == ["matrix-ldap", "matrix-public", "matrix-wiki"]
+      assert visible_node_keys(Identity.scopes_for(nobody.id)) == ["matrix-public"]
     end
   end
 
   describe "activity predicate audit" do
     test "source-scoped activity does not surface edges or endpoints to another source scope" do
-      wiki_a =
-        Swarm.GraphCase.add_node!(%{
-          type: "article",
-          key: "activity-wiki-a",
-          scope: "src:wiki"
-        })
+      {_p, wiki} = source!("Internal", "wiki")
+      {_q, ldap} = source!("Directory", "ldap")
 
-      wiki_b =
-        Swarm.GraphCase.add_node!(%{
-          type: "concept",
-          key: "activity-wiki-b",
-          scope: "src:wiki"
-        })
+      wiki_a = Swarm.GraphCase.add_node!(%{type: "article", key: "activity-wiki-a", scope: wiki})
+      wiki_b = Swarm.GraphCase.add_node!(%{type: "concept", key: "activity-wiki-b", scope: wiki})
 
       {:ok, _} =
         Graph.add_edge(wiki_a, wiki_b, "mentions", "activity-wiki-edge",
           reliability: 0.9,
-          scope: "src:wiki"
+          scope: wiki
         )
 
-      ldap_page = Activity.feed(scopes: ["src:ldap"])
+      ldap_page = Activity.feed(scopes: [ldap])
       assert ldap_page.status == :not_found
       assert ldap_page.events == []
 
-      wiki_page = Activity.feed(scopes: ["src:wiki"])
+      wiki_page = Activity.feed(scopes: [wiki])
       assert wiki_page.status == :found
 
       assert activity_summary(wiki_page) == [

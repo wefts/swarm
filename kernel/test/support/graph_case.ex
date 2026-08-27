@@ -44,6 +44,36 @@ defmodule Swarm.GraphCase do
     :ok
   end
 
+  # Two fixed, well-formed source scopes for graph-layer tests (ADR-20: `src:<uuid>`; the
+  # retired `group` scope is no longer admissible). `Store.upsert_node` validates SHAPE only, so
+  # these need no registry row; `register_test_sources!/0` registers both for ingest/derivation
+  # tests (`Swarm.Projects.registered_scope?/1`).
+  @test_src "src:00000000-0000-7000-8000-00000000c0de"
+  @test_src2 "src:00000000-0000-7000-8000-00000000c0df"
+
+  @doc "A fixed, well-formed source scope for graph tests (the former `group` fixture)."
+  @spec test_src() :: String.t()
+  def test_src, do: @test_src
+
+  @doc "A second, distinct fixed source scope (cross-source tests)."
+  @spec test_src2() :: String.t()
+  def test_src2, do: @test_src2
+
+  @doc "Register Projects + Sources behind `test_src/0` and `test_src2/0` (idempotent)."
+  @spec register_test_sources!() :: :ok
+  def register_test_sources! do
+    for {scope, name} <- [{@test_src, "Test source A"}, {@test_src2, "Test source B"}] do
+      id = String.replace_prefix(scope, "src:", "")
+
+      unless Swarm.Projects.registered_scope?(scope) do
+        {:ok, p} = Swarm.Projects.create_project(%{name: name})
+        {:ok, _} = Swarm.Projects.add_source(p.id, %{kind: "wiki", label: name, id: id})
+      end
+    end
+
+    :ok
+  end
+
   @doc "Insert a node and return its id, raising on validation failure."
   @spec add_node!(map()) :: integer()
   def add_node!(attrs) do

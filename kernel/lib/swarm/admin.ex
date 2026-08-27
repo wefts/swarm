@@ -1,420 +1,596 @@
 defmodule Swarm.Admin do
   @moduledoc """
-  Admin-mutable access management + user lifecycle (workspace ADR-16 step 5, D10/D11),
-  kernel-owned and **audited**. Every operation takes the **verified** `actor_id` (from
-  `Swarm.Actor.resolve/2`), derives the actor's capabilities from the store here (never
-  a caller-supplied field), enforces the required capability, and writes an
-  `admin_action_audit` row (including denials, for privilege-abuse detection).
+  Admin-mutable access management + user lifecycle + Projects (workspace ADR-16 D10/D11,
+  ADR-20 §6), kernel-owned and **audited**. Every operation takes the **verified** actor
+  (`Swarm.Identity.actor_ref/0` — a uuid, or `{uuid, sid}` from `Swarm.Actor.resolve/2`),
+  derives the actor's capabilities from the store here (never a caller-supplied field),
+  enforces the required capability, and writes an `admin_action_audit` row (including
+  denials, for privilege-abuse detection).
 
-  Capability map (ADR-16 D7): `manage_access` (group membership + group→scope map —
-  access to *shared* resources), `invite_users`, `manage_users` (deactivate/delete).
-  admin holds those three; superadmin holds all + `read_any_conversation`. **Role
-  grants are privilege management → superadmin-only** (an admin cannot self-escalate or
-  mint admins). An admin can NOT read another user's conversations (that is the
-  superadmin break-glass, `Swarm.Conversations.admin_read/3`) nor manage another user's
-  own KB.
+  Capability boundary (`docs/design/project-access.md` §6):
+
+    * `admin` (conferred by the `admins` group): `manage_access` (fixed-group + Project
+      membership), `invite_users`, `manage_users`, `manage_projects`;
+    * `superadmin` (ONLY a live, session-bound elevation of a local Wheel member): the above +
+      `read_any_conversation` (break-glass), `manage_wheel`, `manage_roles`, `manage_auth`,
+      `manage_publicness`.
+
+  Structural closures of self-escalation: an admin cannot touch `wheel` (membership OR any
+  lifecycle op on a Wheel member), cannot bind roles, cannot change auth config (SSO map),
+  cannot publish (a Project to/from `public`, a Source into a public Project), and cannot mint
+  their OWN data visibility (adding themselves, or a group they belong to, to a Project needs
+  the Project owner or an elevation). Per-user role grants and group scope grants no longer
+  exist and are rejected + audited. The bootstrap invariant — at least one active local Wheel
+  member — is enforced here (`{:error, :last_wheel_member}`).
   """
 
-  alias Swarm.{Audit, Identity}
+  alias Swarm.{Audit, Elevation, Identity, Projects}
 
-  # ADR-19: the Superuser group is the only holder of `superadmin`, takes local-only
-  # members, and every op on it is superadmin-gated (an admin must not touch it —
-  # otherwise an admin could add themselves and self-escalate).
-  @superuser_group "superuser"
+  @wheel "wheel"
 
+  @type actor :: Identity.actor_ref()
   @type result :: :ok | :not_authorized
-  @type scopes_result :: result() | {:error, :ungrantable_scope}
 
-  # ── role grants — FORBIDDEN per-user (ADR-19) ──────────────────────────
+  # ── per-user role grants / group scope grants — GONE (ADR-19 D2, ADR-20 D3) ──
 
-  @doc """
-  Per-user role grants are FORBIDDEN (ADR-19: roles attach to GROUPS, never people).
-  Always rejected + audited, for everyone including superadmin. A member's role comes
-  from the roles their groups confer.
-  """
-  @spec grant_role(String.t(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
-  def grant_role(actor_id, _target_id, _role) do
-    audit(actor_id, "grant_role", "denied", reason: "roles_on_groups_only")
+  @doc "Per-user role grants are FORBIDDEN (roles attach to groups). Always rejected + audited."
+  @spec grant_role(actor(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
+  def grant_role(actor, _target_id, _role) do
+    audit(actor, "grant_role", "denied", reason: "roles_on_groups_only")
     {:error, :role_on_user_forbidden}
   end
 
-  @doc "Per-user role revokes are FORBIDDEN (ADR-19); roles live on groups."
-  @spec revoke_role(String.t(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
-  def revoke_role(actor_id, _target_id, _role) do
-    audit(actor_id, "revoke_role", "denied", reason: "roles_on_groups_only")
+  @doc "Per-user role revokes are FORBIDDEN; roles live on groups."
+  @spec revoke_role(actor(), String.t(), String.t()) :: {:error, :role_on_user_forbidden}
+  def revoke_role(actor, _target_id, _role) do
+    audit(actor, "revoke_role", "denied", reason: "roles_on_groups_only")
     {:error, :role_on_user_forbidden}
   end
 
-  # ── manage_access — group membership + scope map ───────────────────────
-
-  @doc """
-  Add a user to a group (`manage_access`; the Superuser group is superadmin-only
-  and local-members-only, ADR-19).
-  """
-  @spec grant_group(String.t(), String.t(), String.t()) ::
-          result() | {:error, :superuser_local_only}
-  def grant_group(actor_id, target_id, group_id) do
-    group_gate(actor_id, group_id, "grant", target_id, fn ->
-      if group_id == @superuser_group and not Identity.local_only?(target_id),
-        do: {:error, :superuser_local_only},
-        else: Identity.add_to_group(target_id, group_id)
-    end)
+  @doc "Groups never grant source visibility (ADR-20 D3). Always rejected + audited."
+  @spec set_group_scopes(actor(), String.t(), [String.t()]) :: {:error, :group_scopes_forbidden}
+  def set_group_scopes(actor, _group_id, _scopes) do
+    audit(actor, "set_group_scopes", "denied", reason: "projects_grant_visibility")
+    {:error, :group_scopes_forbidden}
   end
 
-  @doc "Remove a user from a group (`manage_access`; Superuser superadmin-only)."
-  @spec revoke_group(String.t(), String.t(), String.t()) :: result()
-  def revoke_group(actor_id, target_id, group_id) do
-    group_gate(actor_id, group_id, "revoke", target_id, fn ->
-      Identity.remove_from_group(target_id, group_id)
+  # ── fixed groups: membership ─────────────────────────────────────────────
+
+  @doc """
+  Add a user to a fixed group. `admins` / `staff`: `manage_access`. `wheel`: `manage_wheel`
+  (elevation) and local-only members (the Identity belt refuses an SSO-linked user).
+  """
+  @spec grant_group(actor(), String.t(), String.t()) ::
+          result() | {:error, :unknown_group | :wheel_local_only}
+  def grant_group(actor, target_id, group_id) do
+    gate(actor, group_cap(group_id), "grant", target_id, fn ->
+      Identity.add_to_group(target_id, group_id)
     end)
   end
 
   @doc """
-  Set a group's conferred scopes (`manage_access`; Superuser superadmin-only).
-  Scopes are validated at the grant boundary (person-scope-leak-guard): Contract
-  vocabulary only, `private` hard-denied — a rejected grant writes nothing.
+  Remove a user from a fixed group. `wheel` needs `manage_wheel` and never empties the
+  break-glass cohort (`{:error, :last_wheel_member}`).
   """
-  @spec set_group_scopes(String.t(), String.t(), [String.t()]) :: scopes_result()
-  def set_group_scopes(actor_id, group_id, scopes) do
-    group_gate(actor_id, group_id, "grant", nil, fn ->
-      Identity.put_group_scopes(group_id, scopes)
+  @spec revoke_group(actor(), String.t(), String.t()) :: result() | {:error, :last_wheel_member}
+  def revoke_group(actor, target_id, group_id) do
+    gate(actor, group_cap(group_id), "revoke", target_id, fn ->
+      if group_id == @wheel and last_wheel_member?(target_id),
+        do: {:error, :last_wheel_member},
+        else: Identity.remove_from_group(target_id, group_id)
     end)
   end
 
-  # ── manage_access — group lifecycle ─────────────────────────────────────
+  defp group_cap(@wheel), do: "manage_wheel"
+  defp group_cap(_group), do: "manage_access"
 
-  @doc "Create a first-class local group (`manage_access`; Superuser superadmin-only)."
-  @spec create_group(String.t(), String.t(), String.t() | nil, String.t() | nil) :: result()
-  def create_group(actor_id, id, name, desc) do
-    group_gate(actor_id, id, "create_group", nil, fn ->
-      Identity.create_group(id, name, desc)
-    end)
+  # The bootstrap invariant: the op would leave zero active local-only Wheel members.
+  defp last_wheel_member?(target_id) do
+    Identity.wheel_member?(target_id) and Identity.active_local_wheel_count() <= 1 and
+      counts_as_active_local_wheel?(target_id)
   end
 
-  @doc "Rename a first-class group (`manage_access`; Superuser superadmin-only)."
-  @spec rename_group(String.t(), String.t(), String.t() | nil) :: result() | :not_found
-  def rename_group(actor_id, id, name) do
-    case group_gate(actor_id, id, "rename_group", nil, fn ->
-           Identity.rename_group(id, name)
-         end) do
-      {:error, :not_found} -> :not_found
-      other -> other
-    end
+  defp counts_as_active_local_wheel?(target_id) do
+    match?(%{status: "active"}, Identity.get_user(target_id)) and Identity.local_only?(target_id)
   end
 
-  @doc """
-  Delete a first-class group (`manage_access`; Superuser superadmin-only); non-empty
-  groups require confirmation.
-  """
-  @spec delete_group(String.t(), String.t(), boolean()) :: result() | :not_found | :not_confirmed
-  def delete_group(actor_id, id, confirm) do
-    if group_authorized?(actor_id, id) do
-      cond do
-        not Identity.group_exists?(id) ->
-          audit(actor_id, "delete_group", "denied")
-          :not_found
+  # ── fixed groups: lifecycle is closed ────────────────────────────────────
 
-        Identity.group_member_count(id) > 0 and not confirm ->
-          audit(actor_id, "delete_group", "denied", reason: "not_confirmed")
-          :not_confirmed
+  @doc "The group set is fixed (`wheel` / `admins` / `staff`): creation is rejected + audited."
+  @spec create_group(actor(), String.t(), String.t() | nil, String.t() | nil) ::
+          {:error, :fixed_group_set}
+  def create_group(actor, _id, _name, _desc), do: fixed_set(actor, "create_group")
 
-        true ->
-          Identity.delete_group(id)
-          audit(actor_id, "delete_group", "allowed")
-          :ok
+  @doc "The group set is fixed: renaming is rejected + audited."
+  @spec rename_group(actor(), String.t(), String.t() | nil) :: {:error, :fixed_group_set}
+  def rename_group(actor, _id, _name), do: fixed_set(actor, "rename_group")
+
+  @doc "The group set is fixed: deletion is rejected + audited."
+  @spec delete_group(actor(), String.t(), boolean()) :: {:error, :fixed_group_set}
+  def delete_group(actor, _id, _confirm), do: fixed_set(actor, "delete_group")
+
+  defp fixed_set(actor, action) do
+    audit(actor, action, "denied", reason: "fixed_group_set")
+    {:error, :fixed_group_set}
+  end
+
+  # ── group role bindings (elevation-only; only `admin` is bindable) ───────
+
+  @doc "Bind the `admin` role to a fixed group (`manage_roles` — elevation)."
+  @spec set_group_role(actor(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_role}
+  def set_group_role(actor, id, role) do
+    gate(actor, "manage_roles", "set_group_role", nil, fn ->
+      case Identity.set_group_role(id, role) do
+        {:error, :unknown_group} -> :not_found
+        other -> other
       end
-    else
-      audit(actor_id, "delete_group", "denied")
-      :not_authorized
-    end
+    end)
   end
 
-  # ── group role grants (superadmin-only) ─────────────────────────────────
+  @doc "Clear a group's role binding (`manage_roles` — elevation)."
+  @spec clear_group_role(actor(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_role}
+  def clear_group_role(actor, id, role) do
+    gate(actor, "manage_roles", "clear_group_role", nil, fn ->
+      cond do
+        role != "admin" -> {:error, :invalid_role}
+        not Identity.group_exists?(id) -> :not_found
+        true -> Identity.clear_group_role(id, role)
+      end
+    end)
+  end
+
+  # ── invite_users / manage_users ──────────────────────────────────────────
 
   @doc """
-  Set a role conferred by group membership (superadmin-only). `superadmin` is
-  bindable ONLY to the Superuser group (ADR-19); any other target is rejected.
+  Invite a local user (`invite_users`). `attrs` may carry `external: true` for a GUEST.
+  Returns the created user.
   """
-  @spec set_group_role(String.t(), String.t(), String.t()) ::
-          result() | :not_found | {:error, :invalid_role | :superadmin_superuser_only}
-  def set_group_role(actor_id, id, role) do
-    if superadmin_binding_ok?(id, role),
-      do: do_set_group_role(actor_id, id, role),
-      else: deny_superadmin_binding(actor_id)
-  end
-
-  # `superadmin` may be bound ONLY to the Superuser group (ADR-19); any other role
-  # binds anywhere. Extracted so `set_group_role` stays under the complexity/nesting gates.
-  @spec superadmin_binding_ok?(String.t(), String.t()) :: boolean()
-  defp superadmin_binding_ok?(id, role), do: role != "superadmin" or id == @superuser_group
-
-  @spec do_set_group_role(String.t(), String.t(), String.t()) ::
-          result() | :not_found | {:error, :invalid_role}
-  defp do_set_group_role(actor_id, id, role) do
-    gate_superadmin(actor_id, "set_group_role", nil, fn ->
-      validated_group_role(id, role, fn -> Identity.set_group_role(id, role) end)
-    end)
-  end
-
-  @spec deny_superadmin_binding(String.t()) :: {:error, :superadmin_superuser_only}
-  defp deny_superadmin_binding(actor_id) do
-    audit(actor_id, "set_group_role", "denied", reason: "superadmin_superuser_only")
-    {:error, :superadmin_superuser_only}
-  end
-
-  @doc "Clear a role conferred by group membership (superadmin-only)."
-  @spec clear_group_role(String.t(), String.t(), String.t()) ::
-          result() | :not_found | {:error, :invalid_role}
-  def clear_group_role(actor_id, id, role) do
-    gate_superadmin(actor_id, "clear_group_role", nil, fn ->
-      validated_group_role(id, role, fn -> Identity.clear_group_role(id, role) end)
-    end)
-  end
-
-  # Validate a group-role op before applying: bad role → {:error, :invalid_role}; missing group →
-  # :not_found; else run `apply_fn`. Extracted so set/clear stay shallow (credo nesting).
-  @spec validated_group_role(String.t(), String.t(), (-> any())) ::
-          any() | :not_found | {:error, :invalid_role}
-  defp validated_group_role(id, role, apply_fn) do
-    cond do
-      role not in ["admin", "superadmin"] -> {:error, :invalid_role}
-      not Identity.group_exists?(id) -> :not_found
-      true -> apply_fn.()
-    end
-  end
-
-  # ── invite_users / manage_users ────────────────────────────────────────
-
-  @doc "Invite a local user (`invite_users`). Returns the created user."
-  @spec invite_user(String.t(), map()) :: {:ok, Identity.user()} | :not_authorized
-  def invite_user(actor_id, attrs) do
-    if "invite_users" in Identity.caps_for(actor_id) do
+  @spec invite_user(actor(), map()) :: {:ok, Identity.user()} | :not_authorized
+  def invite_user(actor, attrs) do
+    if "invite_users" in Identity.caps_for(actor) do
       {:ok, u} = Identity.invite_user(attrs)
-      audit(actor_id, "invite", "allowed", target_user_id: u.id)
+      audit(actor, "invite", "allowed", target_user_id: u.id)
       {:ok, u}
     else
-      audit(actor_id, "invite", "denied")
+      audit(actor, "invite", "denied")
       :not_authorized
     end
   end
 
-  @doc "Deactivate an account (`manage_users`) — login dead, learned content stays."
-  @spec deactivate_user(String.t(), String.t()) :: result()
-  def deactivate_user(actor_id, target_id) do
-    gate_cap(actor_id, "manage_users", "deactivate", target_id, fn ->
-      Identity.deactivate_user(target_id)
+  @doc """
+  Deactivate an account (`manage_users`) — login dead, learned content stays. A WHEEL member
+  can only be touched under elevation (`manage_wheel`) and never as the last one.
+  """
+  @spec deactivate_user(actor(), String.t()) :: result() | {:error, :last_wheel_member}
+  def deactivate_user(actor, target_id) do
+    gate(actor, user_cap(target_id), "deactivate", target_id, fn ->
+      if last_wheel_member?(target_id),
+        do: {:error, :last_wheel_member},
+        else: Identity.deactivate_user(target_id)
     end)
   end
 
-  @doc "Delete an account (`manage_users`) — every login path removed, content persists."
-  @spec delete_user(String.t(), String.t()) :: result()
-  def delete_user(actor_id, target_id) do
-    gate_cap(actor_id, "manage_users", "delete", target_id, fn ->
-      Identity.delete_user(target_id)
-      # Detach the person-as-subject projection (ADR-16 step 7) so an orphaned owner
-      # never dangles; its learned facts persist (D11).
-      Swarm.Person.anonymize(target_id)
+  @doc """
+  Delete an account (`manage_users`) — every login path removed, content persists. Same
+  Wheel guard as `deactivate_user/2`.
+  """
+  @spec delete_user(actor(), String.t()) :: result() | {:error, :last_wheel_member}
+  def delete_user(actor, target_id) do
+    gate(actor, user_cap(target_id), "delete", target_id, fn ->
+      if last_wheel_member?(target_id) do
+        {:error, :last_wheel_member}
+      else
+        Identity.delete_user(target_id)
+        # Detach the person-as-subject projection (ADR-16 step 7) so an orphaned owner
+        # never dangles; its learned facts persist (D11).
+        Swarm.Person.anonymize(target_id)
+      end
     end)
   end
 
-  # ── reads ────────────────────────────────────────────────────────────────
-
-  @doc """
-  The user roster for an admin console (admin-cleanup epic). Allowed for ANY of
-  the three admin capabilities — the list is prerequisite data for every admin
-  workflow (invite needs collision context; deactivate/grants need uuids) —
-  council: codex+gemini agreed. A successful read is NOT audited (a roster read
-  happens on every admin page load and would drown `admin_action_audit`); a
-  DENIED attempt is audited like every other admin op.
-  """
-  @admin_caps ~w(invite_users manage_users manage_access)
-  @spec list_users(String.t(), keyword()) :: {:ok, {[map()], non_neg_integer()}} | :not_authorized
-  def list_users(actor_id, opts \\ []) do
-    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
-      {:ok, Identity.list_users(opts)}
-    else
-      audit(actor_id, "list_users", "denied")
-      :not_authorized
-    end
+  # ANY mutation of a Wheel member is a Wheel mutation (council: gemini).
+  defp user_cap(target_id) do
+    if Identity.wheel_member?(target_id), do: "manage_wheel", else: "manage_users"
   end
 
-  @doc """
-  Read-only group list for the admin console. Same broad admin-cap gate as the
-  roster; successful reads are not audited, denied reads are.
-  """
-  @spec list_groups(String.t()) :: {:ok, [map()]} | :not_authorized
-  def list_groups(actor_id) do
-    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
-      {:ok, Identity.list_groups()}
-    else
-      audit(actor_id, "list_groups", "denied")
-      :not_authorized
-    end
-  end
+  # ── reads ──────────────────────────────────────────────────────────────────
+
+  @admin_caps ~w(invite_users manage_users manage_access manage_projects)
 
   @doc """
-  Read-only role list for the admin console. Same broad admin-cap gate as the
-  roster; successful reads are not audited, denied reads are.
+  The user roster for an admin console. Allowed for ANY admin capability — the list is
+  prerequisite data for every admin workflow. A successful read is NOT audited (a roster
+  read happens on every admin page load and would drown `admin_action_audit`); a DENIED
+  attempt is audited like every other admin op.
   """
-  @spec list_roles(String.t()) :: {:ok, [map()]} | :not_authorized
-  def list_roles(actor_id) do
-    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
-      {:ok, Identity.list_roles()}
-    else
-      audit(actor_id, "list_roles", "denied")
-      :not_authorized
-    end
+  @spec list_users(actor(), keyword()) :: {:ok, {[map()], non_neg_integer()}} | :not_authorized
+  def list_users(actor, opts \\ []) do
+    read(actor, "list_users", fn -> {:ok, Identity.list_users(opts)} end)
   end
 
-  @doc """
-  Full user detail for the admin console. Same broad admin-cap gate as the
-  roster; successful detail reads are not audited, denied reads are.
-  """
-  @spec get_user(String.t(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
-  def get_user(actor_id, target_id) do
-    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+  @doc "Read-only group list (any admin cap; denials audited)."
+  @spec list_groups(actor()) :: {:ok, [map()]} | :not_authorized
+  def list_groups(actor), do: read(actor, "list_groups", fn -> {:ok, Identity.list_groups()} end)
+
+  @doc "Read-only role list (any admin cap; denials audited)."
+  @spec list_roles(actor()) :: {:ok, [map()]} | :not_authorized
+  def list_roles(actor), do: read(actor, "list_roles", fn -> {:ok, Identity.list_roles()} end)
+
+  @doc "Full user detail (any admin cap; `:not_found` for unknown/tombstoned)."
+  @spec get_user(actor(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
+  def get_user(actor, target_id) do
+    read(actor, "get_user", fn ->
       case Identity.get_user_view(target_id) do
         nil -> :not_found
         view -> {:ok, view}
       end
-    else
-      audit(actor_id, "get_user", "denied")
-      :not_authorized
-    end
+    end)
   end
 
-  @doc """
-  One group with its members for the admin console detail page. Same broad
-  admin-cap gate as the roster; successful reads are not audited, denied reads are.
-  """
-  @spec get_group(String.t(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
-  def get_group(actor_id, group_id) do
-    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor_id))) do
+  @doc "One group with its members (any admin cap)."
+  @spec get_group(actor(), String.t()) :: {:ok, map()} | :not_found | :not_authorized
+  def get_group(actor, group_id) do
+    read(actor, "get_group", fn ->
       case Identity.get_group(group_id) do
         nil -> :not_found
         view -> {:ok, view}
       end
+    end)
+  end
+
+  @doc "Incoming-SSO-group → our-group mappings (any admin cap reads; mutation is `manage_auth`)."
+  @spec list_sso_map(actor()) :: {:ok, [map()]} | :not_authorized
+  def list_sso_map(actor),
+    do: read(actor, "list_sso_map", fn -> {:ok, Identity.list_sso_group_map()} end)
+
+  defp read(actor, action, fun) do
+    if Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor))) do
+      fun.()
     else
-      audit(actor_id, "get_group", "denied")
+      audit(actor, action, "denied")
       :not_authorized
     end
   end
 
-  # ── manage_access — SSO group mapping ──────────────────────────────────
+  # ── auth config: SSO group mapping (elevation-only) ────────────────────────
 
   @doc """
-  List incoming-SSO-group → our-group mappings (`manage_access`). This is
-  access-routing config, so it takes the same cap as the mapping mutations
-  (not the broad roster gate); a denied read is audited.
+  Upsert an SSO group mapping (`manage_auth` — elevation). The target must exist and is
+  never `wheel` (`{:error, :sso_wheel_forbidden}`).
   """
-  @spec list_sso_map(String.t()) :: {:ok, [map()]} | :not_authorized
-  def list_sso_map(actor_id) do
-    if "manage_access" in Identity.caps_for(actor_id) do
-      {:ok, Identity.list_sso_group_map()}
+  @spec put_sso_map(actor(), String.t(), String.t(), String.t()) ::
+          result() | {:error, :unknown_group | :sso_wheel_forbidden}
+  def put_sso_map(actor, provider, incoming, our_group_id) do
+    if our_group_id == @wheel do
+      audit(actor, "put_sso_map", "denied", reason: "sso_wheel_forbidden")
+      {:error, :sso_wheel_forbidden}
     else
-      audit(actor_id, "list_sso_map", "denied")
-      :not_authorized
-    end
-  end
-
-  @doc """
-  Upsert an SSO group mapping (`manage_access`). The target group must already
-  exist — an unknown group is `{:error, :unknown_group}` (a caller error), never
-  a silently created mapping.
-  """
-  @spec put_sso_map(String.t(), String.t(), String.t(), String.t()) ::
-          result() | {:error, :unknown_group | :sso_superuser_forbidden}
-  def put_sso_map(actor_id, provider, incoming, our_group_id) do
-    if our_group_id == @superuser_group do
-      # ADR-19: Superuser is local-only — an SSO group must never map into it.
-      audit(actor_id, "put_sso_map", "denied", reason: "sso_superuser_forbidden")
-      {:error, :sso_superuser_forbidden}
-    else
-      gate_cap(actor_id, "manage_access", "put_sso_map", nil, fn ->
+      gate(actor, "manage_auth", "put_sso_map", nil, fn ->
         Identity.put_sso_group_map(provider, incoming, our_group_id)
       end)
     end
   end
 
-  @doc "Delete an SSO group mapping (`manage_access`)."
-  @spec delete_sso_map(String.t(), String.t(), String.t()) :: result()
-  def delete_sso_map(actor_id, provider, incoming) do
-    gate_cap(actor_id, "manage_access", "delete_sso_map", nil, fn ->
+  @doc "Delete an SSO group mapping (`manage_auth` — elevation)."
+  @spec delete_sso_map(actor(), String.t(), String.t()) :: result()
+  def delete_sso_map(actor, provider, incoming) do
+    gate(actor, "manage_auth", "delete_sso_map", nil, fn ->
       Identity.delete_sso_group_map(provider, incoming)
     end)
   end
 
-  # ── gates ────────────────────────────────────────────────────────────────
+  # ── Projects (the sole data-access container) ──────────────────────────────
 
-  # ADR-19: ops on the Superuser group are superadmin-only (an `admin` must not be able
-  # to touch it — else they could add themselves and inherit `superadmin`); every other
-  # group is `manage_access`.
-  @spec group_gate(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::
-          result() | {:error, atom()}
-  defp group_gate(actor_id, group_id, action, target, fun) do
-    if group_id == @superuser_group do
-      gate_superadmin(actor_id, action, target, fun)
-    else
-      gate_cap(actor_id, "manage_access", action, target, fun)
+  @doc """
+  Create a Project (`manage_projects`); the creator becomes its OWNER member. Creating it
+  `public` is publishing — `manage_publicness` (elevation).
+  """
+  @spec create_project(actor(), map()) ::
+          {:ok, Projects.project()}
+          | :not_authorized
+          | {:error, :invalid_name | :invalid_visibility}
+  def create_project(actor, attrs) do
+    cap =
+      if Map.get(attrs, :visibility) == "public", do: "manage_publicness", else: "manage_projects"
+
+    gate(actor, cap, "create_project", nil, fn ->
+      Projects.create_project(Map.put(attrs, :created_by, Identity.actor_uuid(actor)))
+    end)
+  end
+
+  @doc "Rename a Project (`manage_projects`, or the Project owner)."
+  @spec rename_project(actor(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_name}
+  def rename_project(actor, project_id, name) do
+    project_gate(actor, project_id, "manage_projects", "rename_project", fn ->
+      Projects.rename_project(project_id, name)
+    end)
+  end
+
+  @doc "Describe a Project (`manage_projects`, or the Project owner)."
+  @spec describe_project(actor(), String.t(), String.t() | nil) :: result() | :not_found
+  def describe_project(actor, project_id, description) do
+    project_gate(actor, project_id, "manage_projects", "describe_project", fn ->
+      Projects.describe_project(project_id, description)
+    end)
+  end
+
+  @doc """
+  Set a Project's visibility. `personal` ⇄ `shared`: `manage_projects` or the owner; any
+  change TO or FROM `public`: `manage_publicness` (elevation) — publicness is never an
+  ordinary admin act (ADR-20 D6/D11).
+  """
+  @spec set_project_visibility(actor(), String.t(), String.t()) ::
+          result() | :not_found | {:error, :invalid_visibility}
+  def set_project_visibility(actor, project_id, visibility) do
+    case Projects.get_project(project_id) do
+      nil ->
+        audit(actor, "set_project_visibility", "denied")
+        :not_found
+
+      %{visibility: current} ->
+        publicness? = current == "public" or visibility == "public"
+
+        publicness_gate(actor, project_id, publicness?, "set_project_visibility", fn ->
+          Projects.set_visibility(project_id, visibility)
+        end)
     end
   end
 
-  @spec group_authorized?(String.t(), String.t()) :: boolean()
-  defp group_authorized?(actor_id, group_id) do
-    if group_id == @superuser_group do
-      "superadmin" in Identity.roles_for(actor_id)
-    else
-      "manage_access" in Identity.caps_for(actor_id)
+  # A publicness act is elevation-only with NO owner bypass; anything else is the owner's or
+  # `manage_projects`.
+  defp publicness_gate(actor, _project_id, true, action, fun),
+    do: gate(actor, "manage_publicness", action, nil, fun)
+
+  defp publicness_gate(actor, project_id, false, action, fun),
+    do: project_gate(actor, project_id, "manage_projects", action, fun)
+
+  @doc """
+  Delete a Project (`manage_projects`, or the owner). A Project that still owns Sources needs
+  `confirm` (its rows become unreachable, not deleted). A `public` Project needs
+  `manage_publicness` (removing baseline material is a publicness change).
+  """
+  @spec delete_project(actor(), String.t(), boolean()) :: result() | :not_found | :not_confirmed
+  def delete_project(actor, project_id, confirm) do
+    case Projects.get_project(project_id) do
+      nil ->
+        audit(actor, "delete_project", "denied")
+        :not_found
+
+      %{visibility: vis} ->
+        # deleting a PUBLIC Project removes baseline material: a publicness act, elevation-only
+        # (no owner bypass); otherwise the owner or `manage_projects`.
+        actor
+        |> publicness_gate(
+          project_id,
+          vis == "public",
+          "delete_project",
+          delete_body(project_id, confirm)
+        )
+        |> case do
+          {:error, :not_confirmed} -> :not_confirmed
+          other -> other
+        end
     end
   end
 
-  @spec gate_cap(String.t(), String.t(), String.t(), String.t() | nil, (-> any())) ::
-          result() | {:error, atom()}
-  defp gate_cap(actor_id, cap, action, target_id, fun) do
-    if cap in Identity.caps_for(actor_id) do
-      case fun.() do
-        {:error, _reason} = err ->
-          audit(actor_id, action, "denied", target_user_id: target_id)
-          err
+  defp delete_body(project_id, confirm) do
+    fn ->
+      if Projects.sources(project_id) != [] and not confirm,
+        do: {:error, :not_confirmed},
+        else: Projects.delete_project(project_id)
+    end
+  end
 
-        result ->
-          audit(actor_id, action, "allowed", target_user_id: target_id)
-          result
-      end
+  @doc """
+  Register a Source in a Project (`manage_projects`, or the owner). On a `public` Project the
+  Source is published the moment it exists — `manage_publicness` (council: codex).
+  """
+  @spec add_source(actor(), String.t(), map()) ::
+          {:ok, Projects.source()} | :not_authorized | :not_found | {:error, :invalid_kind}
+  def add_source(actor, project_id, attrs) do
+    case Projects.get_project(project_id) do
+      nil ->
+        audit(actor, "add_source", "denied")
+        :not_found
+
+      %{visibility: "public"} ->
+        gate(actor, "manage_publicness", "add_source", nil, fn ->
+          Projects.add_source(project_id, attrs)
+        end)
+
+      _ ->
+        project_gate(actor, project_id, "manage_projects", "add_source", fn ->
+          Projects.add_source(project_id, attrs)
+        end)
+    end
+  end
+
+  @doc "Remove a Source (`manage_projects`, or the owner of its Project)."
+  @spec remove_source(actor(), String.t()) :: result() | :not_found
+  def remove_source(actor, source_id) do
+    case Projects.get_source(source_id) do
+      nil ->
+        audit(actor, "remove_source", "denied")
+        :not_found
+
+      %{project_id: pid} ->
+        project_gate(actor, pid, "manage_projects", "remove_source", fn ->
+          Projects.remove_source(source_id)
+        end)
+    end
+  end
+
+  @doc """
+  Add a member (`%{user_id: _}` | `%{group_id: _}`) to a Project: `manage_access`, or the
+  Project owner. **Self-grant guard** (ADR-20 D8 + council codex): when the member IS the
+  actor, or is a group the actor belongs to, only the Project owner or an elevated actor may
+  add it — an admin never mints their own visibility.
+  """
+  @spec add_project_member(actor(), String.t(), map(), keyword()) ::
+          result()
+          | :not_found
+          | {:error, :invalid_member | :unknown_group | :unknown_user | :self_grant}
+  def add_project_member(actor, project_id, member, opts \\ []) do
+    uuid = Identity.actor_uuid(actor)
+
+    cond do
+      is_nil(Projects.get_project(project_id)) ->
+        audit(actor, "add_project_member", "denied")
+        :not_found
+
+      self_grant?(uuid, member) and not may_self_grant?(actor, project_id, uuid) ->
+        audit(actor, "add_project_member", "denied",
+          target_user_id: Map.get(member, :user_id),
+          reason: "self_grant"
+        )
+
+        {:error, :self_grant}
+
+      true ->
+        project_gate(actor, project_id, "manage_access", "add_project_member", fn ->
+          Projects.add_member(project_id, member, Keyword.put(opts, :granted_by, uuid))
+        end)
+    end
+  end
+
+  # Only the Project owner (the data owner sharing their own Project) or an elevated actor may
+  # add a member that widens the actor's OWN visibility.
+  defp may_self_grant?(actor, project_id, uuid),
+    do: Projects.owner?(project_id, uuid) or "superadmin" in Identity.roles_for(actor)
+
+  defp self_grant?(uuid, %{user_id: target}) when is_binary(target), do: target == uuid
+  defp self_grant?(uuid, %{group_id: g}) when is_binary(g), do: g in Identity.groups_for(uuid)
+  defp self_grant?(_uuid, _member), do: false
+
+  @doc "Remove a member from a Project (`manage_access`, or the owner)."
+  @spec remove_project_member(actor(), String.t(), map()) ::
+          result() | :not_found | {:error, :invalid_member}
+  def remove_project_member(actor, project_id, member) do
+    if Projects.get_project(project_id) == nil do
+      audit(actor, "remove_project_member", "denied")
+      :not_found
     else
-      audit(actor_id, action, "denied", target_user_id: target_id)
+      # an unknown member is `{:error, :not_found}` → `run_audited` maps it to `:not_found`
+      project_gate(actor, project_id, "manage_access", "remove_project_member", fn ->
+        Projects.remove_member(project_id, member)
+      end)
+    end
+  end
+
+  @doc """
+  Projects visible to the actor: with any admin capability, ALL Projects (an admin support
+  surface — metadata only); otherwise exactly the Projects the actor is a member of or that
+  are `public`. `mine_only: true` restricts an admin to the same.
+  """
+  @spec list_projects(actor(), keyword()) :: [Projects.project()]
+  def list_projects(actor, opts \\ []) do
+    uuid = Identity.actor_uuid(actor)
+
+    if not Keyword.get(opts, :mine_only, false) and admin?(actor),
+      do: Projects.list_projects(),
+      else: Projects.list_projects_for(uuid)
+  end
+
+  @doc """
+  One Project with Sources + members, for an admin or a member; `:not_found` otherwise
+  (404-not-403 — no existence oracle for a non-member).
+  """
+  @spec get_project(actor(), String.t()) ::
+          {:ok,
+           %{
+             project: Projects.project(),
+             sources: [Projects.source()],
+             members: [Projects.member()]
+           }}
+          | :not_found
+  def get_project(actor, project_id) do
+    uuid = Identity.actor_uuid(actor)
+
+    case Projects.project_view(project_id) do
+      nil ->
+        :not_found
+
+      %{project: p} = view ->
+        if admin?(actor) or p.visibility == "public" or Projects.member?(project_id, uuid),
+          do: {:ok, view},
+          else: :not_found
+    end
+  end
+
+  defp admin?(actor), do: Enum.any?(@admin_caps, &(&1 in Identity.caps_for(actor)))
+
+  # ── gates ──────────────────────────────────────────────────────────────────
+
+  # A Project op is allowed for the capability OR for the Project's owner (the data owner).
+  defp project_gate(actor, project_id, cap, action, fun) do
+    if Projects.owner?(project_id, Identity.actor_uuid(actor)) do
+      run_audited(actor, action, nil, fun)
+    else
+      gate(actor, cap, action, nil, fun)
+    end
+  end
+
+  @spec gate(actor(), String.t(), String.t(), String.t() | nil, (-> any())) ::
+          result() | {:error, atom()} | any()
+  defp gate(actor, cap, action, target_id, fun) do
+    if cap in Identity.caps_for(actor) do
+      run_audited(actor, action, target_id, fun)
+    else
+      audit(actor, action, "denied", target_user_id: target_id)
       :not_authorized
     end
   end
 
-  @spec gate_superadmin(String.t(), String.t(), String.t() | nil, (-> any())) ::
-          result() | {:error, atom()}
-  defp gate_superadmin(actor_id, action, target_id, fun) do
-    if "superadmin" in Identity.roles_for(actor_id) do
-      case fun.() do
-        {:error, _reason} = err ->
-          audit(actor_id, action, "denied", target_user_id: target_id)
-          err
+  defp run_audited(actor, action, target_id, fun) do
+    case fun.() do
+      {:error, :not_found} ->
+        audit(actor, action, "denied", target_user_id: target_id, reason: "not_found")
+        :not_found
 
-        result ->
-          audit(actor_id, action, "allowed", target_user_id: target_id)
-          result
-      end
-    else
-      audit(actor_id, action, "denied", target_user_id: target_id)
-      :not_authorized
+      {:error, reason} = err ->
+        audit(actor, action, "denied", target_user_id: target_id, reason: to_string(reason))
+        err
+
+      :not_found ->
+        audit(actor, action, "denied", target_user_id: target_id, reason: "not_found")
+        :not_found
+
+      result ->
+        audit(actor, action, "allowed", target_user_id: target_id)
+        result
     end
   end
 
-  @spec audit(String.t(), String.t(), String.t(), keyword()) :: :ok
-  defp audit(actor_id, action, decision, opts \\ []) do
+  @spec audit(actor(), String.t(), String.t(), keyword()) :: :ok
+  defp audit(actor, action, decision, opts \\ []) do
     Audit.record(%{
-      actor_id: actor_id,
+      actor_id: Identity.actor_uuid(actor),
       action: action,
-      target_user_id: Keyword.get(opts, :target_user_id),
+      target_user_id: valid_target(Keyword.get(opts, :target_user_id)),
       reason: Keyword.get(opts, :reason),
       decision: decision,
       data_returned: false
     })
+  end
+
+  # Forensics keep a validated target uuid; a malformed/absent target audits as nil.
+  defp valid_target(id) when is_binary(id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, _} -> id
+      :error -> nil
+    end
+  end
+
+  defp valid_target(_), do: nil
+
+  # Reachable for callers that need the elevation state alongside the caps (RPC).
+  @doc "The live elevation bound to the actor's session, or `nil`."
+  @spec elevation(actor()) :: Elevation.elevation() | nil
+  def elevation(actor) do
+    {uuid, sid} = Identity.actor_ref(actor)
+    Elevation.active(uuid, sid)
   end
 end

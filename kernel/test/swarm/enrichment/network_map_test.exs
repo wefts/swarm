@@ -12,7 +12,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
   alias Swarm.Graph.Store
   alias Swarm.Repo
 
-  @net_scope "src:wiki"
+  @net_scope Swarm.GraphCase.test_src()
 
   defp gen(json), do: fn _m, _p, _o -> {:ok, json} end
 

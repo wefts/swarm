@@ -1,15 +1,14 @@
 defmodule Swarm.IdentityTest do
   @moduledoc """
-  Workspace ADR-16 step 1 — the kernel identity store. The kernel owns the
-  minimal authorization record (uuid + login + emails + identity-links + group/
-  scope grants + roles). JIT-provisioned from *already-verified* claims (the
-  cryptographic verification is step 2); the store here trusts its caller to have
-  verified, and is the sole record of who-may-do-what.
-
-  No credentials or SSO subjects-as-secrets live here beyond the opaque link
-  subject; password hashes stay channel-side (hive).
+  Workspace ADR-16 step 1 + ADR-20 — the kernel identity store. The kernel owns the
+  minimal authorization record (uuid + login + emails + identity-links + fixed-group and
+  Project memberships). JIT-provisioned from *already-verified* claims; the store is the
+  sole record of who-may-do-what. Scopes derive from Projects, roles from the fixed groups,
+  `superadmin` only from a live elevation.
   """
   use Swarm.IdentityCase, async: false
+
+  alias Swarm.Projects
 
   # A representative set of verified OIDC-shaped claims (the shape step 2 hands in).
   defp claims(overrides \\ %{}) do
@@ -22,17 +21,10 @@ defmodule Swarm.IdentityTest do
         last_name: "Tester",
         nickname: nil,
         emails: [%{email: "penta@example.test", verified: true, primary: true}],
-        groups: ["staff"]
+        groups: ["DSI"]
       },
       overrides
     )
-  end
-
-  defp map_sso_group(incoming, our_group \\ nil, provider \\ "keycloak") do
-    our_group = our_group || incoming
-
-    :ok = Identity.create_group(our_group, our_group, nil)
-    :ok = Identity.put_sso_group_map(provider, incoming, our_group)
   end
 
   describe "uuid7/0" do
@@ -42,170 +34,157 @@ defmodule Swarm.IdentityTest do
       assert u =~
                ~r/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
-      # Distinct calls are distinct.
       refute Identity.uuid7() == u
     end
 
     test "is time-ordered: a uuid minted in a later millisecond sorts after an earlier one" do
       a = Identity.uuid7()
-      # v7 embeds a MILLISECOND timestamp in the high 48 bits → index locality.
-      # Same-ms uuids order by random bits (RFC 9562); across a ms boundary they
-      # sort chronologically, which is the property the PK relies on.
       Process.sleep(2)
       b = Identity.uuid7()
       assert a < b
     end
   end
 
-  describe "upsert_from_claims/1 — JIT provisioning" do
-    test "creates a new active user with login, names, email and group membership" do
-      map_sso_group("staff")
+  describe "the fixed groups (ADR-20 D7)" do
+    test "wheel / admins / staff exist; admins confers admin; nothing else is a group" do
+      assert Identity.fixed_groups() == ["wheel", "admins", "staff"]
+      assert Enum.map(Identity.list_groups(), & &1.id) == ["admins", "staff", "wheel"]
+      assert Enum.find(Identity.list_groups(), &(&1.id == "admins")).granted_roles == ["admin"]
+      assert Enum.find(Identity.list_groups(), &(&1.id == "wheel")).granted_roles == []
+      assert Enum.find(Identity.list_groups(), &(&1.id == "staff")).granted_roles == []
+      # a group grants NO scopes — there is no scope column any more
+      refute Map.has_key?(hd(Identity.list_groups()), :granted_scopes)
+    end
 
+    test "add_to_group: unknown group refused; wheel takes local-only users" do
+      {:ok, sso} = Identity.upsert_from_claims(claims())
+      assert Identity.add_to_group(sso.id, "ops") == {:error, :unknown_group}
+      assert Identity.add_to_group(sso.id, "wheel") == {:error, :wheel_local_only}
+      assert :ok = Identity.add_to_group(sso.id, "admins")
+      assert "admins" in Identity.groups_for(sso.id)
+
+      {:ok, local} = Identity.invite_user(%{login: "loc"})
+      assert :ok = Identity.add_to_group(local.id, "wheel")
+      assert Identity.wheel_member?(local.id)
+    end
+
+    test "only admin is a bindable group role; superadmin never is" do
+      assert Identity.set_group_role("staff", "superadmin") == {:error, :invalid_role}
+      assert Identity.set_group_role("staff", "user") == {:error, :invalid_role}
+      assert Identity.set_group_role("nope", "admin") == {:error, :unknown_group}
+      assert :ok = Identity.set_group_role("staff", "admin")
+      assert :ok = Identity.clear_group_role("staff", "admin")
+    end
+  end
+
+  describe "upsert_from_claims/1 — JIT provisioning" do
+    test "creates a new active user with login, names, email, and joins the default cohort" do
       assert {:ok, u} = Identity.upsert_from_claims(claims())
 
       assert u.login == "penta"
       assert u.first_name == "Pentti"
-      assert u.last_name == "Tester"
       assert u.status == "active"
+      assert u.external == false
       assert u.id =~ ~r/^[0-9a-f-]{36}$/
 
-      # email recorded, primary + verified
       assert [%{email: "penta@example.test", is_primary: true} = e] = Identity.emails_for(u.id)
       assert e.verified_at != nil
 
-      # group membership recorded (idp-sourced)
-      assert "staff" in Identity.groups_for(u.id)
+      # the default internal cohort (staff) — an unmapped IdP group grants nothing else
+      assert Identity.groups_for(u.id) == ["staff"]
     end
 
     test "is idempotent on (provider, subject): a second login resolves to the SAME uuid" do
-      map_sso_group("staff")
-
       {:ok, u1} = Identity.upsert_from_claims(claims())
       {:ok, u2} = Identity.upsert_from_claims(claims())
       assert u1.id == u2.id
-      # one user, one identity_link
       assert Identity.count_users() == 1
     end
 
     test "updates mutable attributes and last_login_at on re-login" do
-      map_sso_group("staff")
-      map_sso_group("admins")
-
       {:ok, u1} = Identity.upsert_from_claims(claims())
       first_login = Identity.get_user(u1.id).last_login_at
 
-      {:ok, u2} =
-        Identity.upsert_from_claims(claims(%{first_name: "Penny", groups: ["staff", "admins"]}))
-
+      {:ok, u2} = Identity.upsert_from_claims(claims(%{first_name: "Penny"}))
       assert u2.id == u1.id
       assert u2.first_name == "Penny"
-      assert Enum.sort(Identity.groups_for(u2.id)) == ["admins", "staff"]
       assert first_login != nil
       assert DateTime.compare(Identity.get_user(u2.id).last_login_at, first_login) != :lt
     end
 
     test "matches on stable subject, not login: a renamed login stays one uuid" do
-      map_sso_group("staff")
-
       {:ok, u1} = Identity.upsert_from_claims(claims())
       {:ok, u2} = Identity.upsert_from_claims(claims(%{login: "penta2"}))
       assert u2.id == u1.id
-      assert u2.login == "penta2"
       assert Identity.by_login("penta") == nil
       assert Identity.by_login("penta2").id == u1.id
     end
 
-    test "revokes group membership no longer present in the claims (default-deny)" do
-      map_sso_group("staff")
-      map_sso_group("admins")
-
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff", "admins"]}))
+    test "the default cohort survives an IdP re-sync that drops every mapped group" do
+      :ok = Identity.put_sso_group_map("keycloak", "DSI", "admins")
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["DSI"]}))
       assert Enum.sort(Identity.groups_for(u.id)) == ["admins", "staff"]
 
-      {:ok, _} = Identity.upsert_from_claims(claims(%{groups: ["staff"]}))
+      {:ok, _} = Identity.upsert_from_claims(claims(%{groups: []}))
+      # the idp-sourced membership is revoked (default-deny); the default cohort is not
       assert Identity.groups_for(u.id) == ["staff"]
+    end
+
+    test "with no default cohort configured, a fresh user holds no group at all" do
+      prev = Application.get_env(:swarm, :identity)
+      Application.put_env(:swarm, :identity, Keyword.put(prev || [], :default_cohort, ""))
+      on_exit(fn -> Application.put_env(:swarm, :identity, prev) end)
+
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      assert Identity.groups_for(u.id) == []
+      assert Identity.scopes_for(u.id) == ["public"]
     end
   end
 
-  describe "SSO group mapping (default-deny)" do
-    test "mapped incoming group confers the kernel group, role and scopes" do
-      :ok = Identity.create_group("admins", "Administrators", nil)
-      :ok = Identity.set_group_role("admins", "admin")
-      :ok = Identity.put_group_scopes("admins", ["src:ldap"])
+  describe "SSO group mapping (default-deny; wheel unreachable)" do
+    test "a mapped incoming group confers the kernel group and its role" do
       :ok = Identity.put_sso_group_map("keycloak", "DSI", "admins")
 
-      assert {:ok, u} =
-               Identity.upsert_from_claims(
-                 claims(%{subject: "sub-admin-0001", login: "admin1", groups: ["DSI"]})
-               )
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-admin-0001", login: "admin1", groups: ["DSI"]})
+        )
 
-      assert Identity.groups_for(u.id) == ["admins"]
+      assert Enum.sort(Identity.groups_for(u.id)) == ["admins", "staff"]
       assert Identity.roles_for(u.id) == ["admin"]
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:ldap"]
+      assert "manage_access" in Identity.caps_for(u.id)
     end
 
-    test "unmapped incoming group grants no membership" do
-      assert {:ok, u} =
-               Identity.upsert_from_claims(
-                 claims(%{
-                   subject: "sub-random-0001",
-                   login: "random1",
-                   groups: ["random-kc-group"]
-                 })
-               )
+    test "an unmapped incoming group grants nothing beyond the cohort" do
+      {:ok, u} =
+        Identity.upsert_from_claims(
+          claims(%{subject: "sub-random-0001", login: "random1", groups: ["random-kc-group"]})
+        )
 
-      assert Identity.groups_for(u.id) == []
+      assert Identity.groups_for(u.id) == ["staff"]
       assert Identity.roles_for(u.id) == []
       assert Identity.scopes_for(u.id) == ["public"]
     end
 
-    test "identity mapping preserves current idp group access after cutover" do
-      Repo.query!(
-        "INSERT INTO access_group (id, source, name) VALUES ($1, 'idp', $2)",
-        ["confluence", "confluence"]
-      )
+    test "wheel is never an SSO target; an unknown group is refused" do
+      assert Identity.put_sso_group_map("keycloak", "root", "wheel") ==
+               {:error, :wheel_not_mappable}
 
-      :ok = Identity.put_sso_group_map("keycloak", "confluence", "confluence")
-
-      assert {:ok, u} =
-               Identity.upsert_from_claims(
-                 claims(%{
-                   subject: "sub-confluence-0001",
-                   login: "conf1",
-                   groups: ["confluence"]
-                 })
-               )
-
-      assert Identity.groups_for(u.id) == ["confluence"]
-    end
-
-    test "second login with no mapped groups revokes prior idp memberships" do
-      map_sso_group("DSI", "admins")
-
-      assert {:ok, u} =
-               Identity.upsert_from_claims(
-                 claims(%{subject: "sub-revoke-0001", login: "revoke1", groups: ["DSI"]})
-               )
-
-      assert Identity.groups_for(u.id) == ["admins"]
-
-      assert {:ok, _} =
-               Identity.upsert_from_claims(
-                 claims(%{subject: "sub-revoke-0001", login: "revoke1", groups: []})
-               )
-
-      assert Identity.groups_for(u.id) == []
-    end
-
-    test "put_sso_group_map rejects an unknown target group" do
-      assert Identity.put_sso_group_map("keycloak", "DSI", "missing") ==
-               {:error, :unknown_group}
-
+      assert Identity.put_sso_group_map("keycloak", "DSI", "missing") == {:error, :unknown_group}
       assert Identity.list_sso_group_map() == []
     end
 
+    test "a raw sso_group_map row targeting wheel is ignored at sync (belt)" do
+      Repo.query!(
+        "INSERT INTO sso_group_map (provider, incoming_group, our_group_id) VALUES ('keycloak', 'root', 'wheel')"
+      )
+
+      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["root"]}))
+      refute "wheel" in Identity.groups_for(u.id)
+    end
+
     test "put, list and delete sso group maps" do
-      map_sso_group("DSI", "admins")
+      :ok = Identity.put_sso_group_map("keycloak", "DSI", "admins")
 
       assert Identity.list_sso_group_map() == [
                %{provider: "keycloak", incoming_group: "DSI", our_group_id: "admins"}
@@ -216,242 +195,134 @@ defmodule Swarm.IdentityTest do
     end
   end
 
-  describe "scope resolution (group → group_scope_map, default-deny)" do
-    test "no group_scope_map ⇒ only the authenticated public baseline" do
-      # default-deny holds ABOVE public: an unmapped group confers nothing, but any
-      # active authenticated actor reads public knowledge (the channel's documented
-      # boundary semantic, restored kernel-side after the staging KB-dead regression).
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff"]}))
+  describe "scope derivation (Projects only, ADR-20)" do
+    test "no membership ⇒ exactly the authenticated public baseline" do
+      {:ok, u} = Identity.upsert_from_claims(claims())
       assert Identity.scopes_for(u.id) == ["public"]
     end
 
-    test "the everyone baseline applies without user_group membership" do
-      :ok = Identity.create_group("everyone", "Everyone", nil)
-      :ok = Identity.put_group_scopes("everyone", ["src:wiki", "src:ldap"])
+    test "the cohort's Project membership confers its Sources; a direct membership adds more" do
+      internal = register_source!(name: "Internal", members: [%{group_id: "staff"}])
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      assert Identity.scopes_for(u.id) == ["public", internal]
 
-      {:ok, u} =
-        Identity.upsert_from_claims(
-          claims(%{subject: "sub-baseline-0001", login: "baseline1", groups: []})
-        )
-
-      assert Identity.groups_for(u.id) == []
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:ldap", "src:wiki"]
+      extra = register_source!(name: "Ops", kind: "iac", members: [%{user_id: u.id}])
+      assert Enum.sort(Identity.scopes_for(u.id)) == Enum.sort(["public", internal, extra])
     end
 
-    test "the everyone baseline is unioned with explicit group additions" do
-      :ok = Identity.create_group("everyone", "Everyone", nil)
-      :ok = Identity.put_group_scopes("everyone", ["src:wiki", "src:ldap"])
-      :ok = Identity.create_group("confluence", "Confluence", nil)
-      :ok = Identity.put_group_scopes("confluence", ["src:confluence"])
-
-      {:ok, u} =
-        Identity.upsert_from_claims(
-          claims(%{subject: "sub-baseline-0002", login: "baseline2", groups: []})
-        )
-
-      :ok = Identity.add_to_group(u.id, "confluence")
-
-      assert Enum.sort(Identity.scopes_for(u.id)) == [
-               "public",
-               "src:confluence",
-               "src:ldap",
-               "src:wiki"
-             ]
-    end
-
-    test "the everyone baseline confers scopes only, never roles or capabilities" do
-      :ok = Identity.create_group("everyone", "Everyone", nil)
-      :ok = Identity.put_group_scopes("everyone", ["src:wiki"])
-      :ok = Identity.set_group_role("everyone", "admin")
-
-      {:ok, u} =
-        Identity.upsert_from_claims(
-          claims(%{subject: "sub-baseline-0003", login: "baseline3", groups: []})
-        )
-
-      assert Identity.groups_for(u.id) == []
-      assert Identity.roles_for(u.id) == []
-      assert Identity.caps_for(u.id) == []
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
-    end
-
-    test "private never leaks through the everyone baseline" do
-      :ok = Identity.create_group("everyone", "Everyone", nil)
-      assert Identity.put_group_scopes("everyone", ["private"]) == {:error, :ungrantable_scope}
-      :ok = Identity.put_group_scopes("everyone", ["public"])
-
-      Swarm.Repo.query!(
-        "UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1",
-        ["everyone", ["public", "private"]]
-      )
-
-      {:ok, u} =
-        Identity.upsert_from_claims(
-          claims(%{subject: "sub-baseline-0004", login: "baseline4", groups: []})
-        )
-
-      assert Identity.scopes_for(u.id) == ["public"]
-    end
-
-    test "missing everyone baseline group preserves the no-group public behavior" do
-      {:ok, u} =
-        Identity.upsert_from_claims(
-          claims(%{subject: "sub-baseline-0005", login: "baseline5", groups: []})
-        )
-
-      assert Identity.groups_for(u.id) == []
-      assert Identity.scopes_for(u.id) == ["public"]
-    end
-
-    test "a group's mapped scopes are conferred, unioned across groups, deduped" do
-      Identity.put_group_scopes("staff", ["public"])
-      Identity.put_group_scopes("nebula", ["public", "group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-      :ok = Identity.put_sso_group_map("keycloak", "nebula", "nebula")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff", "nebula"]}))
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["group", "public"]
+    test "private never enters the derived set" do
+      refute "private" in Identity.scopes_for(Identity.uuid7())
     end
   end
 
-  describe "grant-boundary scope validation (person-scope-leak-guard)" do
-    # `private` is the default-deny floor AND the chat-privacy mechanism — conferring
-    # it to any group would expose every user's private facts. Hard-denied here,
-    # the deepest grant boundary (Admin + the RPC route through this).
-    test "put_group_scopes hard-denies private as a grantable scope, writing nothing" do
-      assert Identity.put_group_scopes("nebula", ["public", "private"]) ==
-               {:error, :ungrantable_scope}
-
-      # nothing was written — a member of the group derives only the baseline
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["nebula"]}))
-      assert Identity.scopes_for(u.id) == ["public"]
-    end
-
-    test "put_group_scopes accepts source scopes but still rejects private" do
-      assert Identity.put_group_scopes("nebula", ["src:wiki", "public"]) == :ok
-      :ok = Identity.put_sso_group_map("keycloak", "nebula", "nebula")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["nebula"]}))
-      assert Enum.sort(Identity.scopes_for(u.id)) == ["public", "src:wiki"]
-
-      assert Identity.put_group_scopes("nebula", ["private"]) ==
-               {:error, :ungrantable_scope}
-    end
-
-    test "put_group_scopes rejects out-of-vocabulary scopes (Contract check)" do
-      assert Identity.put_group_scopes("nebula", ["group", "secret"]) ==
-               {:error, :ungrantable_scope}
-
-      assert Identity.grantable_scopes() == ["group", "public"]
-    end
-
-    test "scopes_for never derives private even from a corrupted scope map (belt)" do
-      # Simulate legacy/raw-SQL corruption that bypassed the grant boundary.
-      Identity.put_group_scopes("staff", ["public"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: ["staff"]}))
-
-      Swarm.Repo.query!(
-        "UPDATE group_scope_map SET scopes = $2 WHERE group_id = $1",
-        ["staff", ["public", "private"]]
-      )
-
-      assert Identity.scopes_for(u.id) == ["public"]
-    end
-  end
-
-  describe "seed_superadmin/1 — the root/uid-0 mechanism" do
-    test "creates a local active user with a superadmin role_grant, idempotently" do
+  describe "seed_wheel/1 — the bootstrap Wheel member" do
+    test "creates a local active user in wheel + admins (+ the cohort), idempotently, with no standing superadmin" do
       vanity = "01920000-0000-7000-8000-00000000da7a"
-      assert {:ok, u} = Identity.seed_superadmin(%{id: vanity, login: "rootuser"})
-      assert u.id == vanity
-      assert u.status == "active"
-      assert "superadmin" in Identity.roles_for(u.id)
+      assert {:ok, u} = Identity.seed_wheel(%{id: vanity, login: "rootuser"})
+      assert u.id == vanity and u.status == "active"
+      assert Enum.sort(Identity.groups_for(u.id)) == ["admins", "staff", "wheel"]
+      assert Identity.roles_for(u.id) == ["admin"]
+      refute "read_any_conversation" in Identity.caps_for(u.id)
+      assert Identity.local_only?(u.id)
+      assert Identity.active_local_wheel_count() == 1
 
-      # idempotent — no duplicate user, no duplicate grant
-      assert {:ok, u2} = Identity.seed_superadmin(%{id: vanity, login: "rootuser"})
+      assert {:ok, u2} = Identity.seed_wheel(%{id: vanity, login: "rootuser"})
       assert u2.id == vanity
       assert Identity.count_users() == 1
-      assert Identity.roles_for(u.id) == ["superadmin"]
     end
   end
 
-  describe "roles (default-deny, source-agnostic)" do
-    test "a fresh user holds no roles" do
+  describe "roles and capabilities (default-deny; group-derived; superadmin = elevation)" do
+    test "a fresh user holds no roles; admins membership confers admin caps only" do
       {:ok, u} = Identity.upsert_from_claims(claims())
       assert Identity.roles_for(u.id) == []
-    end
+      assert Identity.caps_for(u.id) == []
 
-    test "group-role membership confers roles and capabilities without direct grants" do
-      :ok = Identity.create_group("ops", "Operations", "Operators")
-      :ok = Identity.set_group_role("ops", "admin")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
-
-      :ok = Identity.add_to_group(u.id, "ops")
-
-      assert "admin" in Identity.roles_for(u.id)
-      assert "manage_access" in Identity.caps_for(u.id)
-      assert "invite_users" in Identity.caps_for(u.id)
-      assert "manage_users" in Identity.caps_for(u.id)
-    end
-
-    test "set_group_role rejects bad roles and clear_group_role removes a role" do
-      :ok = Identity.create_group("ops", "Operations", nil)
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
-      :ok = Identity.add_to_group(u.id, "ops")
-
-      assert Identity.set_group_role("ops", "root") == {:error, :invalid_role}
-      assert Identity.set_group_role("ops", "user") == {:error, :invalid_role}
-
-      assert :ok = Identity.set_group_role("ops", "admin")
+      :ok = Identity.add_to_group(u.id, "admins")
       assert Identity.roles_for(u.id) == ["admin"]
+      assert Identity.caps_for(u.id) == Enum.sort(Identity.admin_caps())
+      refute "manage_wheel" in Identity.caps_for(u.id)
+      refute "read_any_conversation" in Identity.caps_for(u.id)
+    end
 
-      assert :ok = Identity.clear_group_role("ops", "admin")
-      assert Identity.roles_for(u.id) == []
+    test "list_roles: superadmin holders are the LIVE elevations, never a standing set" do
+      {:ok, _} = Identity.seed_wheel(%{id: Identity.uuid7(), login: "rootuser"})
+      roles = Identity.list_roles()
+      assert Enum.find(roles, &(&1.name == "admin")).holder_count == 1
+      assert Enum.find(roles, &(&1.name == "superadmin")).holder_count == 0
+      assert "read_any_conversation" in Enum.find(roles, &(&1.name == "superadmin")).capabilities
+      assert Enum.find(roles, &(&1.name == "user")).holder_count == 0
     end
   end
 
-  describe "groups (first-class metadata + group-role grants)" do
-    test "delete_group cascades memberships, scopes and roles" do
-      :ok = Identity.create_group("ops", "Operations", "Operators")
-      :ok = Identity.put_group_scopes("ops", ["group"])
-      :ok = Identity.set_group_role("ops", "admin")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
-      :ok = Identity.add_to_group(u.id, "ops")
+  describe "invite / deactivate / delete" do
+    test "invite creates an invited local user with a local link; a guest skips the cohort" do
+      {:ok, u} = Identity.invite_user(%{login: "newbie", first_name: "New"})
+      assert u.status == "invited" and u.external == false
+      assert Identity.user_by_link("local", "newbie").id == u.id
+      assert Identity.groups_for(u.id) == ["staff"]
 
-      assert Identity.group_exists?("ops")
-      assert Identity.group_member_count("ops") == 1
-      assert Identity.groups_for(u.id) == ["ops"]
-      assert Identity.roles_for(u.id) == ["admin"]
-      assert "group" in Identity.scopes_for(u.id)
+      {:ok, g} = Identity.invite_user(%{login: "visitor", external: true})
+      assert g.external
+      assert Identity.groups_for(g.id) == []
+      assert Identity.external?(g.id)
+    end
 
-      assert :ok = Identity.delete_group("ops")
+    test "deactivate/delete kill every authority source: groups, Project memberships, links" do
+      internal = register_source!(name: "Internal")
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      :ok = Identity.add_to_group(u.id, "admins")
+      [p] = Projects.list_projects()
+      :ok = Projects.add_member(p.id, %{user_id: u.id})
+      assert internal in Identity.scopes_for(u.id)
 
-      refute Identity.group_exists?("ops")
-      assert Identity.group_member_count("ops") == 0
+      :ok = Identity.deactivate_user(u.id)
+      assert Identity.get_user(u.id).status == "disabled"
       assert Identity.groups_for(u.id) == []
       assert Identity.roles_for(u.id) == []
       assert Identity.scopes_for(u.id) == ["public"]
-      refute Enum.any?(Identity.list_groups(), &(&1.id == "ops"))
+
+      :ok = Identity.delete_user(u.id)
+      assert Identity.get_user(u.id).status == "deleted"
+      assert Identity.user_by_link("keycloak", "sub-penta-0001") == nil
+      assert Identity.get_user_view(u.id) == nil
+    end
+  end
+
+  describe "admin read models" do
+    test "list_users aggregates group-derived roles, groups, providers and the guest flag" do
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      :ok = Identity.add_to_group(u.id, "admins")
+      {:ok, g} = Identity.invite_user(%{login: "visitor", external: true})
+
+      {users, 2} = Identity.list_users()
+      penta = Enum.find(users, &(&1.login == "penta"))
+      assert penta.roles == ["admin"]
+      assert Enum.sort(penta.groups) == ["admins", "staff"]
+      assert penta.providers == ["keycloak"]
+      refute penta.external
+      assert Enum.find(users, &(&1.id == g.id)).external
     end
 
-    test "rename_group keeps id and membership; list_groups includes metadata and roles" do
-      :ok = Identity.create_group("ops", "Operations", "Operators")
-      :ok = Identity.set_group_role("ops", "admin")
-      {:ok, u} = Identity.upsert_from_claims(claims(%{groups: []}))
-      :ok = Identity.add_to_group(u.id, "ops")
+    test "get_user_view carries emails, groups, roles and visible Projects" do
+      internal = register_source!(name: "Internal", members: [%{group_id: "staff"}])
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      view = Identity.get_user_view(u.id)
+      assert view.emails == ["penta@example.test"]
+      assert view.groups == ["staff"]
+      assert view.roles == []
+      [pid] = view.projects
+      assert Projects.get_project(pid).name == "Internal"
+      assert Identity.scopes_for(u.id) == ["public", internal]
+    end
 
-      assert :ok = Identity.rename_group("ops", "Platform Ops")
-      assert :ok = Identity.describe_group("ops", "Platform operations cohort")
-      assert Identity.rename_group("missing", "Missing") == {:error, :not_found}
-      assert Identity.describe_group("missing", "Missing") == {:error, :not_found}
-
-      assert Identity.groups_for(u.id) == ["ops"]
-
-      group = Enum.find(Identity.list_groups(), &(&1.id == "ops"))
-      assert group.name == "Platform Ops"
-      assert group.description == "Platform operations cohort"
-      assert group.member_count == 1
-      assert group.granted_scopes == []
-      assert group.granted_roles == ["admin"]
+    test "get_group lists members; local_only? distinguishes providers" do
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      %{group: g, members: [m]} = Identity.get_group("staff")
+      assert g.id == "staff" and g.member_count == 1
+      assert m.login == "penta" and m.providers == ["keycloak"]
+      refute Identity.local_only?(u.id)
+      assert Identity.get_group("nope") == nil
     end
   end
 end

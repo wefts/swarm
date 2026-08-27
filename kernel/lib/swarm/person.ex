@@ -15,8 +15,8 @@ defmodule Swarm.Person do
   Facts **derived from a user's private chat** must never surface to a scoped corpus
   read. Since the graph carries only a topic `scope` (private < group < public), not an
   owner axis, chat-derived facts are written at **`private`** scope — the narrowest —
-  which a corpus reader (public/group scopes) is never granted (`private` is not a
-  grantable scope, `Swarm.Identity.grantable_scopes/0`), so the existing scope filter
+  which a corpus reader (public / source scopes) is never granted (`private` is never
+  derivable — `Swarm.Identity.scopes_for/1` clamps it out), so the existing scope filter
   on retrieval/search excludes them.
 
   The rule is enforced at the **data boundary**, not here: `Swarm.Graph.Contract`

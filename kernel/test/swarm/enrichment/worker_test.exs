@@ -54,15 +54,15 @@ defmodule Swarm.Enrichment.WorkerTest do
     end
 
     test "claims inherit the source node's scope" do
-      node = source_with_body("group secret relation.", %{scope: "group"})
+      node = source_with_body("group secret relation.", %{scope: test_src()})
       gen = gen_returning(~s({"claims":[{"s":"A","p":"relates_to","o":"B"}]}))
 
       assert {:ok, %{edges: 1}} = Worker.enrich(node, gen_fun: gen)
 
       %{rows: [[scope]]} = Repo.query!("SELECT visibility_scope FROM edge LIMIT 1")
-      assert scope == "group"
+      assert scope == test_src()
       %{rows: scopes} = Repo.query!("SELECT DISTINCT scope FROM node WHERE type = 'entity'")
-      assert scopes == [["group"]]
+      assert scopes == [[test_src()]]
     end
 
     test "ZONE GUARD: a generated-kind node is never enriched (no LLM call)" do

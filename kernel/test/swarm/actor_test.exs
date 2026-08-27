@@ -4,7 +4,7 @@ defmodule Swarm.ActorTest do
   plaintext `{viewer, scopes}`. Each request carries a **signed** actor assertion
   (HS256 JWT, shared secret, single box); the kernel verifies it and **derives**
   the effective `{uuid, scopes, caps}` from its OWN records (identity_link →
-  app_user → group_scope_map / role_grant). A channel bug / stale session /
+  app_user → Project memberships / group roles / live elevation). A channel bug / stale session /
   confused deputy cannot spoof identity or widen scope.
   """
   use Swarm.IdentityCase, async: false
@@ -104,11 +104,10 @@ defmodule Swarm.ActorTest do
 
   describe "resolve/1 — verify then DERIVE from the kernel's own records" do
     test "a valid assertion resolves to the derived uuid, scopes and caps" do
-      Identity.put_group_scopes("staff", ["public"])
-      Identity.put_group_scopes("nebula", ["public", "group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-      :ok = Identity.put_sso_group_map("keycloak", "nebula", "nebula")
-      u = provision_penta(["staff", "nebula"])
+      # ADR-20: scopes come from Project membership — here the default cohort (staff) is a
+      # member of an internal Project with one Source.
+      internal = register_source!(name: "Internal", members: [%{group_id: "staff"}])
+      u = provision_penta(["staff"])
 
       t =
         token(%{"sub" => "sub-penta-0001", "provider" => "keycloak", "sid" => "x"}, exp_in: 300)
@@ -117,31 +116,34 @@ defmodule Swarm.ActorTest do
       assert actor.uuid == u.id
       assert actor.login == "penta"
       # scopes come from the STORE, not the token (which carries none)
-      assert Enum.sort(actor.scopes) == ["group", "public"]
-      # a plain user has no capabilities (default-deny)
+      assert Enum.sort(actor.scopes) == Enum.sort(["public", internal])
+      # a plain user has no capabilities (default-deny), is not a guest, is not elevated
       assert actor.caps == []
+      assert actor.external == false
+      assert actor.elevation_expires_at == nil
+      assert actor.sid == "x"
     end
 
     test "scopes are DERIVED — a token cannot widen them (it carries no scopes)" do
-      Identity.put_group_scopes("staff", ["public"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
       provision_penta(["staff"])
       t = token(%{"sub" => "sub-penta-0001", "provider" => "keycloak"}, exp_in: 300)
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)
       assert actor.scopes == ["public"]
     end
 
-    test "superadmin caps include read_any_conversation (local account resolves via its link)" do
+    test "a Wheel member resolves with admin caps but NO standing superadmin (local link path)" do
       vanity = "01920000-0000-7000-8000-00000000da7a"
-      {:ok, u} = Identity.seed_superadmin(%{id: vanity, login: "rootuser"})
-      # a local superadmin logs in with provider "local"; seed_superadmin created the
-      # matching local identity_link (subject = login) so resolve finds them uniformly.
-      t = token(%{"sub" => "rootuser", "provider" => "local"}, exp_in: 300)
+      {:ok, u} = Identity.seed_wheel(%{id: vanity, login: "rootuser"})
+      # a local Wheel member logs in with provider "local"; seed_wheel created the matching
+      # local identity_link (subject = login) so resolve finds them uniformly.
+      t = token(%{"sub" => "rootuser", "provider" => "local", "sid" => "s1"}, exp_in: 300)
       assert {:ok, actor} = Actor.resolve(t, secret: @secret)
       assert actor.uuid == u.id
-      assert "read_any_conversation" in actor.caps
       assert "manage_access" in actor.caps
       assert "manage_users" in actor.caps
+      # break-glass exists only under a live, session-bound elevation (ADR-20 D9)
+      refute "read_any_conversation" in actor.caps
+      assert actor.elevation_expires_at == nil
     end
 
     test "an unknown (provider, subject) ⇒ :unknown_actor (not provisioned)" do

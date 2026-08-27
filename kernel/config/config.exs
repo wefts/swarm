@@ -26,6 +26,19 @@ config :swarm, :actor, secret: nil, leeway_s: 30
 # (conversations/admin) are ALWAYS strict regardless of this flag.
 config :swarm, :core_api, auth_mode: :strict
 
+# Time-boxed elevation (workspace ADR-20 D9). `superadmin` exists only as a live elevation of a
+# local Wheel member: `default_ttl_s` is the session length when the request names none,
+# `max_ttl_s` the ceiling a request may ask for, `reauth_max_age_s` how fresh the channel's
+# password re-check (the `auth_time` in the re-auth proof) must be. Runtime-overridable
+# (`SWARM_ELEVATION_TTL_S`, `SWARM_ELEVATION_MAX_TTL_S`, runtime.exs).
+config :swarm, :elevation, default_ttl_s: 900, max_ttl_s: 3600, reauth_max_age_s: 120
+
+# The default internal cohort (ADR-20 D7 "Staff"): every NON-guest account joins this fixed
+# group at provisioning; the group is a member of the deployment's internal Project(s), which is
+# how "everyone internal sees the internal wiki" is expressed — as an explicit, audited Project
+# membership, never as a baseline scope grant. Empty ⇒ no default cohort (`SWARM_DEFAULT_COHORT_GROUP`).
+config :swarm, :identity, default_cohort: "staff"
+
 # Embedding dimensionality of the `node.vec` column (ADR-6). One model/space at
 # a time; changing it is a re-embed migration, not an in-place edit. 1024 =
 # bge-m3 (multilingual UA/FR/EN), the chosen embedding model (Task 03).

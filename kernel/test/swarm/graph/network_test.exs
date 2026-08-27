@@ -9,7 +9,7 @@ defmodule Swarm.Graph.NetworkTest do
   alias Swarm.Graph.Network
   alias Swarm.Graph.Store
 
-  @net_scope "src:wiki"
+  @net_scope Swarm.GraphCase.test_src()
 
   defp src_node(scope),
     do: %{id: Store.upsert_node("article", "net-read-src", scope: scope), scope: scope}

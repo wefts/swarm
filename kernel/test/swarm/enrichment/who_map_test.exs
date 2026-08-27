@@ -9,10 +9,11 @@ defmodule Swarm.Enrichment.WhoMapTest do
   alias Swarm.Graph.Store
   alias Swarm.Repo
 
-  @who_scope "src:ldap"
+  # ADR-20: the who facts are written at the ANCHOR's scope (the registered LDAP Source).
+  @who_scope Swarm.GraphCase.test_src()
 
   defp anchor,
-    do: %{id: Store.upsert_node("source", "ldap:directory", scope: "group"), scope: "group"}
+    do: %{id: Store.upsert_node("source", "ldap:directory", scope: @who_scope), scope: @who_scope}
 
   defp fact(subj, sk, rel, obj, ok),
     do: %{subject: subj, subject_kind: sk, relation: rel, object: obj, object_kind: ok}
@@ -122,25 +123,42 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert length(ids) == 3
     end
 
-    test "who data nodes/edges are stamped with the LDAP source scope; markers are public" do
-      # even a public source anchor yields LDAP-scoped who data
-      pub_anchor = %{
-        id: Store.upsert_node("source", "ldap:directory", scope: "public"),
-        scope: "public"
+    test "who data nodes/edges INHERIT the anchor's source scope (ADR-20); kind markers are public" do
+      # the loader creates the anchor under the registered LDAP Source; the who facts ride it —
+      # the kernel never picks a scope by label. A second directory under another Source stays apart.
+      WhoMap.write(anchor(), [fact("jdoe", "person", "works_in", "Eng", "org")], "p")
+
+      other = Swarm.GraphCase.test_src2()
+
+      other_anchor = %{
+        id: Store.upsert_node("source", "ldap:directory-2", scope: other),
+        scope: other
       }
 
-      WhoMap.write(pub_anchor, [fact("jdoe", "person", "works_in", "Eng", "org")], "p")
+      WhoMap.write(other_anchor, [fact("zed", "person", "works_in", "Ops", "org")], "p2")
 
       assert Repo.query!("SELECT scope FROM node WHERE key = 'who:person:jdoe'").rows == [
                [@who_scope]
              ]
 
+      assert Repo.query!("SELECT scope FROM node WHERE key = 'who:person:zed'").rows == [[other]]
+
+      # kind markers are generic type labels shared across sources — pinned public
       assert Repo.query!("SELECT scope FROM node WHERE key = 'who:kind:person'").rows == [
                ["public"]
              ]
 
-      assert Repo.query!("SELECT DISTINCT visibility_scope FROM edge WHERE type = 'works_in'").rows ==
-               [[@who_scope]]
+      # relation edges carry the source scope; the cross-scope is_a to the public marker is admissible
+      assert Repo.query!(
+               "SELECT DISTINCT visibility_scope FROM edge WHERE type = 'works_in' ORDER BY 1"
+             ).rows == Enum.sort([[@who_scope], [other]])
+
+      # an anchor without a scope is a programming error, never a silent default
+      assert_raise ArgumentError, fn ->
+        WhoMap.write(%{id: 1}, [fact("x", "person", "works_in", "Eng", "org")], "p")
+      end
+
+      assert_raise ArgumentError, fn -> WhoMap.write_profile(%{"uid" => "nx"}, "p") end
     end
 
     test "in_group (person→group) is a governed relation; group node + is_a minted" do
@@ -194,7 +212,7 @@ defmodule Swarm.Enrichment.WhoMapTest do
              ) == []
 
       # write_service stores searchable name/aliases
-      s = WhoMap.write_service("keycloak", "Keycloak / SSO", ["sso"])
+      s = WhoMap.write_service("keycloak", "Keycloak / SSO", ["sso"], @who_scope)
 
       assert Repo.query!("SELECT body FROM content WHERE node_id=$1", [s]).rows |> hd() |> hd() =~
                "Keycloak"
@@ -213,7 +231,7 @@ defmodule Swarm.Enrichment.WhoMapTest do
         "employment" => "contractor"
       }
 
-      person = WhoMap.write_profile(profile, "p")
+      person = WhoMap.write_profile(profile, "p", scope: @who_scope)
 
       assert [[body]] = Repo.query!("SELECT body FROM content WHERE node_id = $1", [person]).rows
       assert body =~ "Jane Doe"
@@ -227,8 +245,10 @@ defmodule Swarm.Enrichment.WhoMapTest do
     end
 
     test "is idempotent — a re-write updates the same single content row" do
-      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p")
-      person = WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane D. Roe"}, "p")
+      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p", scope: @who_scope)
+
+      person =
+        WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane D. Roe"}, "p", scope: @who_scope)
 
       assert Repo.query!("SELECT count(*) FROM content WHERE node_id = $1", [person]).rows == [
                [1]
@@ -239,8 +259,8 @@ defmodule Swarm.Enrichment.WhoMapTest do
     end
 
     test "a missing/blank uid is refused" do
-      assert WhoMap.write_profile(%{"cn" => "No Uid"}, "p") == :error
-      assert WhoMap.write_profile(%{"uid" => "  "}, "p") == :error
+      assert WhoMap.write_profile(%{"cn" => "No Uid"}, "p", scope: @who_scope) == :error
+      assert WhoMap.write_profile(%{"uid" => "  "}, "p", scope: @who_scope) == :error
     end
   end
 
@@ -258,8 +278,8 @@ defmodule Swarm.Enrichment.WhoMapTest do
       )
 
       # profiles give the resolvable display names
-      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p")
-      WhoMap.write_profile(%{"uid" => "bsmith", "cn" => "Bob Smith"}, "p")
+      WhoMap.write_profile(%{"uid" => "jdoe", "cn" => "Jane Doe"}, "p", scope: @who_scope)
+      WhoMap.write_profile(%{"uid" => "bsmith", "cn" => "Bob Smith"}, "p", scope: @who_scope)
       :ok
     end
 
@@ -311,7 +331,8 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
       WhoMap.write_profile(
         %{"uid" => "jdupont", "cn" => "Jean Dupont", "sn" => "Dupont"},
-        "p"
+        "p",
+        scope: @who_scope
       )
 
       cands = WhoMap.candidates("who is dupont", [@who_scope])
@@ -388,7 +409,7 @@ defmodule Swarm.Enrichment.WhoMapTest do
       # org AlterWay + a curated group whose alias is the 2-word phrase
       WhoMap.write(a, [fact("u1", "person", "works_in", "AlterWay", "org")], "p")
       WhoMap.write(a, [fact("u2", "person", "in_group", "alterway-ops", "group")], "p")
-      WhoMap.write_group("alterway-ops", "AlterWay ops", ["aw ops", "ops alterway"])
+      WhoMap.write_group("alterway-ops", "AlterWay ops", ["aw ops", "ops alterway"], @who_scope)
 
       # bare entity query → the org
       assert List.first(WhoMap.candidates("who works in AlterWay", [@who_scope])) ==
@@ -402,7 +423,14 @@ defmodule Swarm.Enrichment.WhoMapTest do
     test "phrase tier is word-boundary + punctuation-normalized" do
       a = anchor()
       WhoMap.write(a, [fact("u3", "person", "in_group", "aw-ops", "group")], "p")
-      WhoMap.write_group("aw-ops", "AlterWay Ops Squad", ["aw ops", "alter-way squad"])
+
+      WhoMap.write_group(
+        "aw-ops",
+        "AlterWay Ops Squad",
+        ["aw ops", "alter-way squad"],
+        @who_scope
+      )
+
       # punctuation: the hyphenated alias 'alter-way squad' resolves against a spaced query
       assert List.first(WhoMap.candidates("who is in the alter way squad", [@who_scope])) ==
                "who:group:aw-ops"

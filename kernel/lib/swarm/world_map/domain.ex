@@ -3,8 +3,8 @@ defmodule Swarm.WorldMap.Domain do
   The serve-DOMAIN contract (world-map master plan S3; decorrelated review — codex: "standardize
   the serve contract BEFORE the first new domain so it can't hard-code assumptions that become
   load-bearing bugs"). ONE place where a servable domain declares everything the tier-gate needs:
-  its query cue, its Stage-2 entail system prompt, its corroboration floor, its governed relations,
-  and its serve scope. A new domain (who / location / service) adds a `%Domain{}` here + a coverage
+  its query cue, its Stage-2 entail system prompt, its corroboration floor and its governed
+  relations. A new domain (who / location / service) adds a `%Domain{}` here + a coverage
   builder — it does NOT scatter bespoke cues/entail/floors across Coverage and Gate (which is how
   four domains drift into four incompatible serve semantics).
 
@@ -25,7 +25,6 @@ defmodule Swarm.WorldMap.Domain do
     :entail_system,
     :min_corroboration,
     relations: [],
-    scope: ["group"],
     # --- neighborhood-domain fields (E2b): everything the GENERIC serve pipeline needs so a
     # neighborhood domain (network / who / …) is ONE registry entry, zero Coverage/Gate edits.
     neighborhood_fun: nil,
@@ -42,7 +41,6 @@ defmodule Swarm.WorldMap.Domain do
           entail_system: String.t(),
           min_corroboration: pos_integer(),
           relations: [String.t()],
-          scope: [String.t()],
           # neighborhood-domain fields (nil for non-neighborhood domains)
           neighborhood_fun: (String.t(), [String.t()], keyword() -> [map()]) | nil,
           subject_fun: (String.t() -> String.t()) | nil,
@@ -127,7 +125,6 @@ defmodule Swarm.WorldMap.Domain do
       entail_system: @network_entail_system,
       min_corroboration: 2,
       relations: @network_relations,
-      scope: ["group", "public"],
       neighborhood_fun: &Swarm.Graph.Network.neighborhood/3,
       subject_fun: &network_subject/1,
       candidates_fun: &Swarm.Graph.Network.candidates/2,
@@ -152,7 +149,6 @@ defmodule Swarm.WorldMap.Domain do
       entail_system: @who_entail_system,
       min_corroboration: 1,
       relations: @who_relations,
-      scope: ["group"],
       neighborhood_fun: &Swarm.Enrichment.WhoMap.neighborhood/3,
       subject_fun: &Swarm.Enrichment.WhoMap.display_subject/1,
       candidates_fun: &Swarm.Enrichment.WhoMap.candidates/2,
@@ -175,15 +171,17 @@ defmodule Swarm.WorldMap.Domain do
   @doc """
   GLOBAL answer-time privacy/policy filter (S3). Keep only atoms the viewer is allowed to see —
   enforced HERE, at serve time, for EVERY domain, so no domain path (or cross-domain join) can leak
-  a fact outside the viewer's `scopes`. Atoms without a `:scope` are conservatively kept only if the
-  viewer has `group` (the default corpus scope); a stricter policy hook plugs in here later (ADR-16).
+  a fact outside the viewer's `scopes`. An atom without a `:scope` is DROPPED (default-deny — under
+  ADR-20 every served fact carries the source scope of the row it came from; there is no "default
+  corpus scope" any more).
   """
   @spec policy_filter([map()], [String.t()]) :: [map()]
   def policy_filter(atoms, viewer_scopes) when is_list(atoms) and is_list(viewer_scopes) do
     allowed = MapSet.new(viewer_scopes)
+
     Enum.filter(atoms, fn atom ->
       case Map.get(atom, :scope) do
-        nil -> MapSet.member?(allowed, "group")
+        nil -> false
         s -> MapSet.member?(allowed, s)
       end
     end)

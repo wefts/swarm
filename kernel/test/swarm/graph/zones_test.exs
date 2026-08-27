@@ -97,9 +97,9 @@ defmodule Swarm.Graph.ZonesTest do
       assert kind == "observation"
     end
 
-    test "the schema version tracks the latest migration (10 — ADR-18 per-source scope)" do
-      assert Contract.stamped_version() == 10
-      assert Contract.schema_version() == 10
+    test "the schema version tracks the latest migration (11 — ADR-20 project access)" do
+      assert Contract.stamped_version() == 11
+      assert Contract.schema_version() == 11
     end
   end
 end

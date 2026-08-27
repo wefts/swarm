@@ -47,7 +47,7 @@ defmodule Swarm.PersonTest do
 
       # no path — Person or raw Store — can mint/widen a person node beyond private
       assert_raise Swarm.Graph.ContractError, fn ->
-        Store.upsert_node("user", u.id, scope: "group")
+        Store.upsert_node("user", u.id, scope: Swarm.GraphCase.test_src())
       end
     end
   end
@@ -58,9 +58,9 @@ defmodule Swarm.PersonTest do
       # a fact learned from alice's private chat
       :ok = Person.record_chat_fact(alice.id, "based_in", "concept", "Zzyzx-chat-secret")
       # a fact that legitimately lives in the group corpus
-      Store.upsert_node("concept", "Zzyzx-corpus-public", scope: "group")
+      Store.upsert_node("concept", "Zzyzx-corpus-public", scope: Swarm.GraphCase.test_src())
 
-      keys = Core.search("Zzyzx", ["group"], limit: 10) |> Enum.map(& &1.key)
+      keys = Core.search("Zzyzx", [Swarm.GraphCase.test_src()], limit: 10) |> Enum.map(& &1.key)
       assert "Zzyzx-corpus-public" in keys
       refute "Zzyzx-chat-secret" in keys
     end
@@ -91,10 +91,8 @@ defmodule Swarm.PersonTest do
         )
       end
 
-      # an admin (holds manage_users) deletes the target account — admin via group (ADR-19)
+      # an admin (holds manage_users) deletes the target account — admin via the admins group
       mgr = user("mgr")
-      :ok = Admin.create_group(root, "admins", "Admins", nil)
-      :ok = Admin.set_group_role(root, "admins", "admin")
       :ok = Admin.grant_group(root, mgr.id, "admins")
       assert :ok = Admin.delete_user(mgr.id, target.id)
 
@@ -114,9 +112,10 @@ defmodule Swarm.PersonTest do
     scope
   end
 
+  # A Wheel member (also in admins) — enough to manage admins membership (manage_access).
   defp seed_superadmin do
     {:ok, u} =
-      Identity.seed_superadmin(%{
+      Identity.seed_wheel(%{
         id: Identity.uuid7(),
         login: "root#{System.unique_integer([:positive])}"
       })

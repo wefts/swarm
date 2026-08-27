@@ -18,10 +18,10 @@ defmodule Swarm.WorldMap.DomainTest do
     test "the who (org-directory) domain declares its serve knobs" do
       d = Domain.who()
       assert d.key == :who
+
       # authoritative single source → serves on 1 (reconciliation, not corroboration, defends stale)
       assert d.min_corroboration == 1
       assert d.entail_system =~ "ORG-DIRECTORY"
-      assert d.scope == ["group"]
       assert "managed_by" in d.relations
       assert "has_role_family" in d.relations
       assert "has_employment" in d.relations
@@ -52,21 +52,21 @@ defmodule Swarm.WorldMap.DomainTest do
   describe "policy_filter/2 — global answer-time privacy chokepoint" do
     test "keeps only atoms the viewer's scopes allow" do
       atoms = [
-        %{fact: "a", scope: "group"},
+        %{fact: "a", scope: Swarm.GraphCase.test_src()},
         %{fact: "b", scope: "private"},
         %{fact: "c", scope: "public"}
       ]
 
-      kept = Domain.policy_filter(atoms, ["group", "public"])
+      kept = Domain.policy_filter(atoms, [Swarm.GraphCase.test_src(), "public"])
       facts = Enum.map(kept, & &1.fact)
       assert "a" in facts
       assert "c" in facts
       refute "b" in facts
     end
 
-    test "a scope-less atom is kept only when the viewer has group (conservative default)" do
+    test "a scope-less atom is DROPPED — default-deny, no default corpus scope (ADR-20)" do
       atoms = [%{fact: "x"}]
-      assert Domain.policy_filter(atoms, ["group"]) == atoms
+      assert Domain.policy_filter(atoms, [Swarm.GraphCase.test_src()]) == []
       assert Domain.policy_filter(atoms, ["public"]) == []
     end
   end

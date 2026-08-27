@@ -154,13 +154,13 @@ defmodule Swarm.Graph.CorroborationTest do
     test "assertions from out-of-scope sources are not counted (visibility)" do
       t = add_node!(%{type: "concept", scope: "public"})
       pub = add_node!(%{type: "source", scope: "public"})
-      grp = add_node!(%{type: "source", scope: "group"})
+      grp = add_node!(%{type: "source", scope: test_src()})
 
       assert_edge(pub, t, "ev-pub", origin: "src-pub", evidence_kind: "observation")
       # group-scoped assertion is invisible to a public-only asker
       {:ok, _} =
         Store.add_edge(grp, t, "asserts", "ev-grp",
-          scope: "group",
+          scope: test_src(),
           reliability: 0.8,
           origin: "src-grp",
           evidence_kind: "observation"
@@ -176,7 +176,7 @@ defmodule Swarm.Graph.CorroborationTest do
       # source-node scope join must still exclude it from a public-only asker
       # (council, codex) — filtering edge scope alone would leak it.
       t = add_node!(%{type: "concept", scope: "public"})
-      grp = add_node!(%{type: "source", scope: "group"})
+      grp = add_node!(%{type: "source", scope: test_src()})
 
       %{rows: [[eid]]} =
         Repo.query!(

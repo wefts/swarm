@@ -25,7 +25,6 @@ defmodule Swarm.Graph.ContractTest do
       assert Contract.glb("src:wiki", "src:wiki") == "src:wiki"
       assert Contract.glb("src:wiki", "src:ldap") == "private"
       assert Contract.glb("private", "src:wiki") == "private"
-      assert Contract.glb("group", "src:wiki") == "private"
     end
 
     test "lattice_leq/2 implements the partial order" do
@@ -36,32 +35,43 @@ defmodule Swarm.Graph.ContractTest do
       refute Contract.lattice_leq("public", "src:wiki")
     end
 
-    test "valid_scope?/1 accepts base scopes and well-formed source scopes" do
+    test "valid_scope?/1 accepts base scopes and well-formed SOURCE-UUID scopes only (ADR-20 D2)" do
       assert Contract.valid_scope?("private")
       assert Contract.valid_scope?("public")
-      assert Contract.valid_scope?("group")
-      assert Contract.valid_scope?("src:wiki")
-      assert Contract.valid_scope?("src:a-b_1")
+      assert Contract.valid_scope?(test_src())
+      assert Contract.valid_scope?("src:0192aaaa-bbbb-7ccc-8ddd-eeeeffff0000")
 
-      refute Contract.valid_scope?("src:BAD")
+      # a human label is NOT a security key — two Confluence connectors must not collide
+      refute Contract.valid_scope?("src:wiki")
+      refute Contract.valid_scope?("src:confluence")
+      refute Contract.valid_scope?("src:a-b_1")
+      # the transitional `group` scope is retired
+      refute Contract.valid_scope?("group")
+      refute Contract.valid_scope?("src:0192AAAA-BBBB-7CCC-8DDD-EEEEFFFF0000")
       refute Contract.valid_scope?("src:")
       refute Contract.valid_scope?("wiki")
       refute Contract.valid_scope?("")
       refute Contract.valid_scope?(123)
     end
 
-    test "origin_to_src/1 maps known origins to source scopes" do
-      assert Contract.origin_to_src("wiki:page:1") == "src:wiki"
-      assert Contract.origin_to_src("mediawiki:x") == "src:wiki"
-      assert Contract.origin_to_src("wikipedia:Page") == "src:wiki"
-      assert Contract.origin_to_src("confluence:y") == "src:confluence"
-      assert Contract.origin_to_src("iac:repo") == "src:iac"
-      assert Contract.origin_to_src("ldap:directory") == "src:ldap"
-      assert Contract.origin_to_src("enrich:origin:node:42") == :inherit
-      assert Contract.origin_to_src("synonymy") == :inherit
-      assert Contract.origin_to_src("synonymy:concept") == :inherit
-      assert Contract.origin_to_src("weird:thing") == :unknown
-      assert Contract.origin_to_src(123) == :unknown
+    test "source_scope/1 and scope_source_id/1 round-trip a source id" do
+      id = "0192aaaa-bbbb-7ccc-8ddd-eeeeffff0000"
+      assert Contract.source_scope(id) == "src:" <> id
+      assert Contract.scope_source_id("src:" <> id) == id
+      assert Contract.scope_source_id("src:wiki") == nil
+      assert Contract.scope_source_id("public") == nil
+      assert Contract.source_scope?(test_src())
+      refute Contract.source_scope?("src:wiki")
+      assert_raise ArgumentError, fn -> Contract.source_scope("wiki") end
+    end
+
+    test "derived_origin?/1 — only enrich/synonymy origins inherit; content labels are not keys" do
+      assert Contract.derived_origin?("enrich:origin:node:42")
+      assert Contract.derived_origin?("synonymy")
+      assert Contract.derived_origin?("synonymy:concept")
+      refute Contract.derived_origin?("wiki:page:1")
+      refute Contract.derived_origin?("ldap:directory")
+      refute Contract.derived_origin?(123)
     end
   end
 
@@ -82,17 +92,17 @@ defmodule Swarm.Graph.ContractTest do
       priv = add_node!(%{type: "concept", scope: "private"})
 
       assert {:error, {:contract, :scope_wider_than_endpoints}} =
-               Graph.add_edge(pub, priv, "mentions", "ev-1", scope: "group")
+               Graph.add_edge(pub, priv, "mentions", "ev-1", scope: test_src())
 
       assert edge_count() == 0
     end
 
     test "accepts an edge no wider than the narrowest endpoint" do
-      a = add_node!(%{type: "file", scope: "group"})
+      a = add_node!(%{type: "file", scope: test_src()})
       b = add_node!(%{type: "concept", scope: "public"})
 
       # group <= min(group, public) → allowed
-      assert {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", scope: "group")
+      assert {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", scope: test_src())
       assert edge_count() == 1
     end
 
@@ -106,13 +116,13 @@ defmodule Swarm.Graph.ContractTest do
     end
 
     test "accepts source-scoped nodes and clamps source-scoped edges by GLB" do
-      assert Contract.validate_node(%{type: "article", scope: "src:wiki"}) == :ok
+      assert Contract.validate_node(%{type: "article", scope: test_src()}) == :ok
 
       assert Contract.validate_edge(
-               "src:wiki",
-               "src:wiki",
+               test_src(),
+               test_src(),
                "mentions",
-               "src:wiki",
+               test_src(),
                nil,
                "ev-1",
                "origin-1",
@@ -120,8 +130,8 @@ defmodule Swarm.Graph.ContractTest do
              ) == :ok
 
       assert Contract.validate_edge(
-               "src:wiki",
-               "src:wiki",
+               test_src(),
+               test_src(),
                "mentions",
                "public",
                nil,
@@ -186,7 +196,7 @@ defmodule Swarm.Graph.ContractTest do
     end
 
     test "add_node accepts a well-formed src:* scope (changeset; ADR-18)" do
-      assert {:ok, _} = Graph.add_node(%{type: "file", key: "src-scope-ok", scope: "src:wiki"})
+      assert {:ok, _} = Graph.add_node(%{type: "file", key: "src-scope-ok", scope: test_src()})
     end
 
     test "add_node rejects a malformed type (changeset)" do
@@ -250,7 +260,7 @@ defmodule Swarm.Graph.ContractTest do
     # leak path (a future enricher pointed at a person subject would surface their
     # facts at the source scope). The contract — not the caller — pins them.
     test "validate_node rejects a user node at any scope but private" do
-      assert Contract.validate_node(%{type: "user", scope: "group"}) ==
+      assert Contract.validate_node(%{type: "user", scope: test_src()}) ==
                {:error, :person_scope_not_private}
 
       assert Contract.validate_node(%{type: "user", scope: "public"}) ==
@@ -263,7 +273,7 @@ defmodule Swarm.Graph.ContractTest do
 
     test "upsert_node fails loud on a non-private user node" do
       assert_raise Swarm.Graph.ContractError, ~r/graph contract/, fn ->
-        Store.upsert_node("user", "3f6c1b1e-0000-7000-8000-000000000001", scope: "group")
+        Store.upsert_node("user", "3f6c1b1e-0000-7000-8000-000000000001", scope: test_src())
       end
     end
 
@@ -285,18 +295,18 @@ defmodule Swarm.Graph.ContractTest do
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()
-      assert Contract.schema_version() == 10
+      assert Contract.schema_version() == 11
     end
   end
 
   describe "round-trip / compatibility" do
     test "a node written under the contract reads back intact" do
-      id = add_node!(%{type: "concept", scope: "group", reliability: 0.7})
+      id = add_node!(%{type: "concept", scope: test_src(), reliability: 0.7})
 
       %{rows: [[type, scope, rel]]} =
         Repo.query!("SELECT type, scope, reliability FROM node WHERE id = $1", [id])
 
-      assert {type, scope, rel} == {"concept", "group", 0.7}
+      assert {type, scope, rel} == {"concept", test_src(), 0.7}
     end
   end
 end

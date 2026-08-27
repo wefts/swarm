@@ -178,6 +178,26 @@ case System.get_env("SWARM_AUTH_MODE") do
     raise "SWARM_AUTH_MODE=#{inspect(other)} invalid — expected dual | strict | legacy"
 end
 
+# Elevation knobs (ADR-20). Blank/unset ⇒ the config.exs defaults stand.
+case System.get_env("SWARM_ELEVATION_TTL_S") do
+  v when is_binary(v) and v != "" ->
+    config :swarm, :elevation, default_ttl_s: String.to_integer(v)
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_ELEVATION_MAX_TTL_S") do
+  v when is_binary(v) and v != "" -> config :swarm, :elevation, max_ttl_s: String.to_integer(v)
+  _ -> :ok
+end
+
+# The default internal cohort group (ADR-20 "Staff"); set to "" to disable auto-joining.
+case System.get_env("SWARM_DEFAULT_COHORT_GROUP") do
+  nil -> :ok
+  v -> config :swarm, :identity, default_cohort: String.trim(v)
+end
+
 if config_env() == :test do
   config :logger, level: :warning
   # Unit tests call the Core logic directly; don't bind the gRPC server port.

@@ -1,29 +1,35 @@
 defmodule Swarm.CoreIdentityRpcTest do
   @moduledoc """
-  Workspace ADR-16 step 6a — the Core gRPC surface for identity/privacy. The new
-  RPCs (ResolveActor / conversation Log/List/Get / admin) are ALWAYS strict: they
-  carry a signed actor assertion, verify it, and derive the subject — a plaintext or
-  forged assertion is UNAUTHENTICATED. The older RPCs dual-accept (verify a signed
-  `viewer`, else trust plaintext) so the live channel keeps working (6b flips strict).
-  Handlers are called directly (they ignore the stream).
+  Workspace ADR-16 step 6a + ADR-20 — the Core gRPC surface for identity/privacy/projects/
+  elevation. The identity RPCs are ALWAYS strict: they carry a signed actor assertion, verify
+  it, and derive the subject — a plaintext or forged assertion is UNAUTHENTICATED. Caps are
+  derived for the assertion's SESSION (an elevation is session-bound). Handlers are called
+  directly (they ignore the stream).
   """
   use Swarm.IdentityCase, async: false
 
-  alias Swarm.{Actor, Identity}
+  alias Swarm.{Actor, Elevation, Identity, Projects}
   alias Swarm.Core.{Auth, Server}
 
   alias Swarm.Core.V1.{
     AdminReadConversationRequest,
     AskRequest,
+    ElevateRequest,
+    EndElevationRequest,
     GetConversationRequest,
+    GetProjectRequest,
+    GetUserRequest,
     ListConversationsRequest,
+    ListProjectsRequest,
     LogConversationRequest,
     ManageAccessRequest,
-    ManageGroupRequest,
+    ManageProjectRequest,
     ManageUserRequest,
     ProvisionActorRequest,
     ResolveActorRequest
   }
+
+  @sid "rpc-sess"
 
   defp provision(login, subject, groups \\ []) do
     {:ok, u} =
@@ -38,63 +44,48 @@ defmodule Swarm.CoreIdentityRpcTest do
   end
 
   # A signed assertion for a (provisioned) subject, using the config test secret.
-  defp assertion(subject), do: Actor.sign(%{"sub" => subject, "provider" => "keycloak"})
+  defp assertion(subject, sid \\ @sid),
+    do: Actor.sign(%{"sub" => subject, "provider" => "keycloak", "sid" => sid})
 
-  defp superadmin_assertion do
-    {:ok, u} =
-      Identity.seed_superadmin(%{
-        id: Identity.uuid7(),
-        login: "root#{System.unique_integer([:positive])}"
-      })
+  defp local_assertion(login, sid \\ @sid),
+    do: Actor.sign(%{"sub" => login, "provider" => "local", "sid" => sid})
 
-    {u, Actor.sign(%{"sub" => u.login, "provider" => "local"})}
-  end
-
-  # ADR-19: admin is conferred by group membership, never a per-user role grant.
-  defp make_admin(root_t, user_id) do
-    Server.manage_group(
-      %ManageGroupRequest{
-        assertion: root_t,
-        op: :GROUP_CREATE,
-        group_id: "admins",
-        name: "Admins"
+  defp reauth(login, sid \\ @sid) do
+    Actor.sign(
+      %{
+        "aud" => Actor.reauth_audience(),
+        "sub" => login,
+        "provider" => "local",
+        "sid" => sid,
+        "jti" => "jti-#{System.unique_integer([:positive])}",
+        "auth_time" => System.system_time(:second)
       },
-      nil
-    )
-
-    Server.manage_group(
-      %ManageGroupRequest{
-        assertion: root_t,
-        op: :GROUP_SET_ROLE,
-        group_id: "admins",
-        role: "admin"
-      },
-      nil
-    )
-
-    Server.manage_access(
-      %ManageAccessRequest{
-        assertion: root_t,
-        op: :GRANT_GROUP,
-        target_user_id: user_id,
-        group_id: "admins"
-      },
-      nil
+      exp_in: 60
     )
   end
+
+  # A Wheel member + an ELEVATED assertion for session @sid.
+  defp elevated_wheel(login \\ "root#{System.unique_integer([:positive])}") do
+    {:ok, u} = Identity.seed_wheel(%{id: Identity.uuid7(), login: login})
+    {:ok, _} = Elevation.request(%{uuid: u.id, sid: @sid}, "test", reauth(login))
+    {u, local_assertion(login)}
+  end
+
+  defp make_admin(user_id), do: :ok = Identity.add_to_group(user_id, "admins")
 
   describe "ResolveActor" do
-    test "a valid assertion returns the derived uuid/scopes/caps" do
-      Identity.put_group_scopes("staff", ["public", "group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-      u = provision("penta", "sub-penta", ["staff"])
+    test "a valid assertion returns the derived uuid/scopes/caps and the (absent) elevation" do
+      internal = register_source!(name: "Internal", members: [%{group_id: "staff"}])
+      u = provision("penta", "sub-penta")
 
       resp = Server.resolve_actor(%ResolveActorRequest{assertion: assertion("sub-penta")}, nil)
       assert resp.status == :CALL_OK
       assert resp.uuid == u.id
       assert resp.login == "penta"
-      assert Enum.sort(resp.scopes) == ["group", "public"]
+      assert Enum.sort(resp.scopes) == Enum.sort(["public", internal])
       assert resp.caps == []
+      assert resp.elevation_expires_at == ""
+      assert resp.external == false
     end
 
     test "a garbage assertion ⇒ UNAUTHENTICATED" do
@@ -104,16 +95,10 @@ defmodule Swarm.CoreIdentityRpcTest do
   end
 
   describe "ProvisionActor (ADR-16 D3 — JIT over the wire)" do
-    # The ENTIRE claim set rides inside the signed provision token (aud
-    # "swarm.provision.v1") — council: unsigned request-field groups would let any
-    # assertion holder self-assert scopes.
-    defp provision_token(claims) do
-      Actor.sign(Map.put_new(claims, "aud", "swarm.provision.v1"))
-    end
+    defp provision_token(claims), do: Actor.sign(Map.put_new(claims, "aud", "swarm.provision.v1"))
 
-    test "a NEW SSO subject is JIT-provisioned; scopes derive from synced groups" do
-      Identity.put_group_scopes("staff", ["public", "group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
+    test "a NEW SSO subject is JIT-provisioned into the default cohort; scopes derive from Projects" do
+      internal = register_source!(name: "Internal", members: [%{group_id: "staff"}])
 
       t =
         provision_token(%{
@@ -122,15 +107,14 @@ defmodule Swarm.CoreIdentityRpcTest do
           "login" => "fresh",
           "first_name" => "Fresh",
           "email" => "fresh@example.test",
-          "groups" => ["staff"]
+          "groups" => ["whatever"]
         })
 
       resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
       assert resp.status == :CALL_OK
       assert resp.login == "fresh"
-      assert Enum.sort(resp.scopes) == ["group", "public"]
+      assert Enum.sort(resp.scopes) == Enum.sort(["public", internal])
 
-      # and the subject now RESOLVES like any migrated account
       resolved =
         Server.resolve_actor(%ResolveActorRequest{assertion: assertion("sub-fresh")}, nil)
 
@@ -138,22 +122,21 @@ defmodule Swarm.CoreIdentityRpcTest do
       assert resolved.uuid == resp.uuid
     end
 
-    test "re-provision on every login re-syncs groups (privilege retention closed)" do
-      Identity.put_group_scopes("staff", ["group"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
+    test "re-provision on every login re-syncs mapped groups (privilege retention closed)" do
+      :ok = Identity.put_sso_group_map("keycloak", "DSI", "admins")
 
       t1 =
         provision_token(%{
           "sub" => "sub-syncer",
           "provider" => "keycloak",
           "login" => "syncer",
-          "groups" => ["staff"]
+          "groups" => ["DSI"]
         })
 
       first = Server.provision_actor(%ProvisionActorRequest{provision: t1}, nil)
-      assert Enum.sort(first.scopes) == ["group", "public"]
+      assert "manage_access" in first.caps
 
-      # the IdP drops the group — the next login must NOT retain the scope
+      # the IdP drops the group — the next login must NOT retain the role
       t2 =
         provision_token(%{
           "sub" => "sub-syncer",
@@ -163,10 +146,9 @@ defmodule Swarm.CoreIdentityRpcTest do
         })
 
       second = Server.provision_actor(%ProvisionActorRequest{provision: t2}, nil)
-      assert second.status == :CALL_OK
-      assert second.uuid == first.uuid
-      # the group scope is gone; the authenticated public baseline remains
-      assert second.scopes == ["public"]
+      assert second.status == :CALL_OK and second.uuid == first.uuid
+      assert second.caps == []
+      assert Identity.groups_for(first.uuid) == ["staff"]
     end
 
     test "an ACTOR assertion cannot provision (audience binding, cross-use closed)" do
@@ -179,29 +161,27 @@ defmodule Swarm.CoreIdentityRpcTest do
     end
 
     test "a deactivated account does NOT resurrect via provisioning" do
-      {_root, root_t} = superadmin_assertion()
+      {_root, root_t} = elevated_wheel()
       u = provision("victim", "sub-victim")
 
-      Server.manage_user(
-        %ManageUserRequest{assertion: root_t, op: :DEACTIVATE, target_user_id: u.id},
-        nil
-      )
+      assert Server.manage_user(
+               %ManageUserRequest{assertion: root_t, op: :DEACTIVATE, target_user_id: u.id},
+               nil
+             ).status == :CALL_OK
 
       t =
         provision_token(%{
           "sub" => "sub-victim",
           "provider" => "keycloak",
           "login" => "victim-renamed",
-          "groups" => ["staff"]
+          "groups" => []
         })
 
       resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
       # indistinguishable from unknown/garbage — no disabled-account oracle
       assert resp.status == :CALL_UNAUTHENTICATED
-      # nothing was refreshed: status stays disabled, login unchanged, no group sync
       after_u = Identity.get_user(u.id)
-      assert after_u.status == "disabled"
-      assert after_u.login == "victim"
+      assert after_u.status == "disabled" and after_u.login == "victim"
       assert Identity.groups_for(u.id) == []
     end
 
@@ -218,12 +198,11 @@ defmodule Swarm.CoreIdentityRpcTest do
 
       resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
       assert resp.status == :CALL_BAD_REQUEST
-      # no second identity was minted for the taken login
       assert Identity.user_by_link("keycloak", "sub-imposter") == nil
     end
 
-    test "an INVITED account is promoted to active by its first provisioned login" do
-      {_root, root_t} = superadmin_assertion()
+    test "an INVITED account's login cannot be hijacked by a new SSO subject" do
+      {_root, root_t} = elevated_wheel()
 
       inv =
         Server.manage_user(
@@ -232,8 +211,7 @@ defmodule Swarm.CoreIdentityRpcTest do
         )
 
       assert inv.status == :CALL_OK
-      # the invited user's identity_link is local — an SSO provision for a NEW
-      # subject with the same login must NOT hijack it (collision path)…
+
       t =
         provision_token(%{
           "sub" => "sub-newby-sso",
@@ -242,8 +220,8 @@ defmodule Swarm.CoreIdentityRpcTest do
           "groups" => []
         })
 
-      resp = Server.provision_actor(%ProvisionActorRequest{provision: t}, nil)
-      assert resp.status == :CALL_BAD_REQUEST
+      assert Server.provision_actor(%ProvisionActorRequest{provision: t}, nil).status ==
+               :CALL_BAD_REQUEST
     end
   end
 
@@ -313,7 +291,7 @@ defmodule Swarm.CoreIdentityRpcTest do
       assert resp.status == :CALL_NOT_FOUND
     end
 
-    test "list returns only the actor's own conversations" do
+    test "list returns only the actor's own conversations; unauthenticated cannot log or list" do
       provision("alice", "sub-alice")
       provision("bob", "sub-bob")
 
@@ -345,9 +323,7 @@ defmodule Swarm.CoreIdentityRpcTest do
 
       assert resp.status == :CALL_OK
       assert Enum.map(resp.conversations, & &1.title) == ["a"]
-    end
 
-    test "an unauthenticated assertion cannot log or list" do
       assert Server.log_conversation(
                %LogConversationRequest{assertion: "x", role: "user", body: "z"},
                nil
@@ -358,10 +334,10 @@ defmodule Swarm.CoreIdentityRpcTest do
     end
   end
 
-  describe "AdminReadConversation (break-glass)" do
-    test "a superadmin reads another user's conversation; a plain user cannot" do
+  describe "AdminReadConversation (break-glass — elevated session only)" do
+    test "an ELEVATED Wheel member reads another user's conversation; the same user's cold session and a plain user cannot" do
       bob = provision("bob", "sub-bob")
-      {_root, root_t} = superadmin_assertion()
+      {root, root_t} = elevated_wheel("rootbg")
 
       log =
         Server.log_conversation(
@@ -388,6 +364,18 @@ defmodule Swarm.CoreIdentityRpcTest do
       assert ok.conversation.owner_id == bob.id
       assert Enum.map(ok.messages, & &1.body) == ["hush"]
 
+      cold =
+        Server.admin_read_conversation(
+          %AdminReadConversationRequest{
+            assertion: local_assertion(root.login, "cold"),
+            conversation_id: log.conversation_id,
+            reason: "ticket"
+          },
+          nil
+        )
+
+      assert cold.status == :CALL_NOT_AUTHORIZED
+
       provision("mallory", "sub-mallory")
 
       denied =
@@ -402,158 +390,9 @@ defmodule Swarm.CoreIdentityRpcTest do
 
       assert denied.status == :CALL_NOT_AUTHORIZED
     end
-  end
 
-  describe "admin RPCs (ManageAccess / ManageUser)" do
-    test "per-user GRANT_ROLE is forbidden; admin comes from group membership (ADR-19)" do
-      {_root, root_t} = superadmin_assertion()
-      u = provision("penta", "sub-penta")
-
-      # per-user role grants are forbidden for everyone, even superadmin
-      forbidden =
-        Server.manage_access(
-          %ManageAccessRequest{
-            assertion: root_t,
-            op: :GRANT_ROLE,
-            target_user_id: u.id,
-            role: "admin"
-          },
-          nil
-        )
-
-      assert forbidden.status == :CALL_BAD_REQUEST
-      refute "admin" in Identity.roles_for(u.id)
-
-      # the model path: membership in a role-bearing group
-      assert make_admin(root_t, u.id).status == :CALL_OK
-      assert "admin" in Identity.roles_for(u.id)
-
-      # a plain (non-admin) user cannot confer group membership either
-      provision("mallory", "sub-mallory")
-
-      denied =
-        Server.manage_access(
-          %ManageAccessRequest{
-            assertion: assertion("sub-mallory"),
-            op: :GRANT_GROUP,
-            target_user_id: u.id,
-            group_id: "admins"
-          },
-          nil
-        )
-
-      assert denied.status == :CALL_NOT_AUTHORIZED
-    end
-
-    test "SET_GROUP_SCOPES with private is BAD_REQUEST — the leak-guard at the wire" do
-      {_root, root_t} = superadmin_assertion()
-
-      rejected =
-        Server.manage_access(
-          %ManageAccessRequest{
-            assertion: root_t,
-            op: :SET_GROUP_SCOPES,
-            group_id: "nebula",
-            scopes: ["group", "private"]
-          },
-          nil
-        )
-
-      assert rejected.status == :CALL_BAD_REQUEST
-
-      # the vocabulary check rides the same boundary
-      unknown =
-        Server.manage_access(
-          %ManageAccessRequest{
-            assertion: root_t,
-            op: :SET_GROUP_SCOPES,
-            group_id: "nebula",
-            scopes: ["secret"]
-          },
-          nil
-        )
-
-      assert unknown.status == :CALL_BAD_REQUEST
-    end
-
-    test "an admin invites a user via ManageUser; a malformed target is fail-closed" do
-      # make penta an admin (via superadmin), then penta invites
-      {_root, root_t} = superadmin_assertion()
-      penta = provision("penta", "sub-penta")
-
-      make_admin(root_t, penta.id)
-
-      inv =
-        Server.manage_user(
-          %ManageUserRequest{assertion: assertion("sub-penta"), op: :INVITE, login: "newbie"},
-          nil
-        )
-
-      assert inv.status == :CALL_OK
-      assert Identity.by_login("newbie").id == inv.user_id
-
-      # a malformed target uuid on deactivate ⇒ NOT_AUTHORIZED (no cast-500)
-      bad =
-        Server.manage_user(
-          %ManageUserRequest{
-            assertion: assertion("sub-penta"),
-            op: :DEACTIVATE,
-            target_user_id: "not-a-uuid"
-          },
-          nil
-        )
-
-      assert bad.status == :CALL_NOT_AUTHORIZED
-    end
-  end
-
-  describe "boundary validation (malformed input ⇒ CALL_BAD_REQUEST, never a 500)" do
-    test "LogConversation rejects an invalid message role and creates nothing" do
-      provision("penta", "sub-penta")
-
-      resp =
-        Server.log_conversation(
-          %LogConversationRequest{
-            assertion: assertion("sub-penta"),
-            title: "x",
-            role: "system",
-            body: "hi"
-          },
-          nil
-        )
-
-      assert resp.status == :CALL_BAD_REQUEST
-      # no ghost conversation left behind
-      list =
-        Server.list_conversations(
-          %ListConversationsRequest{assertion: assertion("sub-penta")},
-          nil
-        )
-
-      assert list.conversations == []
-    end
-
-    test "ManageAccess rejects any per-user role grant (ADR-19: roles hang on groups)" do
-      {_root, root_t} = superadmin_assertion()
-      u = provision("penta", "sub-penta")
-
-      resp =
-        Server.manage_access(
-          %ManageAccessRequest{
-            assertion: root_t,
-            op: :GRANT_ROLE,
-            target_user_id: u.id,
-            role: "admin"
-          },
-          nil
-        )
-
-      assert resp.status == :CALL_BAD_REQUEST
-      assert Identity.roles_for(u.id) == []
-    end
-
-    test "AdminReadConversation requires a non-empty reason (break-glass accountability)" do
-      {_root, root_t} = superadmin_assertion()
+    test "requires a non-empty reason (break-glass accountability)" do
+      {_root, root_t} = elevated_wheel()
       provision("bob", "sub-bob")
 
       log =
@@ -579,30 +418,456 @@ defmodule Swarm.CoreIdentityRpcTest do
 
       assert resp.status == :CALL_BAD_REQUEST
     end
+  end
 
-    test "ManageUser INVITE rejects an empty or duplicate login" do
-      {_root, root_t} = superadmin_assertion()
+  describe "admin RPCs (ManageAccess / ManageUser)" do
+    test "GRANT_ROLE / SET_GROUP_SCOPES are BAD_REQUEST; admin comes from the admins group; plain users are NOT_AUTHORIZED" do
+      {_root, root_t} = elevated_wheel()
+      u = provision("penta", "sub-penta")
+
+      forbidden =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: root_t,
+            op: :GRANT_ROLE,
+            target_user_id: u.id,
+            role: "admin"
+          },
+          nil
+        )
+
+      assert forbidden.status == :CALL_BAD_REQUEST
+      refute "admin" in Identity.roles_for(u.id)
+
+      rejected =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: root_t,
+            op: :SET_GROUP_SCOPES,
+            group_id: "staff",
+            scopes: ["public"]
+          },
+          nil
+        )
+
+      assert rejected.status == :CALL_BAD_REQUEST
+
+      granted =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: root_t,
+            op: :GRANT_GROUP,
+            target_user_id: u.id,
+            group_id: "admins"
+          },
+          nil
+        )
+
+      assert granted.status == :CALL_OK
+      assert "admin" in Identity.roles_for(u.id)
+
+      provision("mallory", "sub-mallory")
+
+      denied =
+        Server.manage_access(
+          %ManageAccessRequest{
+            assertion: assertion("sub-mallory"),
+            op: :GRANT_GROUP,
+            target_user_id: u.id,
+            group_id: "admins"
+          },
+          nil
+        )
+
+      assert denied.status == :CALL_NOT_AUTHORIZED
+    end
+
+    test "GRANT_GROUP wheel: an admin is NOT_AUTHORIZED, an SSO user is BAD_REQUEST (local-only), a local user works when elevated" do
+      {_root, root_t} = elevated_wheel()
+      admin = provision("adm", "sub-adm")
+      make_admin(admin.id)
+      kc = provision("kc", "sub-kc")
+      {:ok, loc} = Identity.invite_user(%{login: "loc"})
+
+      assert Server.manage_access(
+               %ManageAccessRequest{
+                 assertion: assertion("sub-adm"),
+                 op: :GRANT_GROUP,
+                 target_user_id: loc.id,
+                 group_id: "wheel"
+               },
+               nil
+             ).status ==
+               :CALL_NOT_AUTHORIZED
+
+      assert Server.manage_access(
+               %ManageAccessRequest{
+                 assertion: root_t,
+                 op: :GRANT_GROUP,
+                 target_user_id: kc.id,
+                 group_id: "wheel"
+               },
+               nil
+             ).status ==
+               :CALL_BAD_REQUEST
+
+      assert Server.manage_access(
+               %ManageAccessRequest{
+                 assertion: root_t,
+                 op: :GRANT_GROUP,
+                 target_user_id: loc.id,
+                 group_id: "wheel"
+               },
+               nil
+             ).status ==
+               :CALL_OK
+
+      assert "wheel" in Identity.groups_for(loc.id)
+    end
+
+    test "an admin invites a user or a GUEST via ManageUser; malformed/duplicate input is fail-closed" do
       penta = provision("penta", "sub-penta")
-
-      make_admin(root_t, penta.id)
-
+      make_admin(penta.id)
       t = assertion("sub-penta")
+
+      inv =
+        Server.manage_user(%ManageUserRequest{assertion: t, op: :INVITE, login: "newbie"}, nil)
+
+      assert inv.status == :CALL_OK
+      assert Identity.by_login("newbie").id == inv.user_id
+
+      guest =
+        Server.manage_user(
+          %ManageUserRequest{assertion: t, op: :INVITE, login: "visitor", external: true},
+          nil
+        )
+
+      assert guest.status == :CALL_OK
+      assert Identity.get_user(guest.user_id).external
+      assert Identity.groups_for(guest.user_id) == []
+
+      detail = Server.get_user(%GetUserRequest{assertion: t, user_id: guest.user_id}, nil)
+      assert detail.status == :CALL_OK and detail.user.external
+
+      assert Server.manage_user(
+               %ManageUserRequest{assertion: t, op: :DEACTIVATE, target_user_id: "not-a-uuid"},
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
 
       assert Server.manage_user(%ManageUserRequest{assertion: t, op: :INVITE, login: ""}, nil).status ==
                :CALL_BAD_REQUEST
 
-      # penta already exists as a login → duplicate
       assert Server.manage_user(
                %ManageUserRequest{assertion: t, op: :INVITE, login: "penta"},
                nil
              ).status == :CALL_BAD_REQUEST
     end
+
+    test "LogConversation rejects an invalid message role and creates nothing" do
+      provision("penta", "sub-penta")
+
+      resp =
+        Server.log_conversation(
+          %LogConversationRequest{
+            assertion: assertion("sub-penta"),
+            title: "x",
+            role: "system",
+            body: "hi"
+          },
+          nil
+        )
+
+      assert resp.status == :CALL_BAD_REQUEST
+
+      assert Server.list_conversations(
+               %ListConversationsRequest{assertion: assertion("sub-penta")},
+               nil
+             ).conversations == []
+    end
+  end
+
+  describe "Project RPCs (ADR-20)" do
+    test "an admin creates a Project, adds a Source (minting its scope) and a member; the member sees it, a stranger gets NOT_FOUND" do
+      adm = provision("adm", "sub-adm")
+      make_admin(adm.id)
+      t = assertion("sub-adm")
+      member = provision("member", "sub-member")
+      provision("stranger", "sub-stranger")
+
+      created =
+        Server.manage_project(
+          %ManageProjectRequest{
+            assertion: t,
+            op: :PROJECT_CREATE,
+            name: "Team wiki",
+            description: "pages"
+          },
+          nil
+        )
+
+      assert created.status == :CALL_OK and created.project_id != ""
+
+      added =
+        Server.manage_project(
+          %ManageProjectRequest{
+            assertion: t,
+            op: :PROJECT_ADD_SOURCE,
+            project_id: created.project_id,
+            source_kind: "wiki",
+            source_label: "Team wiki"
+          },
+          nil
+        )
+
+      assert added.status == :CALL_OK
+      assert added.scope == "src:" <> added.source_id
+      assert Projects.registered_scope?(added.scope)
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_ADD_MEMBER,
+                 project_id: created.project_id,
+                 member_user_id: member.id
+               },
+               nil
+             ).status == :CALL_OK
+
+      resolved =
+        Server.resolve_actor(%ResolveActorRequest{assertion: assertion("sub-member")}, nil)
+
+      assert added.scope in resolved.scopes
+
+      got =
+        Server.get_project(
+          %GetProjectRequest{assertion: assertion("sub-member"), project_id: created.project_id},
+          nil
+        )
+
+      assert got.status == :CALL_OK
+
+      assert got.project.name == "Team wiki" and got.project.source_count == 1 and
+               got.project.member_count == 2
+
+      assert Enum.map(got.sources, & &1.scope) == [added.scope]
+      assert Enum.sort(Enum.map(got.members, & &1.login)) == ["adm", "member"]
+
+      assert Server.get_project(
+               %GetProjectRequest{
+                 assertion: assertion("sub-stranger"),
+                 project_id: created.project_id
+               },
+               nil
+             ).status == :CALL_NOT_FOUND
+
+      assert Server.get_project(%GetProjectRequest{assertion: t, project_id: "garbage"}, nil).status ==
+               :CALL_NOT_FOUND
+
+      mine = Server.list_projects(%ListProjectsRequest{assertion: assertion("sub-member")}, nil)
+      assert Enum.map(mine.projects, & &1.id) == [created.project_id]
+
+      assert Server.list_projects(%ListProjectsRequest{assertion: assertion("sub-stranger")}, nil).projects ==
+               []
+
+      assert length(Server.list_projects(%ListProjectsRequest{assertion: t}, nil).projects) == 1
+
+      # a member is not a manager
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: assertion("sub-member"),
+                 op: :PROJECT_RENAME,
+                 project_id: created.project_id,
+                 name: "x"
+               },
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
+    end
+
+    test "publicness over the wire needs an elevation; a self-grant is BAD_REQUEST" do
+      adm = provision("adm", "sub-adm")
+      make_admin(adm.id)
+      other = provision("other", "sub-other")
+      make_admin(other.id)
+      t = assertion("sub-adm")
+
+      created =
+        Server.manage_project(
+          %ManageProjectRequest{
+            assertion: assertion("sub-other"),
+            op: :PROJECT_CREATE,
+            name: "Other's"
+          },
+          nil
+        )
+
+      pid = created.project_id
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_SET_VISIBILITY,
+                 project_id: pid,
+                 visibility: "public"
+               },
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_CREATE,
+                 name: "Pub",
+                 visibility: "public"
+               },
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_ADD_MEMBER,
+                 project_id: pid,
+                 member_user_id: adm.id
+               },
+               nil
+             ).status == :CALL_BAD_REQUEST
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_ADD_MEMBER,
+                 project_id: pid,
+                 member_user_id: adm.id,
+                 member_group_id: "staff"
+               },
+               nil
+             ).status == :CALL_BAD_REQUEST
+
+      {_root, root_t} = elevated_wheel()
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: root_t,
+                 op: :PROJECT_SET_VISIBILITY,
+                 project_id: pid,
+                 visibility: "public"
+               },
+               nil
+             ).status == :CALL_OK
+
+      assert Projects.get_project(pid).visibility == "public"
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: t,
+                 op: :PROJECT_ADD_SOURCE,
+                 project_id: pid,
+                 source_kind: "wiki"
+               },
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: root_t,
+                 op: :PROJECT_DELETE,
+                 project_id: pid,
+                 confirm: true
+               },
+               nil
+             ).status == :CALL_OK
+
+      assert Server.manage_project(
+               %ManageProjectRequest{
+                 assertion: root_t,
+                 op: :PROJECT_DELETE,
+                 project_id: pid,
+                 confirm: true
+               },
+               nil
+             ).status == :CALL_NOT_FOUND
+    end
+  end
+
+  describe "Elevate / EndElevation RPCs" do
+    test "a local Wheel member elevates with a fresh proof; caps flip for that session; ending it flips them back" do
+      {:ok, u} = Identity.seed_wheel(%{id: Identity.uuid7(), login: "rootrpc"})
+      t = local_assertion("rootrpc")
+
+      before = Server.resolve_actor(%ResolveActorRequest{assertion: t}, nil)
+      refute "read_any_conversation" in before.caps
+
+      resp =
+        Server.elevate(
+          %ElevateRequest{assertion: t, reason: "incident", reauth: reauth("rootrpc")},
+          nil
+        )
+
+      assert resp.status == :CALL_OK and resp.elevation_id != "" and resp.expires_at != ""
+
+      after_ = Server.resolve_actor(%ResolveActorRequest{assertion: t}, nil)
+      assert "read_any_conversation" in after_.caps
+      assert after_.elevation_expires_at == resp.expires_at
+
+      cold =
+        Server.resolve_actor(
+          %ResolveActorRequest{assertion: local_assertion("rootrpc", "cold")},
+          nil
+        )
+
+      refute "read_any_conversation" in cold.caps
+
+      assert Server.end_elevation(%EndElevationRequest{assertion: t}, nil).status == :CALL_OK
+
+      refute "read_any_conversation" in Server.resolve_actor(
+               %ResolveActorRequest{assertion: t},
+               nil
+             ).caps
+
+      assert Server.end_elevation(%EndElevationRequest{assertion: t}, nil).status ==
+               :CALL_NOT_FOUND
+
+      assert Elevation.active_holder_count() == 0
+      _ = u
+    end
+
+    test "refusals map honestly: not Wheel ⇒ NOT_AUTHORIZED; bad proof / blank reason ⇒ BAD_REQUEST; garbage ⇒ UNAUTHENTICATED" do
+      provision("penta", "sub-penta")
+
+      assert Server.elevate(
+               %ElevateRequest{assertion: assertion("sub-penta"), reason: "r", reauth: "x"},
+               nil
+             ).status == :CALL_NOT_AUTHORIZED
+
+      {:ok, _} = Identity.seed_wheel(%{id: Identity.uuid7(), login: "rootrpc2"})
+      t = local_assertion("rootrpc2")
+
+      assert Server.elevate(
+               %ElevateRequest{assertion: t, reason: "", reauth: reauth("rootrpc2")},
+               nil
+             ).status == :CALL_BAD_REQUEST
+
+      assert Server.elevate(%ElevateRequest{assertion: t, reason: "r", reauth: "garbage"}, nil).status ==
+               :CALL_BAD_REQUEST
+
+      assert Server.elevate(
+               %ElevateRequest{
+                 assertion: t,
+                 reason: "r",
+                 reauth: reauth("rootrpc2", "other-sid")
+               },
+               nil
+             ).status == :CALL_BAD_REQUEST
+
+      assert Server.elevate(%ElevateRequest{assertion: "nope", reason: "r", reauth: "x"}, nil).status ==
+               :CALL_UNAUTHENTICATED
+
+      assert Server.end_elevation(%EndElevationRequest{assertion: "nope"}, nil).status ==
+               :CALL_UNAUTHENTICATED
+    end
   end
 
   describe "dual-accept auth seam (legacy RPCs keep working)" do
-    # `:dual` is now an explicit migration opt-in (the product default flipped to `:strict`,
-    # dual-mode-history-leak). This block exercises the dual seam, so set it here; the `:strict`
-    # case below overrides it for its own assertion.
     setup do
       prev = Application.get_env(:swarm, :core_api)
       Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :dual))
@@ -611,33 +876,30 @@ defmodule Swarm.CoreIdentityRpcTest do
     end
 
     test "legacy_context in :dual passes a plaintext viewer through unchanged" do
-      assert {:ok, %{viewer: "alice", scopes: ["group"]}} =
-               Auth.legacy_context("alice", ["group"])
+      src = Swarm.GraphCase.test_src()
+      assert {:ok, %{viewer: "alice", scopes: [^src]}} = Auth.legacy_context("alice", [src])
     end
 
     test "legacy_context in :dual verifies + derives a signed viewer (ignoring wire scopes)" do
-      Identity.put_group_scopes("staff", ["public"])
-      :ok = Identity.put_sso_group_map("keycloak", "staff", "staff")
-      u = provision("penta", "sub-penta", ["staff"])
+      u = provision("penta", "sub-penta")
       t = assertion("sub-penta")
-      # wire scopes claim [group,private] but the DERIVED scopes win
+      # wire scopes claim [src,private] but the DERIVED scopes win
       assert {:ok, %{viewer: v, scopes: ["public"]}} =
-               Auth.legacy_context(t, ["group", "private"])
+               Auth.legacy_context(t, [Swarm.GraphCase.test_src(), "private"])
 
       assert v == u.id
     end
 
     test "Ask still answers with a plaintext viewer (live channel unbroken)" do
-      # empty corpus ⇒ NOT_FOUND, but the point is it does not crash on plaintext.
       resp = Server.ask(%AskRequest{query: "anything", scopes: ["public"], viewer: "alice"}, nil)
       assert resp.status in [:FOUND, :NOT_FOUND, :PARTIAL, :ERROR]
     end
 
     test "an assertion-shaped viewer that fails verification is NOT trusted as a plaintext id" do
-      # a tampered/expired token (3 dot-segments) must fail closed to anonymous public,
-      # not be treated as a literal viewer id (council: ghost-identity footgun).
       forged = "aaa.bbb.ccc"
-      assert {:ok, %{viewer: "", scopes: ["public"]}} = Auth.legacy_context(forged, ["group"])
+
+      assert {:ok, %{viewer: "", scopes: ["public"]}} =
+               Auth.legacy_context(forged, [Swarm.GraphCase.test_src()])
     end
 
     test ":strict rejects a plaintext viewer (the post-6b cutover posture)" do
@@ -645,8 +907,9 @@ defmodule Swarm.CoreIdentityRpcTest do
       Application.put_env(:swarm, :core_api, Keyword.put(prev, :auth_mode, :strict))
       on_exit(fn -> Application.put_env(:swarm, :core_api, prev) end)
 
-      assert Auth.legacy_context("alice", ["group"]) == {:error, :unauthenticated}
-      # a signed assertion still resolves under strict
+      assert Auth.legacy_context("alice", [Swarm.GraphCase.test_src()]) ==
+               {:error, :unauthenticated}
+
       provision("penta", "sub-penta")
       assert {:ok, %{}} = Auth.legacy_context(assertion("sub-penta"), [])
     end

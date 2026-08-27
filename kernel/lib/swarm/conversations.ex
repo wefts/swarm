@@ -193,9 +193,9 @@ defmodule Swarm.Conversations do
   # ── admin break-glass (ADR-16 D6) ─────────────────────────────────────────
 
   @doc """
-  Break-glass read of any user's conversation by a superadmin — NOT an all-rows
-  query. Takes the **verified** `actor_id` (from `Swarm.Actor.resolve/2`) and derives
-  its capabilities from the store here (never a caller-supplied caps list — council:
+  Break-glass read of any user's conversation by an ELEVATED Wheel member — NOT an all-rows
+  query. Takes the **verified** actor ref (`{uuid, sid}` from `Swarm.Actor.resolve/2`) and
+  derives its capabilities from the store here (never a caller-supplied caps list — council:
   codex). The actor must hold `read_any_conversation`; the read then **impersonates
   the owner** through the normal `get/2` with the *target's* owner id (same predicate
   + RLS GUC), so it sees exactly what the owner sees. An immutable audit row is
@@ -205,16 +205,19 @@ defmodule Swarm.Conversations do
   could discard the audit after the data was read (council: gemini). Returns the same
   shape as `get/2`, or `:not_authorized` (no cap) / `:not_found`.
   """
-  @spec admin_read(String.t(), String.t(), String.t() | nil) ::
+  @spec admin_read(Swarm.Identity.actor_ref(), String.t(), String.t() | nil) ::
           {:ok, %{conversation: conversation(), messages: [message()]}}
           | :not_authorized
           | :not_found
-  def admin_read(actor_id, conversation_id, reason) when is_binary(actor_id) do
+  def admin_read(actor, conversation_id, reason) do
     if Repo.in_transaction?() do
       raise "Swarm.Conversations.admin_read/3 must not run inside a transaction (audit durability)"
     end
 
-    caps = Swarm.Identity.caps_for(actor_id)
+    # ADR-20: `read_any_conversation` exists only under a LIVE elevation bound to the actor's
+    # session — the actor ref carries `{uuid, sid}`; a bare uuid is never elevated.
+    actor_id = Swarm.Identity.actor_uuid(actor)
+    caps = Swarm.Identity.caps_for(actor)
     # Validate the client-supplied id up front; a malformed one is `nil` (audited, no
     # cast-500). Denials still record the *validated* target for forensics (gemini).
     cid = if is_binary(conversation_id) and valid_uuid?(conversation_id), do: conversation_id
