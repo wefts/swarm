@@ -7,7 +7,7 @@ defmodule Swarm.Core.Auth do
 
   - `legacy_context/2` — for the ORIGINAL RPCs (Ask/KbSearch/Deliberation/…), which
     still carry a plaintext `viewer` from the live channel. **Dual-accept** (the
-    `auth_mode` flag, default `:dual`): if the `viewer` is a valid *signed* assertion
+    `auth_mode` flag, default `:strict`; `:dual` only by an explicit `SWARM_AUTH_MODE`): if the `viewer` is a valid *signed* assertion
     it is verified and `{uuid, scopes}` derived (ignoring wire scopes); otherwise it
     falls back to the legacy plaintext `viewer` + wire scopes so the live channel keeps
     working during the step-6b migration. `:strict` rejects unsigned (the post-cutover

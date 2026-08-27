@@ -48,8 +48,31 @@ defmodule Swarm.Repo.Migrations.ProjectAccess do
     end
   end
 
-  # The old grant table is the marker: once it is gone, the data steps have run.
-  defp migrated?(repo), do: is_nil(regclass(repo, "public.group_scope_map"))
+  # The old grant table is the marker: once it is gone, the data steps have run — but only a
+  # store that ALSO carries version 11 is accepted as migrated. Old tables gone with an older
+  # version stamp is a half-applied store (possible only outside the migration's transaction,
+  # e.g. a direct `apply_up!/1` that died): refuse loudly, the snapshot is the way back
+  # (final council: codex).
+  defp migrated?(repo) do
+    case {is_nil(regclass(repo, "public.group_scope_map")), schema_version(repo)} do
+      {false, _} ->
+        false
+
+      {true, 11} ->
+        true
+
+      {true, v} ->
+        raise "project_access: half-applied store — group_scope_map is gone but " <>
+                "graph_schema_meta.version=#{inspect(v)} (expected 11); restore the snapshot"
+    end
+  end
+
+  defp schema_version(repo) do
+    case repo.query!("SELECT version FROM graph_schema_meta WHERE id = 1").rows do
+      [[v]] -> v
+      _ -> nil
+    end
+  end
 
   defp regclass(repo, name) do
     %{rows: [[oid]]} = repo.query!("SELECT to_regclass($1)", [name])

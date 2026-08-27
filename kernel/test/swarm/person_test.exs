@@ -78,7 +78,7 @@ defmodule Swarm.PersonTest do
 
   describe "anonymize/1 (orphaned owner on delete — now a repair belt)" do
     test "deleting the account keeps the person node private and keeps its facts" do
-      root = seed_superadmin()
+      root = seed_wheel_admin()
       target = user("penta")
       Person.project(target.id)
       :ok = Person.record_chat_fact(target.id, "based_in", "concept", "Kyiv-secret")
@@ -113,7 +113,7 @@ defmodule Swarm.PersonTest do
   end
 
   # A Wheel member (also in admins) — enough to manage admins membership (manage_access).
-  defp seed_superadmin do
+  defp seed_wheel_admin do
     {:ok, u} =
       Identity.seed_wheel(%{
         id: Identity.uuid7(),
