@@ -40,6 +40,27 @@ defmodule Swarm.IngestTest do
     n
   end
 
+  test "ADR-20 boundary: a registered source scope passes; an unregistered/label/retired scope is quarantined" do
+    register_test_sources!()
+
+    assert {:ok, :written} =
+             Ingest.ingest(event("reg-1", file_scope: test_src(), dir_scope: test_src()))
+
+    assert Repo.query!("SELECT DISTINCT scope FROM node").rows == [[test_src()]]
+    assert Repo.query!("SELECT DISTINCT visibility_scope FROM edge").rows == [[test_src()]]
+
+    for bad <- ["src:0192aaaa-bbbb-7ccc-8ddd-eeeeffff0000", "src:wiki", "group"] do
+      assert {:error, {:quarantined, {:unregistered_source_scope, ^bad}}} =
+               Ingest.ingest(
+                 event("bad-#{bad}", file_key: "/b/#{bad}", file_scope: bad, dir_scope: "private")
+               )
+    end
+
+    # nothing was written under the unregistered coordinates; the events went to the dead letter
+    assert count("node") == 2
+    assert count("dead_letter") == 3
+  end
+
   test "writes nodes and a typed edge" do
     assert {:ok, :written} = Ingest.ingest(event("p1"))
     assert count("node") == 2

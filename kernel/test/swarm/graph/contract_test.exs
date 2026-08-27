@@ -101,7 +101,7 @@ defmodule Swarm.Graph.ContractTest do
       a = add_node!(%{type: "file", scope: test_src()})
       b = add_node!(%{type: "concept", scope: "public"})
 
-      # group <= min(group, public) → allowed
+      # a source scope <= glb(source scope, public) → allowed
       assert {:ok, _} = Graph.add_edge(a, b, "mentions", "ev-1", scope: test_src())
       assert edge_count() == 1
     end

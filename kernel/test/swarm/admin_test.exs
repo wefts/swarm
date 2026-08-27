@@ -71,6 +71,10 @@ defmodule Swarm.AdminTest do
 
   defp assertion(login), do: Actor.sign(%{"sub" => "sub-#{login}", "provider" => "keycloak"})
 
+  # The elevated session's assertion for a `{uuid, sid}` ref made by `elevated/1`.
+  defp local_assertion_for({uuid, sid}),
+    do: Actor.sign(%{"sub" => Identity.get_user(uuid).login, "provider" => "local", "sid" => sid})
+
   defp denied?(actor_id, action),
     do: Enum.any?(Audit.for_actor(actor_id), &(&1.action == action and &1.decision == "denied"))
 
@@ -186,6 +190,92 @@ defmodule Swarm.AdminTest do
       assert id == c.id
       # the same user's OTHER session is not elevated
       assert Conversations.admin_read({w.id, "other"}, c.id, "ticket") == :not_authorized
+    end
+  end
+
+  describe "self-mutation + publicness + roster guards (implementation review)" do
+    test "an admin cannot change their OWN fixed-group membership; the leave/share/rejoin attack is closed" do
+      admin = admin_user("adm")
+      other = admin_user("other")
+      {:ok, p} = Admin.create_project(other.id, %{name: "Other's"})
+      {:ok, s} = Admin.add_source(other.id, p.id, %{kind: "confluence"})
+
+      # step 1 — leave staff: refused (own membership needs an elevation)
+      assert Admin.revoke_group(admin.id, admin.id, "staff") == :not_authorized
+      assert Admin.grant_group(admin.id, admin.id, "admins") == :not_authorized
+      assert "staff" in Identity.groups_for(admin.id)
+      # step 2 — share Other's Project with staff (the cohort everyone is in): a self-grant
+      assert {:error, :self_grant} =
+               Admin.add_project_member(admin.id, p.id, %{group_id: "staff"})
+
+      refute s.scope in Identity.scopes_for(admin.id)
+      assert denied?(admin.id, "revoke") and denied?(admin.id, "add_project_member")
+
+      # an elevated Wheel member may change memberships, including their own
+      w = wheel()
+      root = elevated(w)
+      assert :ok = Admin.revoke_group(root, w.id, "staff")
+      assert :ok = Admin.grant_group(root, w.id, "staff")
+      # the OWNER may share their own Project with the cohort
+      assert :ok = Admin.add_project_member(other.id, p.id, %{group_id: "staff"})
+      assert s.scope in Identity.scopes_for(admin.id)
+    end
+
+    test "GetProject: a public Project shows metadata + Sources to a non-member, never its roster" do
+      admin = admin_user("adm")
+      root = elevated(wheel())
+      {:ok, p} = Admin.create_project(root, %{name: "Handbook", visibility: "public"})
+      {:ok, s} = Admin.add_source(root, p.id, %{kind: "wiki"})
+      stranger = user("stranger")
+      {:ok, guest} = Identity.invite_user(%{login: "visitor", external: true})
+
+      assert {:ok, %{sources: [%{id: sid}], members: []}} = Admin.get_project(stranger.id, p.id)
+      assert sid == s.id
+      assert {:ok, %{members: []}} = Admin.get_project(guest.id, p.id)
+      assert {:ok, %{members: [_ | _]}} = Admin.get_project(admin.id, p.id)
+      # a shared Project stays NOT_FOUND for a non-member (no oracle)
+      :ok = Admin.set_project_visibility(root, p.id, "shared")
+      assert Admin.get_project(stranger.id, p.id) == :not_found
+    end
+
+    test "groups are never owners; only the fixed groups can be members" do
+      admin = admin_user("adm")
+      {:ok, p} = Admin.create_project(admin.id, %{name: "P"})
+
+      assert {:error, :invalid_member} =
+               Admin.add_project_member(admin.id, p.id, %{group_id: "wheel"}, role: "owner")
+
+      Repo.query!(
+        "INSERT INTO access_group (id, source, name) VALUES ('legacy', 'idp', 'Legacy')"
+      )
+
+      assert {:error, :unknown_group} =
+               Admin.add_project_member(admin.id, p.id, %{group_id: "legacy"})
+
+      u = user("penta")
+      assert {:error, :unknown_group} = Admin.grant_group(admin.id, u.id, "legacy")
+    end
+
+    test "removing a Source from a PUBLIC Project is a publicness act (elevation-only)" do
+      root = elevated(wheel())
+      {:ok, p} = Admin.create_project(root, %{name: "Pub", visibility: "public"})
+      {:ok, s} = Admin.add_source(root, p.id, %{kind: "wiki"})
+      admin = admin_user("adm")
+      assert Admin.remove_source(admin.id, s.id) == :not_authorized
+      assert Projects.get_source(s.id) != nil
+      assert :ok = Admin.remove_source(root, s.id)
+    end
+
+    test "delete_user + person anonymize are one transaction (the person node stays private, facts persist)" do
+      admin = admin_user("adm")
+      u = user("penta")
+      :ok = Swarm.Person.record_chat_fact(u.id, "based_in", "concept", "Kyiv-secret")
+      assert :ok = Admin.delete_user(admin.id, u.id)
+
+      assert Swarm.Repo.query!("SELECT scope FROM node WHERE type='user' AND key=$1", [u.id]).rows ==
+               [["private"]]
+
+      assert Identity.get_user(u.id).status == "deleted"
     end
   end
 
@@ -419,6 +509,7 @@ defmodule Swarm.AdminTest do
                nil
              ).status == :CALL_NOT_AUTHORIZED
 
+      # a plain admin's superadmin bind PROBE is refused (role binds need an elevation) AND audited
       assert Server.manage_group(
                %ManageGroupRequest{
                  assertion: token,
@@ -427,7 +518,25 @@ defmodule Swarm.AdminTest do
                  role: "superadmin"
                },
                nil
+             ).status == :CALL_NOT_AUTHORIZED
+
+      assert denied?(admin.id, "set_group_role")
+
+      # an ELEVATED session gets BAD_REQUEST (superadmin is never bindable) — still audited
+      w = wheel("rootbind")
+      root = elevated(w)
+
+      assert Server.manage_group(
+               %ManageGroupRequest{
+                 assertion: local_assertion_for(root),
+                 op: :GROUP_SET_ROLE,
+                 group_id: "staff",
+                 role: "superadmin"
+               },
+               nil
              ).status == :CALL_BAD_REQUEST
+
+      assert denied?(w.id, "set_group_role")
 
       listed = Server.list_groups(%ListGroupsRequest{assertion: token}, nil)
       assert listed.status == :CALL_OK

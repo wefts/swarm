@@ -106,7 +106,8 @@ defmodule Swarm.Elevation do
   end
 
   defp revoke_target(_uuid, _sid, nil), do: :not_found
-  defp revoke_target(uuid, _sid, %{user_id: uuid} = e), do: revoke(e.id, uuid)
+  defp revoke_target(uuid, _sid, %{user_id: uuid, revoked_at: nil} = e), do: revoke(e.id, uuid)
+  defp revoke_target(uuid, _sid, %{user_id: uuid}), do: :not_found
 
   defp revoke_target(uuid, sid, e) do
     if active?(uuid, sid) do
@@ -138,7 +139,7 @@ defmodule Swarm.Elevation do
   local-only. `sid` `nil`/blank ⇒ never elevated.
   """
   @spec active(String.t(), String.t() | nil) :: elevation() | nil
-  def active(_user_id, sid) when sid in [nil, ""], do: nil
+  def active(_user_id, sid) when not is_binary(sid) or sid == "", do: nil
 
   def active(user_id, sid) do
     case Repo.query!(
@@ -191,8 +192,8 @@ defmodule Swarm.Elevation do
 
   # ── checks ─────────────────────────────────────────────────────────────────
 
-  defp non_blank(v, _why) when is_binary(v) and v != "" do
-    if String.trim(v) == "", do: {:error, :reason_required}, else: {:ok, v}
+  defp non_blank(v, why) when is_binary(v) and v != "" do
+    if String.trim(v) == "", do: {:error, why}, else: {:ok, v}
   end
 
   defp non_blank(_v, why), do: {:error, why}
@@ -296,26 +297,51 @@ defmodule Swarm.Elevation do
 
     case result do
       {:ok, %{} = e} -> {:ok, e}
-      {:error, _} -> {:error, :reauth_replayed}
+      {:error, reason} -> raise "elevation grant failed: #{inspect(reason)}"
     end
   rescue
-    # A lost race on the one-time jti (UNIQUE) is a replay, not a 500.
+    # A lost race on the one-time jti (UNIQUE) is a replay, not a 500 — audited as a denial
+    # like every other refusal (council: codex + tests lens); anything else is a real error.
     e in Postgrex.Error ->
-      if e.postgres && e.postgres.code == :unique_violation,
-        do: {:error, :reauth_replayed},
-        else: reraise(e, __STACKTRACE__)
+      if e.postgres && e.postgres.code == :unique_violation do
+        audit(uuid, "elevate", "denied", reason: "reauth_replayed")
+        {:error, :reauth_replayed}
+      else
+        reraise(e, __STACKTRACE__)
+      end
   end
 
   defp clamp_ttl(ttl) when is_integer(ttl), do: ttl |> max(@min_ttl_s) |> min(max_ttl_s())
   defp clamp_ttl(_), do: default_ttl_s()
 
   defp revoke(id, actor_id) do
-    Repo.query!("UPDATE elevation SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL", [
-      dump(id)
-    ])
+    %{num_rows: n} =
+      Repo.query!(
+        "UPDATE elevation SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+        [dump(id)]
+      )
 
-    audit(actor_id, "end_elevation", "allowed", detail: %{"elevation_id" => id})
-    :ok
+    holder =
+      case fetch(id) do
+        %{user_id: u} -> u
+        _ -> nil
+      end
+
+    if n == 1 do
+      audit(actor_id, "end_elevation", "allowed",
+        target_user_id: holder,
+        detail: %{"elevation_id" => id}
+      )
+
+      :ok
+    else
+      audit(actor_id, "end_elevation", "denied",
+        target_user_id: holder,
+        reason: "already_revoked"
+      )
+
+      :not_found
+    end
   end
 
   defp audit(actor_id, action, decision, opts) do

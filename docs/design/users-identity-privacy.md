@@ -1,11 +1,20 @@
 ---
-status: draft
+status: shipped (item 2 live 2026-07-02); access layer evolved by workspace ADR-20
 adr: workspace ADR-16 (Accepted 2026-07-01)
 owns: swarm kernel — identity/ownership/enforcement; hive channel contract described
 supersedes: nothing (elaborates ADR-7 opaque-viewer; data-foundation P5)
+evolved-by: project-access.md (workspace ADR-20, 2026-08-27) — Projects, fixed groups, elevation
 ---
 
 # Users — identity, access, per-user privacy (design spec)
+
+> **Still the substrate (2026-08-27).** The identity anchor, the signed actor assertion (D9),
+> kernel-derived scopes and capabilities, the single gate (`scope × owner`), default-deny, RLS
+> and per-user conversation privacy are unchanged and load-bearing. Where this file says
+> "roles", "superadmin", "groups grant scopes" or "break-glass = superadmin": read
+> `project-access.md` (workspace ADR-20) — visibility is Project membership, the groups are
+> fixed (`wheel`/`admins`/`staff`, roles only), and break-glass runs under a time-boxed,
+> session-bound elevation through the SAME filtered path.
 
 Implements workspace **ADR-16**. Field-level sketch: `board/ideas/users-identity-schema.yaml`.
 MVP for a self-hosted, non-public, single-box instance going from 2 people to a small

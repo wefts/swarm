@@ -74,8 +74,11 @@ Invariants carried by the schema: `project_membership` is the ONLY path to a sou
   `synonymy:` ⇒ the derived fact inherits its anchor node's scope — unchanged rule).
 - **Ingest boundary check (new, fail-loud):** an entity whose scope is `src:*` must name a
   REGISTERED source (`Swarm.Projects.registered_scope?/1`); otherwise the event is quarantined
-  (`{:unregistered_source_scope, scope}`). No row can be written under a scope nobody can ever
-  derive, and a connector cannot invent a scope.
+  (`{:unregistered_source_scope, scope}`). Through the connector boundary (`Swarm.Ingest`) a row
+  can never be written under a scope nobody can derive. The lower-level `Store.upsert_node` /
+  `Graph.add_node` validate SHAPE only (`src:<uuid>`) — kernel enrichers reach them with an
+  inherited anchor scope, operator loaders with `Swarm.Projects.scope!/1`; that discipline (not
+  a registry lookup) is what keeps direct writes honest.
 - Connectors and operator loaders obtain their scope from the registry — `Swarm.Projects.scope!(source_id)`
   (or the loader convenience `Swarm.Projects.scope_by_kind!(kind)`, which raises when 0 or >1 sources
   of that kind exist — ambiguity is resolved by id, never guessed). **Kernel enrichers never choose a
@@ -168,12 +171,13 @@ LAST such member (`{:error, :last_wheel_member}`); `seed_superadmin/1` becomes `
 | Operation | Required | Notes |
 | --- | --- | --- |
 | list users / groups / roles / projects / sso map (reads) | any admin cap | success not audited, denial audited (unchanged) |
-| invite (incl. `external` guest) / deactivate / delete a user | `manage_users` | ANY mutation targeting a **Wheel member** (today deactivate/delete; any future update/reset): `manage_wheel` (elevation) + never the last member (council: gemini) |
-| add/remove a user to `admins` / `staff` | `manage_access` | minting admins stays an admin power (ADR-19 accepted; SSO-mappable) |
+| invite (incl. `external` guest) | `invite_users` | a guest joins no cohort |
+| deactivate / delete a user | `manage_users` | ANY mutation targeting a **Wheel member** (today deactivate/delete; any future update/reset): `manage_wheel` (elevation) + never the last member (council: gemini) |
+| add/remove a user to `admins` / `staff` | `manage_access` | minting admins stays an admin power (ADR-19 accepted; SSO-mappable); changing ONE'S OWN fixed-group membership needs an elevation (the leave-staff/share/rejoin self-grant, council) |
 | add/remove a user to `wheel` | `manage_wheel` (elevation) | local-only members; never the last member |
-| project create / rename / describe / delete (confirm) | `manage_projects` | creator becomes the Project **owner** member; delete cascades memberships + sources (rows become unreachable, not deleted); creating AS `public` needs `manage_publicness` |
-| add / remove a Source | `manage_projects` | minting a source = minting its `src:<uuid>`; on a **public** Project: `manage_publicness` (a Source added to a public Project is published — council: codex) |
-| add / remove a Project member (user or group) | `manage_access` | `wheel`/`admins`/`staff` may all be members (data access ≠ capability). **Self-grant guard**: a member that IS the actor, or a group the actor belongs to, may be added only by a Project **owner** or under elevation (council: codex — an admin must not mint their own visibility) |
+| project create / rename / describe / delete (confirm) | `manage_projects` **or the Project owner** | creator becomes the Project **owner** member (a direct user membership with role `owner` — groups are never owners); delete cascades memberships + sources (rows become unreachable, not deleted); creating AS `public` needs `manage_publicness` |
+| add / remove a Source | `manage_projects` **or the owner** | minting a source = minting its `src:<uuid>`; on a **public** Project add AND remove are `manage_publicness` (a Source added to a public Project is published, one removed un-publishes — council: codex) |
+| add / remove a Project member (user or one of the fixed groups) | `manage_access` **or the owner** | `wheel`/`admins`/`staff` may all be members (data access ≠ capability); only the fixed groups. **Self-grant guard**: a member that IS the actor, a group the actor belongs to, or the default cohort (`staff` — every internal account is in it), may be added only by the Project **owner** or under elevation (council: codex — an admin must not mint their own visibility) |
 | set project visibility **to or from `public`** | `manage_publicness` (elevation) | `personal` ⇄ `shared` is `manage_projects` |
 | group `admin` role bind / clear | `manage_roles` (elevation) | `superadmin` is never bindable → BAD_REQUEST |
 | SSO map put / delete | `manage_auth` (elevation) | `wheel` is never an SSO target → BAD_REQUEST (unchanged) |
@@ -181,16 +185,24 @@ LAST such member (`{:error, :last_wheel_member}`); `seed_superadmin/1` becomes `
 | group set scopes / per-user role grant | rejected | BAD_REQUEST, audited (ADR-20 D3 / ADR-19 D2) |
 | break-glass conversation read | `read_any_conversation` (elevation) | per-op audit before return (unchanged) |
 
+**Owner delegation.** The Project owner is the data owner: they manage their own Project's
+metadata, Sources and members — including sharing it with cohorts they belong to — without an
+admin capability. They cannot touch publicness (elevation) and cannot become owners of Projects
+they did not create unless an admin/owner adds them as `owner`.
+
 Self-escalation is closed structurally: an admin cannot reach `wheel`, roles, auth config or
-publicness without an active elevation, and only local Wheel members can elevate.
+publicness without an active elevation, cannot change their own fixed-group membership, cannot
+share a Project with themselves or their cohorts unless they own it, and only local Wheel members
+can elevate.
 
 ## 7. RPC deltas (`proto/core.proto`)
 
 - New: `Elevate(assertion, reason, reauth, ttl_s) → {status, elevation_id, expires_at}`;
   `EndElevation(assertion, elevation_id) → AdminActionResponse`;
   `ListProjects(assertion, mine_only) → [ProjectView]` (an admin cap sees all; any other
-  actor sees only Projects they are a member of); `GetProject(assertion, project_id)` (admin
-  cap or member; `NOT_FOUND` otherwise — no existence oracle);
+  actor sees the Projects they are a member of plus the `public` ones); `GetProject(assertion,
+  project_id)` (admin cap or member: full view; a `public` Project: metadata + Sources but NO
+  member roster for a non-member; otherwise `NOT_FOUND` — no existence oracle);
   `ManageProject(assertion, op, …)` with `PROJECT_CREATE | RENAME | DELETE | SET_VISIBILITY |
   ADD_SOURCE | REMOVE_SOURCE | ADD_MEMBER | REMOVE_MEMBER`.
 - `ResolveActorResponse.elevation_expires_at` (ISO-8601, "" when not elevated) so the channel
@@ -243,7 +255,8 @@ Projects they were explicitly added to, and their own conversations — nothing 
    Re-point `sso_group_map` rows `everyone → staff`, `admins → admins`, drop any row targeting
    `superuser` (Wheel is never SSO-mappable; logged); delete the `superuser` and `everyone` groups
    (FK cascade); delete `group_role` rows with `superadmin`; ensure `admins → admin`; tighten the
-   `group_role` CHECK.
+   `group_role` CHECK. "Every user" here means every RESOLVABLE account (`active` or `invited`);
+   a `disabled` account holds no membership by design and stays outside the equivalence.
 4. Projects from the census — deterministic, deployment-agnostic, NO special cases:
    - scopes sharing a grant signature share one Project; `group` is just another scope name here
      (it lands with whoever granted it — council: codex; no hard-coded "admins see legacy");
@@ -254,17 +267,23 @@ Projects they were explicitly added to, and their own conversations — nothing 
    - each old scope value becomes one `source` (`kind` = `label` = the old name, `group` ⇒
      `legacy`; `origin = 'migration'`) in its Project; the Project's members are the groups of
      the signature (`source = 'migration'`).
-5. Rewrite `node.scope`, `edge.visibility_scope` (`chunk.scope` follows by trigger) from each old
+5. **Fold legacy groups** (the group set is fixed): any non-fixed group left over (an old
+   IdP-mapped cohort) has already been made a member of its Projects by the signature step —
+   now each of its members receives a DIRECT `migration` membership in those Projects, its SSO
+   map rows are dropped (logged — future logins mapped to it must be expressed as Project
+   membership) and the group row is deleted. Equivalence is asserted after this step, so no
+   member loses a scope.
+6. Rewrite `node.scope`, `edge.visibility_scope` (`chunk.scope` follows by trigger) from each old
    value to its `src:<uuid>`; drop `group_scope_map` and `role_grant`.
-6. Tighten the node/edge CHECK to `private | public | src:<uuid>`; stamp `graph_schema_meta` 11.
-7. **Assertions (abort ⇒ rollback, nothing half-applied):**
+7. Tighten the node/edge CHECK to `private | public | src:<uuid>`; stamp `graph_schema_meta` 11.
+8. **Assertions (abort ⇒ rollback, nothing half-applied):**
    - lockout: if any user held group-derived `superadmin` before, then
      `count(active local-only wheel members) ≥ 1` after;
    - **exact equivalence** (no regression AND no widening — council: codex): for EVERY
      non-deleted user, the pre-migration effective scope set (old names mapped to the new uuids)
      EQUALS the post-migration set;
    - completeness: no row left at `group` or at a `src:<name>` that is not a uuid.
-8. `down` (structural inverse, `down` never widens): refuses if any `source` with
+9. `down` (structural inverse, `down` never widens): refuses if any `source` with
    `origin = 'admin'` exists (post-migration data has no old-model representation — council:
    gemini/codex) unless `SWARM_MIGRATION_FORCE_DOWN=1`, in which case those rows are clamped to
    `private` (fail-closed, logged); rewrites migration-created `src:<uuid>` back to
@@ -327,3 +346,17 @@ Two decorrelated critics on the first draft, both **FLAWED** — folded in as fo
   baseline scope to `Unassigned`); re-auth replay → one-time `jti` (§5); anonymous `$1 = NULL`
   → `IS NOT NULL` guard (§4); any mutation of a Wheel member → `manage_wheel` (§6); `down`
   leaving new rows unreadable → rewrite-back (§10). Documented limitation: connector binding.
+
+**Implementation review (review-step, same day — codex ×2, gemini, a Claude tests/docs lens):**
+all four returned findings on the first kernel slice; folded: `remove_source` on a public Project
+is a publicness act; changing one's OWN fixed-group membership needs an elevation and the default
+cohort counts as "self" (the leave-staff/share/rejoin three-step); `GetProject` never returns a
+public Project's roster to a non-member; only the fixed groups can be Project members and legacy
+groups are folded into direct memberships by the migration; group memberships cannot be owners;
+role probes reach `Admin` so they are audited; the raced-jti replay is audited; `delete_user` +
+`Person.anonymize` are one transaction; the public-Project derivation requires a live user row.
+Refuted with evidence: "chunk mirror left stale" (trigger-maintained, asserted by the migration
+test) and "relation edges can carry an unregistered scope" (edge scope = GLB of validated entity
+scopes). Test gaps the lens found (ingest quarantine, equivalence abort, co-member conversation
+isolation, elevation-without-break-glass, scopes-unchanged-under-elevation, derived-scope read
+surfaces) were filled in the same slice.

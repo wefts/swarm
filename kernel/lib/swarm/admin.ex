@@ -63,7 +63,7 @@ defmodule Swarm.Admin do
   @spec grant_group(actor(), String.t(), String.t()) ::
           result() | {:error, :unknown_group | :wheel_local_only}
   def grant_group(actor, target_id, group_id) do
-    gate(actor, group_cap(group_id), "grant", target_id, fn ->
+    gate(actor, group_cap(actor, target_id, group_id), "grant", target_id, fn ->
       Identity.add_to_group(target_id, group_id)
     end)
   end
@@ -74,15 +74,21 @@ defmodule Swarm.Admin do
   """
   @spec revoke_group(actor(), String.t(), String.t()) :: result() | {:error, :last_wheel_member}
   def revoke_group(actor, target_id, group_id) do
-    gate(actor, group_cap(group_id), "revoke", target_id, fn ->
+    gate(actor, group_cap(actor, target_id, group_id), "revoke", target_id, fn ->
       if group_id == @wheel and last_wheel_member?(target_id),
         do: {:error, :last_wheel_member},
         else: Identity.remove_from_group(target_id, group_id)
     end)
   end
 
-  defp group_cap(@wheel), do: "manage_wheel"
-  defp group_cap(_group), do: "manage_access"
+  # `wheel` is elevation-only. So is changing ONE'S OWN membership of any fixed group
+  # (council: gemini + tests lens): an admin who could leave `staff`, add `staff` to a Project
+  # and rejoin would mint their own visibility in three audited-"allowed" steps.
+  defp group_cap(_actor, _target, @wheel), do: "manage_wheel"
+
+  defp group_cap(actor, target_id, _group) do
+    if target_id == Identity.actor_uuid(actor), do: "manage_wheel", else: "manage_access"
+  end
 
   # The bootstrap invariant: the op would leave zero active local-only Wheel members.
   defp last_wheel_member?(target_id) do
@@ -179,15 +185,22 @@ defmodule Swarm.Admin do
   @spec delete_user(actor(), String.t()) :: result() | {:error, :last_wheel_member}
   def delete_user(actor, target_id) do
     gate(actor, user_cap(target_id), "delete", target_id, fn ->
-      if last_wheel_member?(target_id) do
-        {:error, :last_wheel_member}
-      else
-        Identity.delete_user(target_id)
-        # Detach the person-as-subject projection (ADR-16 step 7) so an orphaned owner
-        # never dangles; its learned facts persist (D11).
-        Swarm.Person.anonymize(target_id)
-      end
+      if last_wheel_member?(target_id),
+        do: {:error, :last_wheel_member},
+        else: delete_user_tx(target_id)
     end)
+  end
+
+  # One transaction: the login dies AND the person-as-subject projection (ADR-16 step 7) is
+  # re-pinned so an orphaned owner never dangles; its learned facts persist (D11).
+  defp delete_user_tx(target_id) do
+    {:ok, :ok} =
+      Swarm.Repo.transaction(fn ->
+        :ok = Identity.delete_user(target_id)
+        Swarm.Person.anonymize(target_id)
+      end)
+
+    :ok
   end
 
   # ANY mutation of a Wheel member is a Wheel mutation (council: gemini).
@@ -417,7 +430,9 @@ defmodule Swarm.Admin do
         :not_found
 
       %{project_id: pid} ->
-        project_gate(actor, pid, "manage_projects", "remove_source", fn ->
+        public? = match?(%{visibility: "public"}, Projects.get_project(pid))
+
+        publicness_gate(actor, pid, public?, "remove_source", fn ->
           Projects.remove_source(source_id)
         end)
     end
@@ -462,7 +477,12 @@ defmodule Swarm.Admin do
     do: Projects.owner?(project_id, uuid) or "superadmin" in Identity.roles_for(actor)
 
   defp self_grant?(uuid, %{user_id: target}) when is_binary(target), do: target == uuid
-  defp self_grant?(uuid, %{group_id: g}) when is_binary(g), do: g in Identity.groups_for(uuid)
+
+  # A group the actor belongs to — and the default cohort ALWAYS (every internal account
+  # joins it, so sharing with `staff` is sharing with oneself; council: tests lens).
+  defp self_grant?(uuid, %{group_id: g}) when is_binary(g),
+    do: g == Identity.default_cohort_group() or g in Identity.groups_for(uuid)
+
   defp self_grant?(_uuid, _member), do: false
 
   @doc "Remove a member from a Project (`manage_access`, or the owner)."
@@ -514,9 +534,18 @@ defmodule Swarm.Admin do
         :not_found
 
       %{project: p} = view ->
-        if admin?(actor) or p.visibility == "public" or Projects.member?(project_id, uuid),
-          do: {:ok, view},
-          else: :not_found
+        cond do
+          admin?(actor) or Projects.member?(project_id, uuid) ->
+            {:ok, view}
+
+          # a public Project is visible to every authenticated actor — its metadata and
+          # Sources, never its member roster (council: tests lens)
+          p.visibility == "public" ->
+            {:ok, %{view | members: []}}
+
+          true ->
+            :not_found
+        end
     end
   end
 
@@ -533,8 +562,7 @@ defmodule Swarm.Admin do
     end
   end
 
-  @spec gate(actor(), String.t(), String.t(), String.t() | nil, (-> any())) ::
-          result() | {:error, atom()} | any()
+  @spec gate(actor(), String.t(), String.t(), String.t() | nil, (-> term())) :: term()
   defp gate(actor, cap, action, target_id, fun) do
     if cap in Identity.caps_for(actor) do
       run_audited(actor, action, target_id, fun)

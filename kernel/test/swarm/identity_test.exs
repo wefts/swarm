@@ -210,8 +210,26 @@ defmodule Swarm.IdentityTest do
       assert Enum.sort(Identity.scopes_for(u.id)) == Enum.sort(["public", internal, extra])
     end
 
-    test "private never enters the derived set" do
-      refute "private" in Identity.scopes_for(Identity.uuid7())
+    test "private never enters the derived set — even for a real Project member" do
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      scope = register_source!(name: "Internal", members: [%{user_id: u.id}])
+      assert Identity.scopes_for(u.id) == ["public", scope]
+      refute "private" in Identity.scopes_for(u.id)
+    end
+
+    test "a leftover non-fixed group row confers nothing and cannot be joined or SSO-mapped" do
+      Repo.query!(
+        "INSERT INTO access_group (id, source, name) VALUES ('legacy', 'idp', 'Legacy')"
+      )
+
+      {:ok, u} = Identity.upsert_from_claims(claims())
+      assert Identity.add_to_group(u.id, "legacy") == {:error, :unknown_group}
+      assert Identity.put_sso_group_map("keycloak", "L", "legacy") == {:error, :unknown_group}
+
+      assert Projects.add_member(hd([Projects.create_project(%{name: "P"}) |> elem(1)]).id, %{
+               group_id: "legacy"
+             }) ==
+               {:error, :unknown_group}
     end
   end
 

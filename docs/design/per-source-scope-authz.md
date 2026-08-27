@@ -1,11 +1,22 @@
 ---
-status: proposed
+status: shipped — superseded in part by workspace ADR-20 (see project-access.md)
 adr: workspace ADR-18 (per-source scope + first-class groups)
 evolves: workspace ADR-16 (users/identity/privacy) — access mechanism only
 council: required before execution (2-family; forks F1-F4 in ADR-18)
+superseded-by: project-access.md (workspace ADR-20, 2026-08-27)
 ---
 
 # Per-source scope + first-class groups (kernel design spec)
+
+> **Superseded in part (2026-08-27, workspace ADR-20 → `project-access.md`).** What stands:
+> the per-source scope lattice (`private ⊥ … public ⊤`, one mid-band per source, GLB edge
+> clamp) and first-class groups as kernel records. What changed: source keys are
+> `src:<source_uuid>` issued by the Projects registry (labels such as `src:wiki` are gone —
+> a global name is a collision, ADR-20 §1); **groups grant no visibility any more** — the
+> `group_scope_map` and the direct group→scope grant RPCs are removed, effective scopes derive
+> from **Project membership**; the group set is fixed (`wheel` / `admins` / `staff`) and the
+> standing `superadmin` role is replaced by time-boxed, session-bound **elevation**. Read this
+> file for the lattice + history; implement against `project-access.md`.
 
 How ADR-18 lands in the `swarm/` kernel. The identity anchor, verified-actor assertion (D9),
 and per-user conversation privacy from `users-identity-privacy.md` are UNCHANGED; this spec

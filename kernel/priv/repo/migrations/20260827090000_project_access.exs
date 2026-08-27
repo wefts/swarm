@@ -35,6 +35,7 @@ defmodule Swarm.Repo.Migrations.ProjectAccess do
       census = census!(repo)
       move_groups!(repo, census)
       mapping = build_projects!(repo, census)
+      fold_legacy_groups!(repo)
       rewrite_scopes!(repo, mapping)
       drop_old_tables!(repo)
       tighten_checks!(repo)
@@ -388,6 +389,45 @@ defmodule Swarm.Repo.Migrations.ProjectAccess do
       end)
     end)
     |> Map.new()
+  end
+
+  # The group set is FIXED (ADR-20 D7): a legacy/non-fixed group that granted scopes was made
+  # a Project member above so the reconstruction is exact; now each of its members gets a
+  # DIRECT (audited, `source = 'migration'`) membership in those Projects, and the group row
+  # goes away (its SSO map rows with it — logged: future logins mapped to it must be expressed
+  # as Project membership). Equivalence is re-asserted after this step.
+  defp fold_legacy_groups!(repo) do
+    legacy =
+      repo.query!(
+        "SELECT id FROM access_group WHERE NOT (id = ANY($1::text[])) ORDER BY id",
+        [Enum.map(@fixed_groups, &elem(&1, 0))]
+      ).rows
+      |> List.flatten()
+
+    for g <- legacy do
+      %{num_rows: direct} =
+        repo.query!(
+          """
+          INSERT INTO project_membership (project_id, user_id, role, source)
+          SELECT pm.project_id, ug.user_id, 'member', 'migration'
+            FROM project_membership pm
+            JOIN user_group ug ON ug.group_id = pm.group_id
+           WHERE pm.group_id = $1
+          ON CONFLICT (project_id, user_id) WHERE user_id IS NOT NULL DO NOTHING
+          """,
+          [g]
+        )
+
+      %{num_rows: sso} = repo.query!("DELETE FROM sso_group_map WHERE our_group_id = $1", [g])
+      repo.query!("DELETE FROM access_group WHERE id = $1", [g])
+
+      IO.puts(
+        "project_access: legacy group #{inspect(g)} folded — #{direct} direct membership(s) " <>
+          "created, #{sso} sso map row(s) dropped, group deleted"
+      )
+    end
+
+    :ok
   end
 
   defp base_name([]), do: "Unassigned"

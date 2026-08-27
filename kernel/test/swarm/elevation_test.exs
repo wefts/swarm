@@ -88,6 +88,18 @@ defmodule Swarm.ElevationTest do
       assert detail["elevation_id"] == e.id and detail["sid"] == @sid
     end
 
+    test "an elevation changes CAPABILITIES, never scopes (roles ≠ visibility, ADR-20 D8)" do
+      u = wheel_user()
+      ungranted = register_source!(name: "Ops", kind: "iac")
+      before = Identity.scopes_for(u.id)
+      {:ok, _} = Elevation.request(actor(u), "r", reauth("rootuser"))
+      assert Identity.scopes_for(u.id) == before
+      refute ungranted in Identity.scopes_for(u.id)
+      t = Actor.sign(%{"sub" => "rootuser", "provider" => "local", "sid" => @sid})
+      assert {:ok, a} = Actor.resolve(t)
+      assert a.scopes == before and "read_any_conversation" in a.caps
+    end
+
     test "ttl is clamped to [60, max]" do
       u = wheel_user()
       {:ok, e} = Elevation.request(actor(u), "r", reauth("rootuser"), ttl_s: 999_999)
@@ -124,6 +136,9 @@ defmodule Swarm.ElevationTest do
       refute Elevation.active?(u.id, @sid)
       assert [%{decision: "allowed"}] = audit_rows(u, "end_elevation")
       assert Elevation.end_elevation(actor(u)) == :not_found
+      # revoking an already-revoked id is honest (no second "allowed" row)
+      assert Elevation.end_elevation(actor(u), e.id) == :not_found
+      assert length(audit_rows(u, "end_elevation")) == 1
     end
 
     test "leaving wheel, deactivation and a new external link all kill a live elevation" do

@@ -12,8 +12,8 @@ defmodule Swarm.WorldMap.CoverageTest do
   alias Swarm.WorldMap.Coverage.Descriptor
   alias Swarm.WorldMap.Coverage.Validated
 
-  @network_scope "src:wiki"
-  @who_scope "src:ldap"
+  @network_scope Swarm.GraphCase.test_src()
+  @who_scope Swarm.GraphCase.test_src2()
 
   # A fake Procedure.steps/3: ignores args, returns the configured variants.
   defp proc_fun(variants), do: fn _key, _scopes, _opts -> variants end

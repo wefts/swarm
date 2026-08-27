@@ -575,20 +575,17 @@ defmodule Swarm.Core.Server do
   defp manage_group_op(actor, %{op: :GROUP_DELETE} = req),
     do: action_response(Admin.delete_group(actor, req.group_id, req.confirm))
 
-  defp manage_group_op(actor, %{op: op, role: role} = req)
-       when op in [:GROUP_SET_ROLE, :GROUP_CLEAR_ROLE] do
-    cond do
-      # Only `admin` is bindable; `superadmin` is never a standing role (ADR-20 D9).
-      role != "admin" ->
-        %AdminActionResponse{status: :CALL_BAD_REQUEST}
+  # Role probes (incl. a `superadmin` bind attempt) go THROUGH Admin so the denial is audited;
+  # Admin answers {:error, :invalid_role} → BAD_REQUEST for anything but `admin` (ADR-20 D9).
+  defp manage_group_op(actor, %{op: :GROUP_SET_ROLE} = req),
+    do:
+      action_response(guarded_group_id(req.group_id, &Admin.set_group_role(actor, &1, req.role)))
 
-      op == :GROUP_SET_ROLE ->
-        action_response(guarded_group_id(req.group_id, &Admin.set_group_role(actor, &1, role)))
-
-      true ->
-        action_response(guarded_group_id(req.group_id, &Admin.clear_group_role(actor, &1, role)))
-    end
-  end
+  defp manage_group_op(actor, %{op: :GROUP_CLEAR_ROLE} = req),
+    do:
+      action_response(
+        guarded_group_id(req.group_id, &Admin.clear_group_role(actor, &1, req.role))
+      )
 
   defp manage_group_op(actor, %{op: :GROUP_SET_SCOPES} = req),
     do: action_response(Admin.set_group_scopes(actor, req.group_id, req.scopes))

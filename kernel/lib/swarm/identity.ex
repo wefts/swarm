@@ -449,7 +449,7 @@ defmodule Swarm.Identity do
           :ok | {:error, :unknown_group | :wheel_local_only}
   def add_to_group(user_id, group_id) do
     cond do
-      not group_exists?(group_id) ->
+      group_id not in @fixed_group_ids or not group_exists?(group_id) ->
         {:error, :unknown_group}
 
       group_id == @wheel and not local_only?(user_id) ->
@@ -580,7 +580,7 @@ defmodule Swarm.Identity do
       our_group_id == @wheel ->
         {:error, :wheel_not_mappable}
 
-      not group_exists?(our_group_id) ->
+      our_group_id not in @fixed_group_ids or not group_exists?(our_group_id) ->
         {:error, :unknown_group}
 
       true ->

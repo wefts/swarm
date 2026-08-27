@@ -32,8 +32,8 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
   alias Swarm.WorldMap.Gate.Answer
   alias Swarm.WorldMap.Gate.Audit
 
-  @network_scope "src:wiki"
-  @who_scope "src:ldap"
+  @network_scope Swarm.GraphCase.test_src()
+  @who_scope Swarm.GraphCase.test_src2()
 
   # --- shared injection helpers (same style as coverage_test.exs / gate_test.exs) ----------
 

@@ -26,6 +26,9 @@ defmodule Swarm.Projects do
 
   @visibilities ~w(personal shared public)
   @member_roles ~w(owner member)
+  # Only the FIXED groups may be Project members (ADR-20 D7) — a legacy/non-fixed group row
+  # can never confer visibility (council: codex).
+  @fixed_groups ~w(wheel admins staff)
 
   @type project :: %{
           id: String.t(),
@@ -138,7 +141,11 @@ defmodule Swarm.Projects do
   @spec list_projects_for(String.t() | nil) :: [project()]
   def list_projects_for(nil), do: []
 
-  def list_projects_for(user_id) do
+  def list_projects_for(user_id) when is_binary(user_id) do
+    if valid_uuid?(user_id), do: do_list_projects_for(user_id), else: []
+  end
+
+  defp do_list_projects_for(user_id) do
     Repo.query!(
       """
       SELECT #{project_cols("p")}
@@ -345,6 +352,10 @@ defmodule Swarm.Projects do
       role not in @member_roles ->
         {:error, :invalid_member}
 
+      # owners are PEOPLE: a group cannot hold the owner role (owner?/2 is user-only)
+      role == "owner" and Map.has_key?(member, :group_id) ->
+        {:error, :invalid_member}
+
       is_nil(get_project(project_id)) ->
         {:error, :not_found}
 
@@ -373,7 +384,7 @@ defmodule Swarm.Projects do
 
   defp do_add_member(project_id, %{group_id: group_id}, role, source, granted_by)
        when is_binary(group_id) do
-    if Identity.group_exists?(group_id) do
+    if group_id in @fixed_groups and Identity.group_exists?(group_id) do
       Repo.query!(
         """
         INSERT INTO project_membership (project_id, group_id, role, source, granted_by)
@@ -510,7 +521,8 @@ defmodule Swarm.Projects do
         SELECT DISTINCT 'src:' || s.id::text
           FROM source s
           JOIN project p ON p.id = s.project_id
-         WHERE ($1::uuid IS NOT NULL AND p.visibility = 'public')
+         WHERE (p.visibility = 'public'
+                AND EXISTS (SELECT 1 FROM app_user u WHERE u.id = $1 AND u.status IN ('active', 'invited')))
             OR EXISTS (SELECT 1 FROM project_membership pm
                         WHERE pm.project_id = p.id AND pm.user_id = $1)
             OR EXISTS (SELECT 1 FROM project_membership pm

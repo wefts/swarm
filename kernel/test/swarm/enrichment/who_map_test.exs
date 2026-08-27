@@ -104,7 +104,7 @@ defmodule Swarm.Enrichment.WhoMapTest do
                "p"
              ) == []
 
-      refute length(ids) == 0
+      refute ids == []
     end
 
     test "managed_by person→person is admissible" do

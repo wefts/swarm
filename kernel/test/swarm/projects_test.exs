@@ -199,6 +199,24 @@ defmodule Swarm.ProjectsTest do
       assert Projects.delete_project(Identity.uuid7()) == {:error, :not_found}
     end
 
+    test "a group can never hold the owner role (owners are people)" do
+      {:ok, p} = Projects.create_project(%{name: "P"})
+
+      assert Projects.add_member(p.id, %{group_id: "staff"}, role: "owner") ==
+               {:error, :invalid_member}
+
+      assert :ok = Projects.add_member(p.id, %{group_id: "staff"}, role: "member")
+      refute Projects.owner?(p.id, user("alice").id)
+    end
+
+    test "a deactivated account derives nothing — not even public Projects (belt)" do
+      {_p, s} = project!("Handbook", visibility: "public")
+      u = user("alice")
+      assert s.scope in Projects.effective_scopes(u.id)
+      :ok = Identity.deactivate_user(u.id)
+      assert Projects.effective_scopes(u.id) == []
+    end
+
     test "creator becomes the owner; members list owners first; project_view aggregates" do
       alice = user("alice")
       {:ok, p} = Projects.create_project(%{name: "Alice's", created_by: alice.id})

@@ -131,11 +131,16 @@ defmodule Swarm.NoLeakShipGateTest do
       assert Conversations.list(alice.id) |> Enum.all?(&(&1.owner_id == alice.id))
     end
 
-    test "a deliberately group-scoped conversation is STILL owner-private", %{bob: bob} do
-      alice = user("alice2")
+    test "co-members of the SAME Project cannot read each other's conversations (owner axis ⟂ scope)" do
+      alice = group_user("alice2")
+      bob = group_user("bob2")
+      # positive control: BOTH derive the Project's source scope
+      assert @src in Identity.scopes_for(alice.id) and @src in Identity.scopes_for(bob.id)
       {:ok, shared} = Conversations.create(alice.id, %{title: "shared?", scope: @src})
-      # bob (also a group user) still cannot read it — owner axis is independent of scope
+      assert {:ok, _} = Conversations.get(alice.id, shared.id)
+      # bob shares the scope, not the conversation — owner axis is independent of scope
       assert Conversations.get(bob.id, shared.id) == :not_found
+      refute Enum.any?(Conversations.list(bob.id), &(&1.id == shared.id))
     end
   end
 
@@ -280,6 +285,40 @@ defmodule Swarm.NoLeakShipGateTest do
       [row | _] = Audit.for_actor(root.id) |> Enum.filter(&(&1.action == "read_conversation"))
       assert row.decision == "allowed" and row.data_returned == true
       assert row.target_conversation_id == c.id
+    end
+  end
+
+  describe "an elevation is not an ambient read path (ADR-20 D10)" do
+    test "an ELEVATED session reads no foreign conversation except through audited break-glass" do
+      alice = user("alice")
+      {:ok, c} = Conversations.create(alice.id, %{title: "a"})
+      {:ok, _} = Conversations.add_message(alice.id, c.id, %{role: "user", body: "hush"})
+      {root, root_t} = elevated_wheel()
+
+      assert Conversations.get(root.id, c.id) == :not_found
+      assert Conversations.list(root.id) == []
+
+      assert Server.get_conversation(
+               %GetConversationRequest{assertion: root_t, conversation_id: c.id},
+               nil
+             ).status == :CALL_NOT_FOUND
+
+      assert Server.list_conversations(%ListConversationsRequest{assertion: root_t}, nil).conversations ==
+               []
+
+      # positive control: the SAME session can break-glass — reason required, audited
+      ok =
+        Server.admin_read_conversation(
+          %AdminReadConversationRequest{
+            assertion: root_t,
+            conversation_id: c.id,
+            reason: "ticket"
+          },
+          nil
+        )
+
+      assert ok.status == :CALL_OK
+      assert Enum.any?(Audit.for_actor(root.id), &(&1.action == "read_conversation"))
     end
   end
 

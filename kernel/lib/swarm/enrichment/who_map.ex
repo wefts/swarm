@@ -17,7 +17,8 @@ defmodule Swarm.Enrichment.WhoMap do
   - **Governed relations** (closed by discipline): `managed_by` (person→person), `works_in`
     (person→team), `has_title` (person→role), `located_at` (person→site) — with relation↔kind
     signatures (a mis-typed edge is dropped, same conservative ethos as NetworkMap).
-  - **Scope = src:ldap** for every who data node/edge (org-directory reference; mirrors the
+  - **Scope = the anchor's registered Source scope** (`src:<uuid>`, ADR-20) for every who data
+    node/edge — the loader created the anchor under the LDAP Source (org-directory reference; mirrors the
     directory's connector source). Never public — a who fact is visible only to readers granted the
     LDAP content source (no-leak).
   - **Profile as CONTENT** (`write_profile/3`): the allowlisted human attrs (cn/title/ou/l/mail/room)
