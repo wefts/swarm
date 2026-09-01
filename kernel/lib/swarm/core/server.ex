@@ -55,6 +55,7 @@ defmodule Swarm.Core.Server do
     PanelTake,
     ProjectMemberView,
     ProjectView,
+    RateAnswerResponse,
     ResolveActorResponse,
     RoleView,
     SearchHit,
@@ -102,6 +103,15 @@ defmodule Swarm.Core.Server do
   defp wire_status(:not_found), do: :NOT_FOUND
   defp wire_status(:partial), do: :PARTIAL
   defp wire_status(:error), do: :ERROR
+
+  defp wire_rating(:HELPFUL), do: :helpful
+  defp wire_rating(:WRONG), do: :wrong
+  defp wire_rating(:UNSURE), do: :unsure
+  defp wire_rating(_), do: :unspecified
+
+  defp rating_status(:helpful), do: :HELPFUL
+  defp rating_status(:wrong), do: :WRONG
+  defp rating_status(:unsure), do: :UNSURE
 
   @spec kb_status(Swarm.Core.V1.StatusRequest.t(), GRPC.Server.Stream.t()) :: StatusResponse.t()
   def kb_status(_req, _stream) do
@@ -162,6 +172,23 @@ defmodule Swarm.Core.Server do
         # Unknown/expired ask_ref, or the viewer is not the owner / scopes no longer
         # cover it — existence never revealed; only the status, no partial read.
         %DeliberationResponse{status: :NOT_FOUND}
+    end
+  end
+
+  @spec rate_answer(Swarm.Core.V1.RateAnswerRequest.t(), GRPC.Server.Stream.t()) ::
+          RateAnswerResponse.t()
+  def rate_answer(req, _stream) do
+    {viewer, scopes, _verified} = ctx(req.viewer, req.scopes)
+
+    case Core.rate_answer(req.ask_ref, viewer, scopes, wire_rating(req.rating)) do
+      {:ok, rating} ->
+        %RateAnswerResponse{status: :CALL_OK, ask_ref: req.ask_ref, rating: rating_status(rating)}
+
+      :not_found ->
+        %RateAnswerResponse{status: :CALL_NOT_FOUND}
+
+      :bad_request ->
+        %RateAnswerResponse{status: :CALL_BAD_REQUEST}
     end
   end
 

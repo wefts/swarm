@@ -26,6 +26,7 @@ defmodule Swarm.CoreIdentityRpcTest do
     ManageProjectRequest,
     ManageUserRequest,
     ProvisionActorRequest,
+    RateAnswerRequest,
     ResolveActorRequest
   }
 
@@ -331,6 +332,65 @@ defmodule Swarm.CoreIdentityRpcTest do
 
       assert Server.list_conversations(%ListConversationsRequest{assertion: "x"}, nil).status ==
                :CALL_UNAUTHENTICATED
+    end
+  end
+
+  describe "RateAnswer RPC (external signal, owner-private)" do
+    test "the owner can rate their own answer record" do
+      alice = provision("alice", "sub-alice")
+
+      ref =
+        Swarm.AnswerRecords.maybe_persist(
+          alice.id,
+          ["public"],
+          "what is x?",
+          %{answer: "x", confidence: 0.8, tier: "structured", status: :found, citations: []}
+        )
+
+      resp =
+        Server.rate_answer(
+          %RateAnswerRequest{
+            ask_ref: ref,
+            viewer: assertion("sub-alice"),
+            rating: :HELPFUL
+          },
+          nil
+        )
+
+      assert resp.status == :CALL_OK
+      assert resp.rating == :HELPFUL
+      assert Swarm.AnswerRecords.fetch_rating(ref, alice.id) == {:ok, :helpful}
+    end
+
+    test "another actor cannot rate a retained answer and bad ratings are rejected" do
+      alice = provision("alice", "sub-alice")
+      provision("bob", "sub-bob")
+
+      ref =
+        Swarm.AnswerRecords.maybe_persist(
+          alice.id,
+          ["public"],
+          "what is x?",
+          %{answer: "x", confidence: 0.8, tier: "structured", status: :found, citations: []}
+        )
+
+      assert Server.rate_answer(
+               %RateAnswerRequest{
+                 ask_ref: ref,
+                 viewer: assertion("sub-bob"),
+                 rating: :WRONG
+               },
+               nil
+             ).status == :CALL_NOT_FOUND
+
+      assert Server.rate_answer(
+               %RateAnswerRequest{
+                 ask_ref: ref,
+                 viewer: assertion("sub-alice"),
+                 rating: :ANSWER_RATING_UNSPECIFIED
+               },
+               nil
+             ).status == :CALL_BAD_REQUEST
     end
   end
 

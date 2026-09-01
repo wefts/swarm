@@ -27,6 +27,7 @@ defmodule Swarm.WorldMap.Gate do
   (`Swarm.Core`): a slow gate defaults to escalate.
   """
 
+  alias Swarm.Calibration.Tier0Eligibility
   alias Swarm.ML.Generation
   alias Swarm.WorldMap.Coverage
   alias Swarm.WorldMap.Coverage.Descriptor
@@ -133,7 +134,7 @@ defmodule Swarm.WorldMap.Gate do
   @spec entailed(Validated.t(), :default | (String.t(), String.t() -> boolean()), keyword()) ::
           :ok | {:veto, :veto | :error}
   defp entailed(%Validated{} = v, :default, opts) do
-    if deterministic_network?(v) do
+    if deterministic_network?(v) and Tier0Eligibility.eligible?(v, opts) do
       :ok
     else
       do_entailed(v, :default, opts)

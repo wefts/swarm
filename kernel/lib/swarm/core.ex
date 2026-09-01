@@ -11,7 +11,7 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Activity, Consilium, Conversations, Deliberation, Gate, Repo}
+  alias Swarm.{Activity, AnswerRecords, Consilium, Conversations, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
   alias Swarm.WorldMap.SemanticRouter
@@ -83,20 +83,23 @@ defmodule Swarm.Core do
 
     # "my X" without a known asker: can't resolve identity — limit, don't guess
     # (the asker-identity contract, T8 / P11). Identity mapping is the channel's.
-    if first_person and viewer == "" do
-      identity_required()
-    else
-      # "my X" with an asker → narrow retrieval to that asker's items.
-      owner = if first_person, do: viewer, else: nil
+    answer =
+      if first_person and viewer == "" do
+        identity_required()
+      else
+        # "my X" with an asker → narrow retrieval to that asker's items.
+        owner = if first_person, do: viewer, else: nil
 
-      decision = Gate.route(query, opts)
+        decision = Gate.route(query, opts)
 
-      case decision.tier do
-        :tier0 -> tier0_answer(decision.intent)
-        :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
-        :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+        case decision.tier do
+          :tier0 -> tier0_answer(decision.intent)
+          :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
+          :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+        end
       end
-    end
+
+    record_answer(query, viewer, scopes, answer)
   end
 
   # tier0 is canned + zero-LLM — it NEVER escalates. Off-mission requests are
@@ -290,6 +293,16 @@ defmodule Swarm.Core do
   @spec deliberation(String.t(), String.t(), [String.t()]) ::
           {:ok, Deliberation.record()} | :not_found
   defdelegate deliberation(ask_ref, viewer, scopes), to: Deliberation, as: :fetch
+
+  @doc """
+  Record an external answer rating by the viewer who received the answer.
+
+  ADR-11: this stores user feedback only; it does not let the system grade itself
+  and does not mutate graph reward.
+  """
+  @spec rate_answer(String.t(), String.t(), [String.t()], AnswerRecords.rating() | String.t()) ::
+          {:ok, AnswerRecords.rating()} | :not_found | :bad_request
+  defdelegate rate_answer(ask_ref, viewer, scopes, rating), to: AnswerRecords, as: :rate
 
   @doc """
   One poll of the scope-safe worker/job ActivityFeed (ADR-15). `opts`: `:scopes`,
@@ -499,9 +512,9 @@ defmodule Swarm.Core do
       if semantic_fallback?(descriptor) do
         semantic = SemanticRouter.route(query, opts)
         descriptor = coverage_descriptor(query, scopes, hits, profile, opts, semantic)
-        run_gate(descriptor, opts)
+        run_gate(descriptor, opts, scopes)
       else
-        run_gate(descriptor, opts)
+        run_gate(descriptor, opts, scopes)
       end
     else
       :escalate
@@ -559,8 +572,9 @@ defmodule Swarm.Core do
   # a timeout OR a crash surfaces as `{:exit, _}`/`nil` here and degrades to escalate — so
   # a slow/crashing gate never takes the ask process down (async_nolink, not async) and
   # never double-pays gate + consilium unbounded (codex review + gemini's sink-risk).
-  defp run_gate(descriptor, opts) do
+  defp run_gate(descriptor, opts, scopes) do
     gate_opts = Keyword.take(opts, [:entail_fun])
+    gate_opts = Keyword.put(gate_opts, :scopes, scopes)
 
     task =
       Task.Supervisor.async_nolink(WorldMap.GateTaskSupervisor, fn ->
@@ -702,7 +716,8 @@ defmodule Swarm.Core do
         # Cite both the retrieved passages AND the claim facts that grounded the
         # answer — so a claim-only answer (no retrieval hits) is still explainable.
         citations: Enum.map(hits, &cite/1) ++ Enum.map(profile.facts, &fact_cite/1),
-        ask_ref: ask_ref
+        ask_ref: ask_ref,
+        agreement: agreement(verdict.disagreement)
       }
     else
       # The judge marked the answer NOT grounded (an abstention) — honest `:not_found`,
@@ -711,8 +726,25 @@ defmodule Swarm.Core do
       # deliberation is still retained, so the dashboard can show that it deliberated.
       query
       |> not_found("escalate")
-      |> Map.merge(%{confidence: 0.0, ask_ref: ask_ref})
+      |> Map.merge(%{
+        confidence: 0.0,
+        ask_ref: ask_ref,
+        agreement: agreement(verdict.disagreement)
+      })
     end
+  end
+
+  defp agreement(disagreement), do: max(0.0, min(1.0, 1.0 - disagreement))
+
+  defp record_answer(query, viewer, scopes, answer) do
+    case AnswerRecords.maybe_persist(viewer, scopes, query, answer) do
+      "" -> answer
+      ask_ref -> Map.put(answer, :ask_ref, ask_ref)
+    end
+  rescue
+    e ->
+      Logger.warning("answer record persist failed (#{Exception.message(e)})")
+      answer
   end
 
   # final = judge_confidence · agreement · evidence_cap, clamped to [0,1].
