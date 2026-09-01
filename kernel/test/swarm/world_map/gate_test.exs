@@ -135,6 +135,12 @@ defmodule Swarm.WorldMap.GateTest do
       assert system == Gate.entity_entail_system()
       assert system =~ "ENTITY PROFILE FACTS"
       assert system =~ "DIRECT FACT"
+      assert system =~ "broad profile request"
+      assert system =~ "tell me about X"
+      assert system =~ "розкажи про X"
+      assert system =~ "що відомо про X"
+      assert system =~ "direct profile facts"
+      assert system =~ "specific missing"
       assert system =~ "Do not inherit or transfer attributes"
       assert system =~ "routes_to"
       assert system =~ "wrong entity"

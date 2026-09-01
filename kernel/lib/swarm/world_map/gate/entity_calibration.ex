@@ -61,6 +61,33 @@ defmodule Swarm.WorldMap.Gate.EntityCalibration do
       ],
       serve: true
     },
+    %{
+      id: "serve-uk-profile-definition",
+      query: "Розкажи про Drupal",
+      groups: [
+        {"Drupal", "is_a", ["content management system"]},
+        {"Drupal", "used_for", ["building and operating websites"]}
+      ],
+      serve: true
+    },
+    %{
+      id: "serve-uk-profile-service",
+      query: "Розкажи про Helios AI Program",
+      groups: [
+        {"Helios AI Program", "is_a", ["internal AI enablement program"]},
+        {"Helios AI Program", "owned_by", ["Applied Intelligence"]}
+      ],
+      serve: true
+    },
+    %{
+      id: "serve-uk-known-about-profile",
+      query: "Що відомо про Nimbus gateway",
+      groups: [
+        {"Nimbus gateway", "is_a", ["edge routing service"]},
+        {"Nimbus gateway", "has_url", ["https://nimbus.example.test"]}
+      ],
+      serve: true
+    },
     # SHOULD VETO - near-misses: loosely related facts, wrong entity, wrong relation.
     %{
       id: "veto-definition-vs-owner",
@@ -86,6 +113,24 @@ defmodule Swarm.WorldMap.Gate.EntityCalibration do
       groups: [
         {"Quill dashboard", "has_url", ["https://quill.example.test"]},
         {"Quill dashboard", "is_a", ["editing metrics dashboard"]}
+      ],
+      serve: false
+    },
+    %{
+      id: "veto-broad-profile-wrong-entity",
+      query: "Розкажи про Drupal",
+      groups: [
+        {"Drupa", "is_a", ["printing industry event"]},
+        {"Drupa", "held_in", ["Dusseldorf"]}
+      ],
+      serve: false
+    },
+    %{
+      id: "veto-specific-ip-from-broad-profile",
+      query: "what IP does the Nimbus gateway use",
+      groups: [
+        {"Nimbus gateway", "is_a", ["edge routing service"]},
+        {"Nimbus gateway", "has_url", ["https://nimbus.example.test"]}
       ],
       serve: false
     },

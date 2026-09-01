@@ -43,6 +43,22 @@ defmodule Swarm.WorldMap.Gate.EntityCalibrationTest do
     assert Enum.count(labels, & &1.serve) >= 3
   end
 
+  test "the labelled set covers multilingual broad-profile recall and strict IP vetoes" do
+    by_id = Map.new(EntityCalibration.labeled(), &{&1.id, &1})
+
+    assert by_id["serve-uk-profile-definition"].serve
+    assert by_id["serve-uk-profile-definition"].query == "Розкажи про Drupal"
+
+    assert by_id["serve-uk-profile-service"].serve
+    assert by_id["serve-uk-profile-service"].query == "Розкажи про Helios AI Program"
+
+    assert by_id["serve-uk-known-about-profile"].serve
+    assert by_id["serve-uk-known-about-profile"].query == "Що відомо про Nimbus gateway"
+
+    refute by_id["veto-broad-profile-wrong-entity"].serve
+    refute by_id["veto-specific-ip-from-broad-profile"].serve
+  end
+
   test "default calibration entail uses the entity-profile system prompt" do
     parent = self()
 

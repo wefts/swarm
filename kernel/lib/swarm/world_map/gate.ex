@@ -50,7 +50,12 @@ defmodule Swarm.WorldMap.Gate do
   @entity_entail_system ~s(You decide if ENTITY PROFILE FACTS answer the user QUESTION. Answer ) <>
                           ~s(sufficient=true ONLY when the grounding states the requested fact ) <>
                           ~s(about the SAME entity and the SAME attribute/relation the question ) <>
-                          ~s(asks for as a DIRECT FACT. Do not inherit or transfer attributes ) <>
+                          ~s(asks for as a DIRECT FACT. For a broad profile request such as ) <>
+                          ~s("tell me about X", "what is known about X", "розкажи про X", ) <>
+                          ~s("що відомо про X", or "расскажи о X", direct profile facts ) <>
+                          ~s(about X are sufficient even when they include multiple direct ) <>
+                          ~s(attributes/relations; this is NOT enough for a specific missing ) <>
+                          ~s(attribute question. Do not inherit or transfer attributes ) <>
                           ~s(across related entities: if A routes_to, contains, owns, manages, ) <>
                           ~s(depends_on, or is related to B, A's IP/URL/owner/location/status is ) <>
                           ~s(NOT evidence for B unless the grounding directly states that same ) <>
