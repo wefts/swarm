@@ -504,7 +504,8 @@ defmodule Swarm.Core do
         WorldMap.Coverage.describe(
           query,
           scopes,
-          [candidate_keys: candidate_keys, profile: profile] ++ neighborhood_opts
+          [candidate_keys: candidate_keys, profile: profile, entity_serve: entity_serve?(opts)] ++
+            neighborhood_opts
         )
 
       run_gate(descriptor, opts)
@@ -593,6 +594,17 @@ defmodule Swarm.Core do
   @spec tier_gate_enabled?(keyword()) :: boolean()
   defp tier_gate_enabled?(opts) do
     Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
+  end
+
+  # H1 entity-profile serve path: still OFF by default after the 2026-07-06 false-serves.
+  # This opt-in is for branch-only calibration/shadow measurement until H1's go/no-go numbers pass.
+  @spec entity_serve?(keyword()) :: boolean()
+  defp entity_serve?(opts) do
+    Keyword.get(
+      opts,
+      :entity_serve,
+      Application.get_env(:swarm, :tier_gate, [])[:entity_serve] == true
+    )
   end
 
   # A neighborhood domain's serve flag. Each path is OFF by default (like entity_serve) until it is

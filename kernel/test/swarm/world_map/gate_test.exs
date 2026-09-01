@@ -97,6 +97,51 @@ defmodule Swarm.WorldMap.GateTest do
       assert Enum.all?(ans.citations, &String.starts_with?(&1, "corroboration:"))
     end
 
+    test "default procedure entail still uses the procedure system prompt" do
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :procedure}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(clean_procedure(), generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      refute system == Gate.entity_entail_system()
+      assert system =~ "PROCEDURE"
+      assert system =~ "SAME operation"
+    end
+
+    test "default entity-profile entail uses the entity system prompt" do
+      d =
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
+          profile: profile([group("is_a", [{"a load balancer", 2}])]),
+          entity_serve: true
+        )
+
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :entity_profile}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(d, generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      assert system == Gate.entity_entail_system()
+      assert system =~ "ENTITY PROFILE FACTS"
+      assert system =~ "DIRECT FACT"
+      assert system =~ "Do not inherit or transfer attributes"
+      assert system =~ "routes_to"
+      assert system =~ "wrong entity"
+      assert system =~ "wrong relation"
+      assert system =~ "absent fact"
+    end
+
     test "a Stage-1 rejection is NEVER recovered by a YES entailment (asymmetry)" do
       # empty scopes ⇒ blocker; even a YES entailment cannot serve it
       d = Coverage.describe("anything", [], candidate_keys: ["x"])
@@ -153,6 +198,23 @@ defmodule Swarm.WorldMap.GateTest do
 
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
                Gate.sufficient?(d, entail_fun: always(false))
+    end
+
+    test "default network entail still uses the domain system prompt" do
+      d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}])
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :neighborhood, domain: :network}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(d, generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      assert system == Swarm.WorldMap.Domain.network().entail_system
+      refute system == Gate.entity_entail_system()
     end
 
     test "an empty network neighborhood cannot mint a Validated (fail-closed)" do

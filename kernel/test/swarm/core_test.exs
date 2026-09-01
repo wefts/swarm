@@ -133,6 +133,21 @@ defmodule Swarm.CoreTest do
       end
     end
 
+    defp seed_entity_profile do
+      service = Store.upsert_node("entity", "atlas search", scope: "public")
+      kind = Store.upsert_node("concept", "document indexing service", scope: "public")
+
+      {:ok, _} =
+        Store.add_edge(service, kind, "is_a", "wiki:atlas",
+          scope: "public",
+          origin: "wiki:atlas",
+          evidence_kind: "claim",
+          source_node_id: service
+        )
+
+      service
+    end
+
     test "serves a clean procedure from structure (tier=structured, consilium bypassed)" do
       p = seed_procedure()
 
@@ -199,6 +214,24 @@ defmodule Swarm.CoreTest do
       a = Core.ask("how to reset the ldap password", opts)
       assert a.tier == "escalate"
       assert a.answer == "consilium answer"
+    end
+
+    test "entity_profile serve requires explicit entity_serve opt-in" do
+      _service = seed_entity_profile()
+      opts = escalate_opts(consilium_stub()) ++ [retriever: fn _q, _s, _o -> {:ok, []} end]
+
+      off = Core.ask("what is atlas search", opts ++ [tier_gate: true])
+      assert off.tier == "escalate"
+
+      on =
+        Core.ask(
+          "what is atlas search",
+          opts ++ [tier_gate: true, entity_serve: true, entail_fun: fn _q, _g -> true end]
+        )
+
+      assert on.tier == "structured"
+      assert on.answer =~ "is a"
+      assert on.answer =~ "document indexing service"
     end
 
     # An UNRELATED retriever — hit_keys/Procedure.candidates alone give the gate no
