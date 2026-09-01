@@ -137,6 +137,56 @@ defmodule Swarm.Graph.NetworkTest do
            )
   end
 
+  test "neighborhood/3 S2: fresh structural edges do not stale configuration facts" do
+    subject = Store.upsert_node("entity", "Galaxy CI/CD runners", scope: @net_scope)
+    address = Store.upsert_node("entity", "203.0.113.118", scope: @net_scope)
+    dependency = Store.upsert_node("entity", "Build egress profile", scope: @net_scope)
+    site = Store.upsert_node("entity", "net:site:dev", scope: @net_scope)
+
+    {:ok, _} =
+      Store.add_edge(subject, address, "has_outbound_ip_address", "example.test:ip",
+        scope: @net_scope,
+        origin: "example.test:ip",
+        evidence_kind: "claim",
+        source_node_id: subject
+      )
+
+    {:ok, _} =
+      Store.add_edge(subject, dependency, "uses", "example.test:config",
+        scope: @net_scope,
+        origin: "example.test:config",
+        evidence_kind: "claim",
+        source_node_id: subject
+      )
+
+    Swarm.Repo.query!(
+      "UPDATE edge SET last_seen = now() - interval '40 days' WHERE src = $1 AND type = 'has_outbound_ip_address'",
+      [subject]
+    )
+
+    Swarm.Repo.query!(
+      "UPDATE edge SET last_seen = now() - interval '20 days' WHERE src = $1 AND type = 'uses'",
+      [subject]
+    )
+
+    {:ok, _} =
+      Store.add_edge(subject, site, "contains", "example.test:topology",
+        scope: @net_scope,
+        origin: "example.test:topology",
+        evidence_kind: "claim",
+        source_node_id: subject
+      )
+
+    facts = Network.neighborhood("Galaxy CI/CD runners", [@net_scope], min_corroboration: 1)
+
+    assert Enum.any?(
+             facts,
+             &match?(%{relation: "has_outbound_ip_address", object: "203.0.113.118"}, &1)
+           )
+
+    assert Enum.any?(facts, &match?(%{relation: "contains", object: "site/dev"}, &1))
+  end
+
   test "neighborhood/3 with min_corroboration filters to multi-origin facts" do
     node = src_node(@net_scope)
 

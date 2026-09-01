@@ -154,8 +154,9 @@ defmodule Swarm.Graph.Network do
   `:min_corroboration` (default 1) — the tier-gate passes 2 to serve ONLY multi-source-confirmed
   topology; `:freshness` (default true) — S2: drop facts too STALE to serve (decay below the
   serve floor, per freshness class) and rank by `effective_reliability` (base × decay). Age is
-  measured against the graph's freshness FRONTIER (newest `last_seen`) so a stalled ingest can't
-  decay-then-escalate the whole graph. Returns `[%{relation, object, object_kind, corroboration,
+  measured against the relation's freshness-class FRONTIER (newest `last_seen` in that class) so a
+  stalled ingest can't decay-then-escalate the whole graph, and fresh structural derivations don't
+  stale-out older configuration facts. Returns `[%{relation, object, object_kind, corroboration,
   effective_reliability}]`, freshest-first.
   """
   @spec neighborhood(String.t(), [String.t()], keyword()) :: [map()]
@@ -166,13 +167,22 @@ defmodule Swarm.Graph.Network do
   def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
     min_corr = Keyword.get(opts, :min_corroboration, 1)
     freshness? = Keyword.get(opts, :freshness, true)
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
 
     %{rows: rows} =
       Repo.query!(
         """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
         SELECT e.type, d.key, e.seen_count, e.reliability::float8,
-               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
           FROM edge e
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node s ON s.id = e.src
           JOIN node d ON d.id = e.dst
          WHERE s.key = $1 AND e.type <> 'is_a' AND e.reward >= 0

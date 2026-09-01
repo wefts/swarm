@@ -16,9 +16,10 @@ defmodule Swarm.Graph.Freshness do
   half-life; operational state decays in days, topology/identity in months/years, so stable facts
   don't over-escalate (codex). λ = ln(2)/half_life_days ⇒ decay(half_life) = 0.5.
 
-  **Age is measured against the graph's FRESHNESS FRONTIER (the newest `last_seen`), not wall-clock**
-  — so if ingestion (the nightly crons) STALLS, nothing gets newer, ages stop growing, and the whole
-  graph does not decay-then-escalate at once (gemini's escalation-DDoS trap → this self-freezes).
+  **Age is measured against the graph's per-class FRESHNESS FRONTIER (the newest `last_seen` in
+  that relation's freshness class), not wall-clock** — so if ingestion (the nightly crons) STALLS,
+  nothing gets newer, ages stop growing, and the whole graph does not decay-then-escalate at once
+  (gemini's escalation-DDoS trap → this self-freezes).
   """
 
   @type class :: :operational | :configuration | :structural | :identity
@@ -43,6 +44,7 @@ defmodule Swarm.Graph.Freshness do
     "located_in" => :structural,
     "part_of" => :structural,
     "has_address" => :configuration,
+    "has_outbound_ip_address" => :configuration,
     "hosted_on" => :configuration,
     "uses" => :configuration,
     "requires" => :configuration,
@@ -71,6 +73,27 @@ defmodule Swarm.Graph.Freshness do
   @spec class(String.t()) :: class()
   def class(relation), do: Map.get(@relation_class, relation, :configuration)
 
+  @doc """
+  SQL CASE expression that maps an edge relation expression to the same freshness class as
+  `class/1`. Intended for read queries that need a per-class freshness frontier.
+  """
+  @spec sql_class_case(String.t()) :: String.t()
+  def sql_class_case(relation_expr) when is_binary(relation_expr) do
+    cases =
+      @relation_class
+      |> Enum.sort_by(fn {relation, _class} -> relation end)
+      |> Enum.map_join("\n", fn {relation, class} ->
+        "WHEN '#{sql_literal(relation)}' THEN '#{class}'"
+      end)
+
+    """
+    CASE #{relation_expr}
+    #{cases}
+    ELSE 'configuration'
+    END
+    """
+  end
+
   @doc "Decay factor exp(-λ_class · age_days) ∈ (0,1]. `age_seconds` clamped ≥ 0 (frontier ≥ last_seen)."
   @spec decay_factor(number(), String.t()) :: float()
   def decay_factor(age_seconds, relation) do
@@ -87,7 +110,8 @@ defmodule Swarm.Graph.Freshness do
 
   @doc """
   Serve gate: is this fact fresh enough to serve? True iff its class decay factor ≥ `@fresh_floor`.
-  `age_seconds` is measured against the graph's freshness frontier by the caller (self-freezing).
+  `age_seconds` is measured against the graph's per-class freshness frontier by the caller
+  (self-freezing).
   """
   @spec fresh?(number(), String.t()) :: boolean()
   def fresh?(age_seconds, relation), do: decay_factor(age_seconds, relation) >= @fresh_floor
@@ -95,4 +119,6 @@ defmodule Swarm.Graph.Freshness do
   @doc "The serve floor (decay factor below which a fact is too stale to serve)."
   @spec fresh_floor() :: float()
   def fresh_floor, do: @fresh_floor
+
+  defp sql_literal(value), do: String.replace(value, "'", "''")
 end
