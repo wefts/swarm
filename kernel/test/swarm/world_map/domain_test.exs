@@ -16,6 +16,11 @@ defmodule Swarm.WorldMap.DomainTest do
       refute Regex.match?(d.cue, "how do I reset my password")
       assert "carries" in d.relations
       assert "has_outbound_ip_address" in d.relations
+      assert "has_private_address" in d.relations
+      assert "has_public_address" in d.relations
+      assert "contained_by" in d.relations
+      assert "routes_for" in d.relations
+      assert "terminates_for" in d.relations
     end
 
     test "the who (org-directory) domain declares its serve knobs" do

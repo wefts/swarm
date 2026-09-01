@@ -295,7 +295,7 @@ defmodule Swarm.Graph.ContractTest do
   describe "schema version" do
     test "is stamped, queryable, and matches the compiled contract" do
       assert Contract.stamped_version() == Contract.schema_version()
-      assert Contract.schema_version() == 11
+      assert Contract.schema_version() == 12
     end
   end
 

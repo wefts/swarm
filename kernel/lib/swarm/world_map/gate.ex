@@ -69,17 +69,19 @@ defmodule Swarm.WorldMap.Gate do
 
   # The network-topology entail system now lives in the serve-domain CONTRACT
   # (`Swarm.WorldMap.Domain`, master-plan S3) — one source per domain (no Coverage/Gate drift).
+  @deterministic_network_relations ~w(has_address has_private_address has_public_address has_outbound_ip_address contained_by routes_for terminates_for)
 
   defmodule Answer do
     @moduledoc "The evidence-closed served answer (rendered from a `%Validated{}` only)."
     @enforce_keys [:text, :citations, :intent]
-    defstruct [:text, :citations, :intent, :domain, :key]
+    defstruct [:text, :citations, :intent, :domain, :key, confidence: 0.85]
 
     @type t :: %__MODULE__{
             text: String.t(),
             citations: [String.t()],
             intent: :procedure | :entity_profile | :neighborhood,
             domain: atom() | nil,
+            confidence: float(),
             # The served entity/subject key (`Validated.name`), when the intent has one
             # (procedure/neighborhood) — nil for entity_profile. Distinct from `citations`
             # (opaque audit labels, e.g. "corroboration:1"): this is the real graph key,
@@ -130,7 +132,17 @@ defmodule Swarm.WorldMap.Gate do
 
   @spec entailed(Validated.t(), :default | (String.t(), String.t() -> boolean()), keyword()) ::
           :ok | {:veto, :veto | :error}
-  defp entailed(%Validated{} = v, entail_fun, opts) do
+  defp entailed(%Validated{} = v, :default, opts) do
+    if deterministic_network?(v) do
+      :ok
+    else
+      do_entailed(v, :default, opts)
+    end
+  end
+
+  defp entailed(%Validated{} = v, entail_fun, opts), do: do_entailed(v, entail_fun, opts)
+
+  defp do_entailed(%Validated{} = v, entail_fun, opts) do
     ok =
       case entail_fun do
         # Default path: pick the intent-appropriate entail system (procedure vs neighborhood domain).
@@ -143,6 +155,12 @@ defmodule Swarm.WorldMap.Gate do
     # Fail-closed: an entailment error/timeout is never a serve.
     _ -> {:veto, :error}
   end
+
+  defp deterministic_network?(%Validated{intent: :neighborhood, domain: :network, atoms: facts}) do
+    facts != [] and Enum.all?(facts, &(&1.relation in @deterministic_network_relations))
+  end
+
+  defp deterministic_network?(_), do: false
 
   # Grounding for the entailment judge — built from the VALIDATED atoms only (never raw
   # hits). Same evidence the answer would render, so the judge rules on exactly what
@@ -252,7 +270,7 @@ defmodule Swarm.WorldMap.Gate do
   def render(%Validated{intent: :procedure, atoms: steps, citations: cits, name: name}) do
     body = steps |> Enum.map_join("\n", fn s -> "#{s.ordinal}. #{s.key}" end)
     head = if name, do: "#{name}:\n", else: "Steps:\n"
-    %Answer{text: head <> body, citations: cits, intent: :procedure, key: name}
+    %Answer{text: head <> body, citations: cits, intent: :procedure, key: name, confidence: 0.85}
   end
 
   def render(%Validated{intent: :entity_profile, atoms: groups, citations: cits}) do
@@ -262,7 +280,7 @@ defmodule Swarm.WorldMap.Gate do
         "#{g.predicate}: #{objs}"
       end)
 
-    %Answer{text: body, citations: cits, intent: :entity_profile}
+    %Answer{text: body, citations: cits, intent: :entity_profile, confidence: confidence(groups)}
   end
 
   def render(%Validated{
@@ -273,7 +291,7 @@ defmodule Swarm.WorldMap.Gate do
         key: key,
         domain: domain_key
       }) do
-    body = Enum.map_join(facts, "\n", fn f -> "#{f.relation} #{f.object}" end)
+    body = Enum.map_join(facts, "\n", &render_fact/1)
     head = if subject, do: "#{subject}:\n", else: "#{Domain.get(domain_key).display_label}:\n"
 
     %Answer{
@@ -281,7 +299,45 @@ defmodule Swarm.WorldMap.Gate do
       citations: cits,
       intent: :neighborhood,
       domain: domain_key,
-      key: key
+      key: key,
+      confidence: confidence(facts)
     }
   end
+
+  defp render_fact(%{relation: "has_address", address_class: class, object: object})
+       when is_binary(class) do
+    "has_address #{class} #{object}"
+  end
+
+  defp render_fact(f), do: "#{f.relation} #{f.object}"
+
+  defp confidence(atoms) when is_list(atoms) do
+    atoms
+    |> Enum.flat_map(&confidence_inputs/1)
+    |> then(fn
+      [] ->
+        0.85
+
+      values ->
+        values
+        |> Enum.sum()
+        |> Kernel./(length(values))
+        |> max(0.0)
+        |> min(0.97)
+        |> Float.round(2)
+    end)
+  end
+
+  defp confidence_inputs(%{effective_reliability: rel, corroboration: corr}) do
+    bump = min(max((corr || 1) - 1, 0), 2) * 0.05
+    [min((rel || 0.0) + bump, 0.97)]
+  end
+
+  defp confidence_inputs(%{objects: objects}) when is_list(objects) do
+    Enum.map(objects, fn obj ->
+      Map.get(obj, :confidence) || Map.get(obj, :reliability) || 0.85
+    end)
+  end
+
+  defp confidence_inputs(_), do: []
 end

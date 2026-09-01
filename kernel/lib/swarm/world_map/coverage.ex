@@ -322,7 +322,9 @@ defmodule Swarm.WorldMap.Coverage do
     fun = Keyword.get(opts, :"#{dom.key}_fun", dom.neighborhood_fun)
     min_corr = Keyword.get(opts, :"#{dom.key}_min_corroboration", dom.min_corroboration)
 
-    case first_neighborhood(keys, scopes, fun, min_corr, dom.subject_fun) do
+    relation_opts = neighborhood_relation_opts(query, dom)
+
+    case first_neighborhood(keys, scopes, fun, min_corr, dom.subject_fun, relation_opts) do
       {subject, key, facts} ->
         %Descriptor{
           query: query,
@@ -355,14 +357,40 @@ defmodule Swarm.WorldMap.Coverage do
   # non-empty; its subject label is the domain's `subject_fun` applied to the resolved key — the
   # raw key itself is ALSO returned (chat-thread epic 2: `subject_fun` is a display transform, not
   # invertible — a served answer's active_keys must echo the raw key, never the display label).
-  defp first_neighborhood([], _scopes, _fun, _min_corr, _subject_fun), do: :none
+  defp first_neighborhood([], _scopes, _fun, _min_corr, _subject_fun, _relation_opts), do: :none
 
-  defp first_neighborhood([key | rest], scopes, fun, min_corr, subject_fun) do
-    case fun.(key, scopes, min_corroboration: min_corr) do
-      [] -> first_neighborhood(rest, scopes, fun, min_corr, subject_fun)
+  defp first_neighborhood([key | rest], scopes, fun, min_corr, subject_fun, relation_opts) do
+    case fun.(key, scopes, [min_corroboration: min_corr] ++ relation_opts) do
+      [] -> first_neighborhood(rest, scopes, fun, min_corr, subject_fun, relation_opts)
       facts -> {subject_fun.(key), key, facts}
     end
   end
+
+  defp neighborhood_relation_opts(query, %Domain{key: :network}) do
+    q = String.downcase(query)
+
+    cond do
+      Regex.match?(~r/\b(private|internal|lan)\b|приватн|внутрішн/iu, q) ->
+        [relations: ["has_private_address"]]
+
+      Regex.match?(~r/\b(public|outbound|egress|external)\b|публічн|зовнішн/iu, q) ->
+        [relations: ["has_public_address", "has_outbound_ip_address"]]
+
+      Regex.match?(~r/\bwhich\s+tunnels?\b.*\bterminate|тунел[\p{L}]*.*термін/iu, q) ->
+        [relations: ["terminates_for"]]
+
+      Regex.match?(~r/\bwhich\s+hosts?\b.*\broute|хост[\p{L}]*.*маршрут/iu, q) ->
+        [relations: ["routes_for"]]
+
+      Regex.match?(~r/\b(ip|ips|address|addresses)\b|(ip|айпі)[-\s]?адрес/iu, q) ->
+        [relations: ["has_address"]]
+
+      true ->
+        []
+    end
+  end
+
+  defp neighborhood_relation_opts(_query, _dom), do: []
 
   # Entity citations are corroboration COUNTS only (Aggregation deliberately never emits
   # a source identity — a count cannot leak which document asserted a claim).

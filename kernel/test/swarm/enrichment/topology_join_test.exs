@@ -221,6 +221,45 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
              """).rows
   end
 
+  test "derives gateway joins with cidr containment instead of string-prefix matching" do
+    write([
+      %{
+        subject: "app01.example.test",
+        subject_kind: "host",
+        relation: "has_address",
+        object: "10.10.0.30",
+        object_kind: "address"
+      },
+      %{
+        subject: "app02.example.test",
+        subject_kind: "host",
+        relation: "has_address",
+        object: "10.10.0.200",
+        object_kind: "address"
+      },
+      %{
+        subject: "gateway-a",
+        subject_kind: "gateway",
+        relation: "carries",
+        object: "10.10.0.0/25",
+        object_kind: "subnet"
+      }
+    ])
+
+    assert %{joins: 1} = TopologyJoin.derive([@scope], apply: true)
+
+    assert [
+             ["net:host:app01.example.test", "net:gateway:gateway-a"]
+           ] =
+             Repo.query!("""
+             SELECT s.key, d.key
+               FROM edge e
+               JOIN node s ON s.id = e.src
+               JOIN node d ON d.id = e.dst
+              WHERE e.type = 'routes_via'
+             """).rows
+  end
+
   test "mix task prints host route cluster context as an honest quantifier" do
     write([
       %{

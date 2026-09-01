@@ -30,6 +30,9 @@ defmodule Swarm.Graph.Contract do
 
   alias Swarm.Repo
 
+  # v12 — network address semantics: `net:address:*` / `net:subnet:*` nodes gain typed
+  # PostgreSQL `inet` / `cidr` columns plus deterministic address-class labels so containment and
+  # public/private address asks are data operations, not prose/model guesses.
   # v11 — project access (workspace ADR-20): the source scope key becomes the STABLE source id
   # `src:<source_uuid>` (a `source` row owned by a `project`); `src:<name>` labels and the
   # transitional `group` scope are migrated away and the CHECK constraints tightened to
@@ -47,7 +50,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 11
+  @schema_version 12
   @scopes ~w(private public)
   # A source scope is `src:` + the source's lowercase hyphenated UUID — never a label.
   @uuid_re "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"

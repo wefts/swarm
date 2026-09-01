@@ -93,7 +93,7 @@ defmodule Swarm.Core do
 
       case decision.tier do
         :tier0 -> tier0_answer(decision.intent)
-        :tier_tools -> tools_answer(query, scopes, retriever, owner)
+        :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
         :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
       end
     end
@@ -372,33 +372,53 @@ defmodule Swarm.Core do
     }
   end
 
-  defp tools_answer(query, scopes, retriever, owner) do
+  defp tools_answer(query, scopes, retriever, owner, opts) do
     case retriever.(query, scopes, limit: @search_limit, owner: owner) do
       {:ok, []} ->
-        not_found(query, "tier_tools")
+        case try_structured_from_tools(query, scopes, [], opts) do
+          {:serve, answer} -> answer
+          :escalate -> not_found(query, "tier_tools")
+        end
 
       {:ok, hits} ->
-        %{
-          answer: "Found #{length(hits)} matching item(s) in the knowledge base.",
-          confidence: 0.7,
-          tier: "tier_tools",
-          status: :found,
-          citations: Enum.map(hits, &cite/1)
-        }
+        case try_structured_from_tools(query, scopes, hits, opts) do
+          {:serve, answer} ->
+            answer
+
+          :escalate ->
+            %{
+              answer: "Found #{length(hits)} matching item(s) in the knowledge base.",
+              confidence: 0.7,
+              tier: "tier_tools",
+              status: :found,
+              citations: Enum.map(hits, &cite/1)
+            }
+        end
 
       {:partial, hits, failed} ->
-        %{
-          answer:
-            "Partial results — #{length(hits)} item(s); #{length(failed)} source(s) unavailable.",
-          confidence: 0.5,
-          tier: "tier_tools",
-          status: :partial,
-          citations: Enum.map(hits, &cite/1)
-        }
+        case try_structured_from_tools(query, scopes, hits, opts) do
+          {:serve, answer} ->
+            answer
+
+          :escalate ->
+            %{
+              answer:
+                "Partial results — #{length(hits)} item(s); #{length(failed)} source(s) unavailable.",
+              confidence: 0.5,
+              tier: "tier_tools",
+              status: :partial,
+              citations: Enum.map(hits, &cite/1)
+            }
+        end
 
       {:error, reason} ->
         error_result(reason, "tier_tools")
     end
+  end
+
+  defp try_structured_from_tools(query, scopes, hits, opts) do
+    profile = Aggregation.entity_profile(query, scopes)
+    try_structured_gate(query, scopes, hits, profile, opts)
   end
 
   defp escalate_answer(query, scopes, retriever, owner, opts) do
@@ -577,7 +597,7 @@ defmodule Swarm.Core do
 
     %{
       answer: a.text,
-      confidence: 0.85,
+      confidence: a.confidence,
       tier: "structured",
       status: :found,
       citations:

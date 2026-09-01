@@ -23,6 +23,14 @@ defmodule Swarm.Graph.NetworkTest do
     assert Network.relations([]) == []
   end
 
+  test "declares relation cardinality for renderers" do
+    assert Network.cardinality("hosted_on") == :single
+    assert Network.cardinality("has_private_address") == :many
+    assert Network.cardinality("contained_by") == :many
+    assert Network.cardinality("routes_for") == :many
+    assert Network.cardinality("unknown_relation") == :many
+  end
+
   test "relations exclude is_a typing edges; entities carry decoded kind + name" do
     node = src_node(@net_scope)
 
@@ -49,6 +57,67 @@ defmodule Swarm.Graph.NetworkTest do
     refute Enum.any?(relations, &(&1.relation == "is_a"))
   end
 
+  test "neighborhood/3 filters public/private address relations and labels generic addresses" do
+    node = src_node(@net_scope)
+
+    NetworkMap.write(
+      node,
+      [
+        %{
+          subject: "example-host",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.1",
+          object_kind: "address"
+        },
+        %{
+          subject: "example-host",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "8.8.8.8",
+          object_kind: "address"
+        }
+      ],
+      "prov-address-class"
+    )
+
+    assert [
+             %{relation: "has_private_address", object: "address/10.20.30.1"}
+           ] =
+             Network.neighborhood("net:host:example-host", [@net_scope],
+               min_corroboration: 1,
+               relations: ["has_private_address"]
+             )
+
+    assert [
+             %{relation: "has_public_address", object: "address/8.8.8.8"}
+           ] =
+             Network.neighborhood("net:host:example-host", [@net_scope],
+               min_corroboration: 1,
+               relations: ["has_public_address"]
+             )
+
+    facts = Network.neighborhood("net:host:example-host", [@net_scope], min_corroboration: 1)
+
+    assert Enum.any?(
+             facts,
+             &match?(
+               %{relation: "has_address", object: "address/10.20.30.1", address_class: "private"},
+               &1
+             )
+           )
+
+    assert Enum.any?(
+             facts,
+             &match?(
+               %{relation: "has_address", object: "address/8.8.8.8", address_class: "public"},
+               &1
+             )
+           )
+
+    refute Enum.any?(facts, &(&1.relation in ["has_private_address", "has_public_address"]))
+  end
+
   test "candidates/3 finds net entities matching a query term (with a relation edge)" do
     node = src_node(@net_scope)
 
@@ -70,6 +139,140 @@ defmodule Swarm.Graph.NetworkTest do
 
     assert Network.candidates("something unrelated entirely", [@net_scope]) == []
     assert Network.candidates("orbit", []) == []
+  end
+
+  test "candidates/3 extracts exact network literals" do
+    node = src_node(@net_scope)
+
+    NetworkMap.write(
+      node,
+      [
+        %{
+          subject: "edge.example.test",
+          subject_kind: "gateway",
+          relation: "carries",
+          object: "192.0.2.0/25",
+          object_kind: "subnet"
+        },
+        %{
+          subject: "box.example.test",
+          subject_kind: "host",
+          relation: "routes_via",
+          object: "192.0.2.1",
+          object_kind: "gateway"
+        },
+        %{
+          subject: "box.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "192.0.2.30",
+          object_kind: "address"
+        }
+      ],
+      "prov-literal"
+    )
+
+    assert "net:gateway:192.0.2.1" in Network.candidates("which gateway is 192.0.2.1?", [
+             @net_scope
+           ])
+
+    assert "net:address:192.0.2.30" in Network.candidates(
+             "which subnet contains 192.0.2.30?",
+             [@net_scope]
+           )
+
+    assert "net:gateway:192.0.2.1" in Network.candidates("which hosts route via 192.0.2.1?", [
+             @net_scope
+           ])
+  end
+
+  test "neighborhood/3 derives address containment with inet/cidr operators" do
+    node = src_node(@net_scope)
+
+    NetworkMap.write(
+      node,
+      [
+        %{
+          subject: "example-tunnel",
+          subject_kind: "tunnel",
+          relation: "carries",
+          object: "192.0.2.0/25",
+          object_kind: "subnet"
+        },
+        %{
+          subject: "inside.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "192.0.2.30",
+          object_kind: "address"
+        },
+        %{
+          subject: "outside.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "192.0.2.200",
+          object_kind: "address"
+        }
+      ],
+      "prov-containment"
+    )
+
+    assert [
+             %{relation: "contained_by", object: "subnet/192.0.2.0/25"}
+           ] =
+             Network.neighborhood("net:address:192.0.2.30", [@net_scope], min_corroboration: 1)
+
+    assert [] =
+             Network.neighborhood("net:address:192.0.2.200", [@net_scope], min_corroboration: 1)
+  end
+
+  test "neighborhood/3 derives gateway reverse route facts" do
+    node = src_node(@net_scope)
+
+    NetworkMap.write(
+      node,
+      [
+        %{
+          subject: "app.example.test",
+          subject_kind: "host",
+          relation: "routes_via",
+          object: "192.0.2.1",
+          object_kind: "gateway"
+        }
+      ],
+      "prov-reverse-route"
+    )
+
+    assert [
+             %{relation: "routes_for", object: "host/app.example.test"}
+           ] =
+             Network.neighborhood("net:gateway:192.0.2.1", [@net_scope], min_corroboration: 1)
+  end
+
+  test "neighborhood/3 derives gateway reverse tunnel termination facts" do
+    node = src_node(@net_scope)
+
+    NetworkMap.write(
+      node,
+      [
+        %{
+          subject: "example-tunnel",
+          subject_kind: "tunnel",
+          relation: "terminates_at",
+          object: "192.0.2.1",
+          object_kind: "gateway"
+        }
+      ],
+      "prov-reverse-termination"
+    )
+
+    assert [
+             %{relation: "terminates_for", object: "tunnel/example-tunnel"}
+           ] =
+             Network.neighborhood("net:gateway:192.0.2.1", [@net_scope],
+               min_corroboration: 1,
+               relations: ["terminates_for"]
+             )
   end
 
   test "candidates/3 finds non-net entities with direct address facts" do

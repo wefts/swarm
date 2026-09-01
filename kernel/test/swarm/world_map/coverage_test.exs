@@ -342,6 +342,91 @@ defmodule Swarm.WorldMap.CoverageTest do
                Coverage.validate(d)
     end
 
+    test "network private/public address wording filters relation before validation" do
+      fun = fn _key, _scopes, opts ->
+        case Keyword.get(opts, :relations) do
+          ["has_private_address"] ->
+            [net_fact("has_private_address", "address/10.20.30.1", 1)]
+
+          ["has_public_address", "has_outbound_ip_address"] ->
+            [net_fact("has_public_address", "address/8.8.8.8", 1)]
+
+          ["has_address"] ->
+            [
+              net_fact("has_address", "address/10.20.30.1", 1),
+              net_fact("has_address", "address/8.8.8.8", 1)
+            ]
+
+          ["routes_for"] ->
+            [net_fact("routes_for", "host/app.example.test", 1)]
+
+          ["terminates_for"] ->
+            [net_fact("terminates_for", "tunnel/example", 1)]
+
+          _ ->
+            []
+        end
+      end
+
+      private =
+        Coverage.describe("What is private IP of example alpha?", [@network_scope],
+          semantic_route: {:neighborhood, :network},
+          network_serve: true,
+          network_keys: ["net:host:example-alpha"],
+          network_fun: fun,
+          network_min_corroboration: 1
+        )
+
+      assert {:ok, %Validated{atoms: [%{relation: "has_private_address"}]}} =
+               Coverage.validate(private)
+
+      public =
+        Coverage.describe("What is the public IP of example alpha?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:example-alpha"],
+          network_fun: fun,
+          network_min_corroboration: 1
+        )
+
+      assert {:ok, %Validated{atoms: [%{relation: "has_public_address"}]}} =
+               Coverage.validate(public)
+
+      unqualified =
+        Coverage.describe("What is the IP of example alpha?", [@network_scope],
+          semantic_route: {:neighborhood, :network},
+          network_serve: true,
+          network_keys: ["net:host:example-alpha"],
+          network_fun: fun,
+          network_min_corroboration: 1
+        )
+
+      assert {:ok, %Validated{atoms: [%{relation: "has_address"}, %{relation: "has_address"}]}} =
+               Coverage.validate(unqualified)
+
+      hosts =
+        Coverage.describe("Which hosts route via gateway 192.0.2.1?", [@network_scope],
+          semantic_route: {:neighborhood, :network},
+          network_serve: true,
+          network_keys: ["net:gateway:192.0.2.1"],
+          network_fun: fun,
+          network_min_corroboration: 1
+        )
+
+      assert {:ok, %Validated{atoms: [%{relation: "routes_for"}]}} = Coverage.validate(hosts)
+
+      tunnels =
+        Coverage.describe("Which tunnels terminate at gateway 192.0.2.1?", [@network_scope],
+          semantic_route: {:neighborhood, :network},
+          network_serve: true,
+          network_keys: ["net:gateway:192.0.2.1"],
+          network_fun: fun,
+          network_min_corroboration: 1
+        )
+
+      assert {:ok, %Validated{atoms: [%{relation: "terminates_for"}]}} =
+               Coverage.validate(tunnels)
+    end
+
     test "no candidate → :no_candidate → escalate" do
       d =
         Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],

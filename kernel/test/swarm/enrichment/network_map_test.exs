@@ -283,7 +283,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       assert rel >= 0.8
     end
 
-    test "has_address (host → address, IP object) is admitted via the write path (table facts)" do
+    test "has_address (host → address, IP object) writes parent and deterministic class relation" do
       node = src_node(@net_scope)
       # bare-IP object: refused by the LLM extract path (Phase-1), but the table parser feeds it
       # directly to write, where admissible?/1 (vocab+signature) allows host → has_address → address
@@ -306,6 +306,16 @@ defmodule Swarm.Enrichment.NetworkMapTest do
 
       %{relations: rels} = Network.map([@net_scope])
       assert Enum.any?(rels, &(&1.relation == "has_address" and &1.src == "host/web01.corp"))
+
+      assert Enum.any?(
+               rels,
+               &(&1.relation == "has_private_address" and &1.src == "host/web01.corp")
+             )
+
+      assert [["net:address:10.0.0.5", "private"]] =
+               Repo.query!(
+                 "SELECT key, net_address_class FROM node WHERE key = 'net:address:10.0.0.5'"
+               ).rows
     end
 
     test "write signature-filters a directly-fed mis-typed fact" do

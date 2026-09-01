@@ -46,7 +46,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
     apply? = Keyword.get(opts, :apply, false)
     rows = relation_rows(scopes)
 
-    joins = topology_join_candidates(rows)
+    joins = topology_join_candidates(scopes, rows)
     bridges = exact_identity_bridge_candidates(scopes) ++ cluster_name_bridge_candidates(scopes)
     variants = environment_variant_candidates(scopes)
 
@@ -209,93 +209,139 @@ defmodule Swarm.Enrichment.TopologyJoin do
     end)
   end
 
-  defp topology_join_candidates(rows) do
-    cluster_edges_by_host =
-      rows
-      |> Enum.filter(
-        &(&1.type == "contains" and kind(&1.src_key) == "cluster" and kind(&1.dst_key) == "host")
-      )
-      |> Enum.group_by(& &1.dst_id)
+  defp topology_join_candidates(scopes, rows) do
+    row_by_id = Map.new(rows, &{&1.id, &1})
 
-    host_addresses =
-      rows
-      |> Enum.filter(
-        &(&1.type in ["has_address", "has_outbound_ip_address"] and kind(&1.src_key) == "host")
-      )
-      |> Enum.flat_map(fn row ->
-        case parse_ip(name(row.dst_key)) do
-          {:ok, ip} ->
-            [
-              %{
-                host_id: row.src_id,
-                host_key: row.src_key,
-                ip: ip,
-                address_evidence: [row],
-                cluster_edges: Map.get(cluster_edges_by_host, row.src_id, [])
-              }
-            ]
+    scopes
+    |> topology_join_candidate_rows()
+    |> Enum.map(fn [src_id, src_key, relation, dst_id, dst_key, scope, evidence_ids] ->
+      evidence =
+        evidence_ids
+        |> Enum.map(&Map.fetch!(row_by_id, &1))
+        |> Enum.uniq_by(& &1.id)
 
-          :error ->
-            []
-        end
-      end)
-
-    cluster_host_addresses =
-      Enum.flat_map(host_addresses, fn host ->
-        Enum.map(host.cluster_edges, fn cluster_edge ->
-          %{
-            host_key: host.host_key,
-            cluster_id: cluster_edge.src_id,
-            cluster_key: cluster_edge.src_key,
-            ip: host.ip,
-            evidence: host.address_evidence ++ [cluster_edge]
-          }
-        end)
-      end)
-
-    site_ranges =
-      rows
-      |> Enum.filter(fn row ->
-        row.type in ["has_address", "contains"] and kind(row.src_key) == "site" and
-          kind(row.dst_key) in ["address", "subnet"]
-      end)
-      |> Enum.flat_map(&range_row/1)
-
-    gateway_ranges =
-      direct_gateway_ranges(rows) ++ tunnel_gateway_ranges(rows)
-
-    site_joins =
-      for host <- cluster_host_addresses,
-          range <- site_ranges,
-          in_range?(host.ip, range.range) do
-        candidate(
-          range.src_id,
-          host.cluster_id,
-          "contains",
-          range.scope,
-          range.src_key,
-          host.cluster_key,
-          range.evidence ++ host.evidence
-        )
-      end
-
-    gateway_joins =
-      for host <- host_addresses,
-          range <- gateway_ranges,
-          in_range?(host.ip, range.range) do
-        candidate(
-          host.host_id,
-          range.src_id,
-          "routes_via",
-          range.scope,
-          host.host_key,
-          range.src_key,
-          range.evidence ++ host.address_evidence
-        )
-      end
-
-    (site_joins ++ gateway_joins)
+      candidate(src_id, dst_id, relation, scope, src_key, dst_key, evidence)
+    end)
     |> Enum.uniq_by(&{&1.src_id, &1.relation, &1.dst_id, &1.scope})
+  end
+
+  defp topology_join_candidate_rows(scopes) do
+    Repo.query!(
+      """
+      WITH host_addresses AS (
+        SELECT e.id AS address_edge_id, h.id AS host_id, h.key AS host_key,
+               a.net_addr AS addr, e.visibility_scope AS scope
+          FROM edge e
+          JOIN node h ON h.id = e.src
+          JOIN node a ON a.id = e.dst
+         WHERE e.reward >= 0
+           AND e.type IN ('has_address', 'has_private_address', 'has_public_address', 'has_outbound_ip_address')
+           AND h.key LIKE 'net:host:%'
+           AND a.net_addr IS NOT NULL
+           AND e.visibility_scope = ANY($1)
+           AND h.scope = ANY($1)
+           AND a.scope = ANY($1)
+      ),
+      cluster_hosts AS (
+        SELECT e.id AS cluster_edge_id, c.id AS cluster_id, c.key AS cluster_key,
+               h.id AS host_id
+          FROM edge e
+          JOIN node c ON c.id = e.src
+          JOIN node h ON h.id = e.dst
+         WHERE e.reward >= 0
+           AND e.type = 'contains'
+           AND c.key LIKE 'net:cluster:%'
+           AND h.key LIKE 'net:host:%'
+           AND e.visibility_scope = ANY($1)
+           AND c.scope = ANY($1)
+           AND h.scope = ANY($1)
+      ),
+      site_ranges AS (
+        SELECT e.id AS range_edge_id, s.id AS site_id, s.key AS site_key,
+               r.net_range AS range, e.visibility_scope AS scope
+          FROM edge e
+          JOIN node s ON s.id = e.src
+          JOIN node r ON r.id = e.dst
+         WHERE e.reward >= 0
+           AND e.type IN ('has_address', 'has_private_address', 'has_public_address', 'contains')
+           AND s.key LIKE 'net:site:%'
+           AND r.net_range IS NOT NULL
+           AND e.visibility_scope = ANY($1)
+           AND s.scope = ANY($1)
+           AND r.scope = ANY($1)
+      ),
+      direct_gateway_ranges AS (
+        SELECT e.id AS range_edge_id, g.id AS gateway_id, g.key AS gateway_key,
+               r.net_range AS range, e.visibility_scope AS scope
+          FROM edge e
+          JOIN node g ON g.id = e.src
+          JOIN node r ON r.id = e.dst
+         WHERE e.reward >= 0
+           AND (
+             (e.type = 'carries' AND r.key LIKE 'net:subnet:%')
+             OR (e.type IN ('has_address', 'has_private_address', 'has_public_address') AND r.key LIKE 'net:address:%')
+           )
+           AND g.key LIKE 'net:gateway:%'
+           AND r.net_range IS NOT NULL
+           AND e.visibility_scope = ANY($1)
+           AND g.scope = ANY($1)
+           AND r.scope = ANY($1)
+      ),
+      tunnel_ranges AS (
+        SELECT e.id AS range_edge_id, t.id AS tunnel_id, r.net_range AS range
+          FROM edge e
+          JOIN node t ON t.id = e.src
+          JOIN node r ON r.id = e.dst
+         WHERE e.reward >= 0
+           AND e.type = 'carries'
+           AND t.key LIKE 'net:tunnel:%'
+           AND r.key LIKE 'net:subnet:%'
+           AND r.net_range IS NOT NULL
+           AND e.visibility_scope = ANY($1)
+           AND t.scope = ANY($1)
+           AND r.scope = ANY($1)
+      ),
+      tunnel_gateway_ranges AS (
+        SELECT te.id AS terminate_edge_id, tr.range_edge_id, g.id AS gateway_id,
+               g.key AS gateway_key, tr.range, te.visibility_scope AS scope
+          FROM tunnel_ranges tr
+          JOIN edge te ON te.src = tr.tunnel_id
+          JOIN node g ON g.id = te.dst
+         WHERE te.reward >= 0
+           AND te.type = 'terminates_at'
+           AND g.key LIKE 'net:gateway:%'
+           AND te.visibility_scope = ANY($1)
+           AND g.scope = ANY($1)
+      ),
+      gateway_ranges AS (
+        SELECT gateway_id, gateway_key, range, scope, ARRAY[range_edge_id]::bigint[] AS evidence_ids
+          FROM direct_gateway_ranges
+        UNION ALL
+        SELECT gateway_id, gateway_key, range, scope,
+               ARRAY[range_edge_id, terminate_edge_id]::bigint[] AS evidence_ids
+          FROM tunnel_gateway_ranges
+      ),
+      site_joins AS (
+        SELECT sr.site_id AS src_id, sr.site_key AS src_key, 'contains'::text AS relation,
+               ch.cluster_id AS dst_id, ch.cluster_key AS dst_key, sr.scope,
+               ARRAY[sr.range_edge_id, ha.address_edge_id, ch.cluster_edge_id]::bigint[] AS evidence_ids
+          FROM host_addresses ha
+          JOIN cluster_hosts ch ON ch.host_id = ha.host_id
+          JOIN site_ranges sr ON ha.addr <<= sr.range AND ha.scope = sr.scope
+      ),
+      gateway_joins AS (
+        SELECT ha.host_id AS src_id, ha.host_key AS src_key, 'routes_via'::text AS relation,
+               gr.gateway_id AS dst_id, gr.gateway_key AS dst_key, gr.scope,
+               array_append(gr.evidence_ids, ha.address_edge_id) AS evidence_ids
+          FROM host_addresses ha
+          JOIN gateway_ranges gr ON ha.addr <<= gr.range AND ha.scope = gr.scope
+      )
+      SELECT src_id, src_key, relation, dst_id, dst_key, scope, evidence_ids FROM site_joins
+      UNION ALL
+      SELECT src_id, src_key, relation, dst_id, dst_key, scope, evidence_ids FROM gateway_joins
+      """,
+      [scopes]
+    ).rows
   end
 
   defp exact_identity_bridge_candidates(scopes) do
@@ -478,7 +524,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       """,
       [
         scopes,
-        ~w(contains has_address has_outbound_ip_address carries routes_via egresses_via terminates_at alias_of)
+        ~w(contains has_address has_private_address has_public_address has_outbound_ip_address carries routes_via egresses_via terminates_at alias_of)
       ]
     ).rows
     |> Enum.map(fn [
@@ -507,70 +553,6 @@ defmodule Swarm.Enrichment.TopologyJoin do
         lineages: lineages,
         origins: origins
       }
-    end)
-  end
-
-  defp range_row(row) do
-    case parse_range(name(row.dst_key)) do
-      {:ok, range} ->
-        [
-          %{
-            src_id: row.src_id,
-            src_key: row.src_key,
-            scope: row.scope,
-            range: range,
-            evidence: [row]
-          }
-        ]
-
-      :error ->
-        []
-    end
-  end
-
-  defp direct_gateway_ranges(rows) do
-    rows
-    |> Enum.filter(fn row ->
-      kind(row.src_key) == "gateway" and
-        ((row.type == "carries" and kind(row.dst_key) == "subnet") or
-           (row.type == "has_address" and kind(row.dst_key) in ["address", "subnet"]))
-    end)
-    |> Enum.flat_map(&range_row/1)
-  end
-
-  defp tunnel_gateway_ranges(rows) do
-    tunnel_ranges =
-      rows
-      |> Enum.filter(
-        &(&1.type == "carries" and kind(&1.src_key) == "tunnel" and kind(&1.dst_key) == "subnet")
-      )
-      |> Enum.flat_map(fn row ->
-        case parse_range(name(row.dst_key)) do
-          {:ok, range} -> [%{tunnel_id: row.src_id, range: range, evidence: [row]}]
-          :error -> []
-        end
-      end)
-
-    tunnel_gateways =
-      rows
-      |> Enum.filter(
-        &(&1.type == "terminates_at" and kind(&1.src_key) == "tunnel" and
-            kind(&1.dst_key) == "gateway")
-      )
-      |> Enum.group_by(& &1.src_id)
-
-    Enum.flat_map(tunnel_ranges, fn tunnel_range ->
-      tunnel_gateways
-      |> Map.get(tunnel_range.tunnel_id, [])
-      |> Enum.map(fn gateway_edge ->
-        %{
-          src_id: gateway_edge.dst_id,
-          src_key: gateway_edge.dst_key,
-          scope: gateway_edge.scope,
-          range: tunnel_range.range,
-          evidence: tunnel_range.evidence ++ [gateway_edge]
-        }
-      end)
     end)
   end
 
@@ -654,33 +636,10 @@ defmodule Swarm.Enrichment.TopologyJoin do
     end)
   end
 
-  defp parse_range(value) do
-    case String.split(value, "/", parts: 2) do
-      [ip, prefix] ->
-        with {:ok, addr} <- parse_ip(ip),
-             {prefix_int, ""} <- Integer.parse(prefix),
-             true <- prefix_int >= 0 and prefix_int <= 32 do
-          {:ok, {addr, prefix_int}}
-        else
-          _ -> :error
-        end
-
-      [ip] ->
-        with {:ok, addr} <- parse_ip(ip), do: {:ok, {addr, 32}}
-    end
-  end
-
   defp parse_ip(value) when is_binary(value) do
-    case :inet.parse_ipv4_address(String.to_charlist(value)) do
-      {:ok, tuple} -> {:ok, ipv4_to_int(tuple)}
+    case :inet.parse_address(String.to_charlist(value)) do
+      {:ok, tuple} -> {:ok, tuple}
       _ -> :error
     end
-  end
-
-  defp ipv4_to_int({a, b, c, d}), do: a * 16_777_216 + b * 65_536 + c * 256 + d
-
-  defp in_range?(ip, {network, prefix}) do
-    mask = Bitwise.bsl(0xFFFFFFFF, 32 - prefix) |> Bitwise.band(0xFFFFFFFF)
-    Bitwise.band(ip, mask) == Bitwise.band(network, mask)
   end
 end

@@ -58,12 +58,12 @@ defmodule Swarm.Repo.Migrations.ProjectAccess do
       {false, _} ->
         false
 
-      {true, 11} ->
+      {true, v} when is_integer(v) and v >= 11 ->
         true
 
       {true, v} ->
         raise "project_access: half-applied store — group_scope_map is gone but " <>
-                "graph_schema_meta.version=#{inspect(v)} (expected 11); restore the snapshot"
+                "graph_schema_meta.version=#{inspect(v)} (expected >= 11); restore the snapshot"
     end
   end
 
