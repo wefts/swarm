@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.3.0](https://github.com/wefts/swarm/compare/v0.2.0..v0.3.0) - 2026-09-01
+
+### Features
+
+- **(world-map)** add semantic gate routing - ([0596e4c](https://github.com/wefts/swarm/commit/0596e4c5585fb1b7274316ffae38a6c1f8820c4c)) - Serhii BOREMCHUK
+
+---
 ## [0.2.0](https://github.com/wefts/swarm/compare/v0.1.0..v0.2.0) - 2026-09-01
 
 ### Bug Fixes
