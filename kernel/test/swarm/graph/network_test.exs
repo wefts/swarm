@@ -69,6 +69,22 @@ defmodule Swarm.Graph.NetworkTest do
     assert Network.candidates("orbit", []) == []
   end
 
+  test "candidates/3 finds non-net entities with direct address facts" do
+    subject = Store.upsert_node("entity", "Nebula CI runners", scope: @net_scope)
+    address = Store.upsert_node("entity", "192.0.2.10", scope: @net_scope)
+
+    {:ok, _} =
+      Store.add_edge(subject, address, "has_outbound_ip_address", "example.test:net",
+        scope: @net_scope,
+        origin: "example.test:net",
+        evidence_kind: "claim",
+        source_node_id: subject
+      )
+
+    assert ["Nebula CI runners"] =
+             Network.candidates("Яке публічне IP у nebula runners?", [@net_scope])
+  end
+
   test "neighborhood/3 S2: a STALE fact (old last_seen vs frontier) is filtered from serve" do
     node = src_node(@net_scope)
 

@@ -11,8 +11,11 @@ defmodule Swarm.WorldMap.DomainTest do
       assert d.min_corroboration == 2
       assert d.entail_system =~ "NETWORK TOPOLOGY"
       assert Regex.match?(d.cue, "what subnets does the orbit tunnel carry")
+      assert Regex.match?(d.cue, "Яке публічне IP у nebula runners?")
+      assert Regex.match?(d.cue, "які підмережі несе vpn тунель")
       refute Regex.match?(d.cue, "how do I reset my password")
       assert "carries" in d.relations
+      assert "has_outbound_ip_address" in d.relations
     end
 
     test "the who (org-directory) domain declares its serve knobs" do
@@ -37,6 +40,9 @@ defmodule Swarm.WorldMap.DomainTest do
       assert Regex.match?(d.cue, "who owns the keycloak service")
       assert Regex.match?(d.cue, "who runs gitlab")
       assert Regex.match?(d.cue, "who is responsible for ldap")
+      assert Regex.match?(d.cue, "Хто керує командою platform?")
+      assert Regex.match?(d.cue, "хто в команді platform")
+      assert Regex.match?(d.cue, "керівник команди platform")
       refute Regex.match?(d.cue, "how do I reset my password")
     end
 

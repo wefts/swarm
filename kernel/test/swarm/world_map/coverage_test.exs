@@ -123,6 +123,18 @@ defmodule Swarm.WorldMap.CoverageTest do
       assert {:error, [:no_candidate]} = Coverage.validate(d)
     end
 
+    test "a Ukrainian procedure cue with NO clean variant ESCALATES" do
+      d =
+        Coverage.describe("Як налаштувати VPN?", [Swarm.GraphCase.test_src()],
+          candidate_keys: [],
+          procedure_fun: proc_fun([]),
+          profile: profile([])
+        )
+
+      assert d.intent == :procedure
+      assert {:error, [:no_candidate]} = Coverage.validate(d)
+    end
+
     test "a procedure cue is NOT reclassified as an entity ask (intent split, code review)" do
       # cue present, no procedure variant, BUT entity coverage exists — must still
       # escalate, not serve entity facts for a "how do I" question.
@@ -135,6 +147,21 @@ defmodule Swarm.WorldMap.CoverageTest do
 
       assert d.intent == :procedure
       assert {:error, [:no_candidate]} = Coverage.validate(d)
+    end
+
+    test "a Ukrainian procedure cue is NOT reclassified as network on a bare VPN token" do
+      d =
+        Coverage.describe("Як налаштувати VPN?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:tunnel:example"],
+          network_fun: net_fun([net_fact("carries", "192.0.2.0/24")]),
+          candidate_keys: [],
+          procedure_fun: proc_fun([]),
+          profile: profile([])
+        )
+
+      assert d.intent == :procedure
+      assert d.blockers == [:no_candidate]
     end
   end
 
@@ -279,6 +306,23 @@ defmodule Swarm.WorldMap.CoverageTest do
                Coverage.validate(d)
     end
 
+    test "Ukrainian network cue routes to network when network_serve is on" do
+      facts = [net_fact("has_address", "192.0.2.10"), net_fact("has_address", "192.0.2.10")]
+
+      d =
+        Coverage.describe("Яке публічне IP у nebula runners?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:nebula-runners"],
+          network_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :network, atoms: ^facts}} =
+               Coverage.validate(d)
+    end
+
     test "no candidate → :no_candidate → escalate" do
       d =
         Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],
@@ -351,6 +395,23 @@ defmodule Swarm.WorldMap.CoverageTest do
 
       assert {:ok,
               %Validated{intent: :neighborhood, domain: :who, atoms: ^facts, name: "platform"}} =
+               Coverage.validate(d)
+    end
+
+    test "Ukrainian who cue routes to who when who_serve is on" do
+      facts = [who_fact("managed_by", "Jane Doe")]
+
+      d =
+        Coverage.describe("Хто керує командою platform?", [@who_scope],
+          who_serve: true,
+          who_keys: ["who:team:platform"],
+          who_fun: who_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.domain == :who
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :who, atoms: ^facts}} =
                Coverage.validate(d)
     end
 

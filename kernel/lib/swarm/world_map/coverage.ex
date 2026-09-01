@@ -49,7 +49,7 @@ defmodule Swarm.WorldMap.Coverage do
 
   # Query cue for a procedure ask ("how do I X", "steps to Y", "reset Z"). A cue is
   # necessary but NOT sufficient — a clean procedure variant must also exist in structure.
-  @procedure_cue ~r/\b(how\s+(do|to|can|would|should)|steps?|procedure|reset|configure|set\s?up|install|enable|disable|troubleshoot|provision|deploy|restart|rotate)\b/i
+  @procedure_cue ~r/(?:\b(how\s+(do|to|can|would|should)|steps?|procedure|reset|configure|set\s?up|install|enable|disable|troubleshoot|provision|deploy|restart|rotate)\b|(?<![\p{L}\p{N}_])((як|як\s+.+\s)(налаштувати|сконфігурувати|конфігурувати|встановити|інсталювати|підключити|увімкнути|вимкнути|скинути|перезапустити|розгорнути|задеплоїти|вирішити|полагодити|діагностувати)|налаштувати|сконфігурувати|конфігурувати|встановити|інсталювати|підключити|увімкнути|вимкнути|скинути|перезапустити|розгорнути|задеплоїти|вирішити|полагодити|діагностувати|інструкці[яї]|кроки)(?![\p{L}\p{N}_]))/iu
 
   # The neighborhood-domain cues (network / who / …) live in the serve-domain CONTRACT
   # (`Swarm.WorldMap.Domain`) — one source per domain, so a new domain can't drift. Checked AFTER the

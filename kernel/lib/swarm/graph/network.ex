@@ -94,16 +94,20 @@ defmodule Swarm.Graph.Network do
     end)
   end
 
+  @candidate_relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address has_outbound_ip_address)
+
   @stopwords ~w(the a an of to and or for with about how what which why who when where is are was
                 were do does did can could should would from your you my our this that these those
                 into out get set new list show tell me connected connect behind carried carry
                 carries contains contain hosted host route routes via terminates)
 
   @doc """
-  Network-entity CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
-  in-scope `net:<kind>:<name>` entities whose name shares a significant term with the query AND
-  that carry ≥1 non-`is_a`, non-refuted relation edge. Ranked by term-overlap, bounded. The gate
-  probes these directly (like `Procedure.candidates/3`). `opts`: `:limit` (default 8).
+  Network-bearing CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
+  in-scope entities whose name shares a significant term with the query AND that carry ≥1 governed
+  network relation edge. Most are namespaced `net:<kind>:<name>` nodes, but document-extracted
+  service/runner entities can also own direct address facts (`has_outbound_ip_address`). Ranked by
+  term-overlap, bounded. The gate probes these directly (like `Procedure.candidates/3`). `opts`:
+  `:limit` (default 8).
   """
   @spec candidates(String.t(), [String.t()], keyword()) :: [String.t()]
   def candidates(query, scopes, opts \\ [])
@@ -124,22 +128,23 @@ defmodule Swarm.Graph.Network do
         Repo.query!(
           """
           SELECT ent.key,
-                 (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
+                 (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap,
+                 CASE WHEN ent.key LIKE 'net:%' THEN 1 ELSE 0 END AS is_net
             FROM node ent
-           WHERE ent.type = 'entity' AND ent.scope = ANY($1) AND ent.key LIKE 'net:%'
+           WHERE ent.type = 'entity' AND ent.scope = ANY($1)
              AND lower(ent.key) LIKE ANY($3::text[])
              AND EXISTS (
                SELECT 1 FROM edge e
-                WHERE e.src = ent.id AND e.type <> 'is_a' AND e.reward >= 0
+                WHERE e.src = ent.id AND e.type = ANY($4) AND e.reward >= 0
                   AND e.visibility_scope = ANY($1)
              )
-           ORDER BY overlap DESC, ent.key
+           ORDER BY overlap DESC, is_net ASC, ent.key
            LIMIT $2
           """,
-          [scopes, limit, likes]
+          [scopes, limit, likes, @candidate_relations]
         )
 
-      Enum.map(rows, fn [key, _o] -> key end)
+      Enum.map(rows, fn [key, _overlap, _is_net] -> key end)
     end
   end
 
@@ -180,6 +185,7 @@ defmodule Swarm.Graph.Network do
     rows
     |> Enum.map(fn [type, dkey, seen, rel, age] ->
       age = age || 0.0
+
       %{
         relation: type,
         object: strip_ns(dkey),
