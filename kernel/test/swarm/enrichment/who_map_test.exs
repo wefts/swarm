@@ -20,6 +20,18 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
   defp node_id(key), do: Repo.query!("SELECT id FROM node WHERE key = $1", [key]).rows
 
+  defp set_edge_seen!(type, src_key, seen_at) do
+    Repo.query!(
+      """
+      UPDATE edge e
+         SET last_seen = $3::timestamptz, updated_at = $3::timestamptz
+        FROM node s
+       WHERE e.src = s.id AND e.type = $1 AND s.key = $2
+      """,
+      [type, src_key, seen_at]
+    )
+  end
+
   describe "write/4 — namespaced entities, is_a markers, governed relations" do
     test "models the 2-level org hierarchy: works_in ENTITY (org) + member_of TEAM" do
       ids =
@@ -321,6 +333,49 @@ defmodule Swarm.Enrichment.WhoMapTest do
       assert WhoMap.display_subject("who:person:jdoe") == "Jane Doe"
       # a non-person subject falls back to the canonical tail
       assert WhoMap.display_subject("who:team:platform") == "platform"
+    end
+
+    test "freshness frontier is relation-class scoped, not global edge max" do
+      a = anchor()
+
+      WhoMap.write(
+        a,
+        [
+          fact("older", "person", "managed_by", "lead", "person"),
+          fact("peer", "person", "managed_by", "lead", "person")
+        ],
+        "frontier"
+      )
+
+      WhoMap.write_profile(%{"uid" => "lead", "cn" => "Lead Person"}, "frontier",
+        scope: @who_scope
+      )
+
+      # Normalize every edge first so incidental is_a timestamps cannot become the global frontier.
+      Repo.query!(
+        "UPDATE edge SET last_seen = $1::timestamptz, updated_at = $1::timestamptz",
+        [~U[2026-01-01 00:00:00Z]]
+      )
+
+      # The target configuration-class WHO fact is old, but still fresh relative to the newest
+      # configuration-class edge: 20 days < the 30-day configuration serve floor.
+      set_edge_seen!("managed_by", "who:person:older", ~U[2026-01-01 00:00:00Z])
+      set_edge_seen!("managed_by", "who:person:peer", ~U[2026-01-21 00:00:00Z])
+
+      # A fresh unrelated structural edge anywhere in the graph used to advance the global frontier
+      # to 40 days after the target fact, making the configuration fact stale incorrectly.
+      site = Store.upsert_node("entity", "net:site:remote", scope: @who_scope)
+      rack = Store.upsert_node("entity", "net:rack:remote-a", scope: @who_scope)
+
+      assert {:ok, _edge} =
+               Store.add_edge(site, rack, "contains", "structural-frontier", scope: @who_scope)
+
+      set_edge_seen!("contains", "net:site:remote", ~U[2026-02-10 00:00:00Z])
+
+      assert Enum.any?(
+               WhoMap.neighborhood("who:person:older", [@who_scope]),
+               &match?(%{relation: "managed_by", object: "Lead Person"}, &1)
+             )
     end
 
     test "candidates: a surname doesn't get hijacked by a short site code (dupont ≠ site 'dup')" do

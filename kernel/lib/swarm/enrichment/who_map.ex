@@ -352,6 +352,8 @@ defmodule Swarm.Enrichment.WhoMap do
   def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
     min_corr = Keyword.get(opts, :min_corroboration, 1)
     freshness? = Keyword.get(opts, :freshness, true)
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
 
     # Both directions in one pass: `dir` marks whether `key` was the src (outgoing) or dst
     # (incoming); `other` is always the OTHER endpoint (the answer). `cn` is the other endpoint's
@@ -359,12 +361,19 @@ defmodule Swarm.Enrichment.WhoMap do
     %{rows: rows} =
       Repo.query!(
         """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
         SELECT e.type, other.key, e.seen_count, e.reliability::float8,
-               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec,
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec,
                substring(c.body from 'name: ([^\n]*)') AS cn,
                (e.src = self0.id) AS outgoing
           FROM node self0
           JOIN edge e ON (e.src = self0.id OR e.dst = self0.id)
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node other ON other.id = CASE WHEN e.src = self0.id THEN e.dst ELSE e.src END
           LEFT JOIN content c ON c.node_id = other.id
          WHERE self0.key = $1 AND e.type <> 'is_a' AND e.reward >= 0
