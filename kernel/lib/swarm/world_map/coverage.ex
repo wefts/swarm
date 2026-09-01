@@ -140,7 +140,8 @@ defmodule Swarm.WorldMap.Coverage do
     # the entity path is calibrated (its own go/no-go). `entity_serve: true` opts back in.
     entity_serve = Keyword.get(opts, :entity_serve, false)
 
-    cue? = Regex.match?(@procedure_cue, query)
+    semantic_route = Keyword.get(opts, :semantic_route, :none)
+    cue? = Regex.match?(@procedure_cue, query) or semantic_route == :procedure
 
     # Pick the BEST-matching procedure ENTITY (candidate_keys are overlap-RANKED, best first),
     # not the union of all — different candidate entities are DIFFERENT procedures, so unioning
@@ -183,8 +184,11 @@ defmodule Swarm.WorldMap.Coverage do
   # order exactly). `nil` ⇒ no neighborhood domain covers the query.
   @spec active_neighborhood(String.t(), keyword()) :: Domain.t() | nil
   defp active_neighborhood(query, opts) do
+    semantic_route = Keyword.get(opts, :semantic_route, :none)
+
     Enum.find(Domain.neighborhood_domains(), fn dom ->
-      Keyword.get(opts, dom.serve_opt, false) and Regex.match?(dom.cue, query)
+      Keyword.get(opts, dom.serve_opt, false) and
+        (Regex.match?(dom.cue, query) or semantic_route == {:neighborhood, dom.key})
     end)
   end
 

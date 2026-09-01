@@ -10,6 +10,9 @@ defmodule Swarm.Graph.NetworkTest do
   alias Swarm.Graph.Store
 
   @net_scope Swarm.GraphCase.test_src()
+  @dim Swarm.Config.embedding_dim()
+
+  defp vecn(i), do: for(j <- 0..(@dim - 1), do: if(j == i, do: 1.0, else: 0.0))
 
   defp src_node(scope),
     do: %{id: Store.upsert_node("article", "net-read-src", scope: scope), scope: scope}
@@ -83,6 +86,55 @@ defmodule Swarm.Graph.NetworkTest do
 
     assert ["Nebula CI runners"] =
              Network.candidates("Яке публічне IP у nebula runners?", [@net_scope])
+  end
+
+  test "candidates/3 uses vector fallback for held-out paraphrases and keeps scope fences" do
+    site = Store.upsert_node("entity", "net:site:example-alpha", scope: @net_scope)
+    address = Store.upsert_node("entity", "192.0.2.44", scope: @net_scope)
+
+    Swarm.Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [site, Pgvector.new(vecn(5))])
+
+    {:ok, _} =
+      Store.add_edge(site, address, "has_address", "example.test:net",
+        scope: @net_scope,
+        origin: "example.test:net",
+        evidence_kind: "claim",
+        source_node_id: site
+      )
+
+    assert ["net:site:example-alpha"] =
+             Network.candidates("How is the site addressed internally?", [@net_scope],
+               query_vec: vecn(5)
+             )
+
+    assert Network.candidates("How is the site addressed internally?", ["public"],
+             query_vec: vecn(5)
+           ) == []
+  end
+
+  test "candidates/3 uses vector-nearest scoped nodes to seed unembedded net keys" do
+    site = Store.upsert_node("entity", "net:site:example-beta", scope: @net_scope)
+    address = Store.upsert_node("entity", "192.0.2.45", scope: @net_scope)
+    article = Store.upsert_node("article", "Example Beta", scope: @net_scope)
+
+    Swarm.Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [article, Pgvector.new(vecn(6))])
+
+    {:ok, _} =
+      Store.add_edge(site, address, "has_address", "example.test:net",
+        scope: @net_scope,
+        origin: "example.test:net",
+        evidence_kind: "claim",
+        source_node_id: site
+      )
+
+    assert "net:site:example-beta" in Network.candidates(
+             "Яке публічне IP у тестової бети?",
+             [@net_scope],
+             query_vec: vecn(6)
+           )
+
+    assert Network.candidates("Яке публічне IP у тестової бети?", ["public"], query_vec: vecn(6)) ==
+             []
   end
 
   test "neighborhood/3 S2: a STALE fact (old last_seen vs frontier) is filtered from serve" do

@@ -99,7 +99,8 @@ defmodule Swarm.Graph.Network do
   @stopwords ~w(the a an of to and or for with about how what which why who when where is are was
                 were do does did can could should would from your you my our this that these those
                 into out get set new list show tell me connected connect behind carried carry
-                carries contains contain hosted host route routes via terminates)
+                carries contains contain hosted host route routes via terminates public private
+                internal external address addresses ip ips)
 
   @doc """
   Network-bearing CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
@@ -116,36 +117,90 @@ defmodule Swarm.Graph.Network do
   def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
+    qvec = query_vec(opts)
 
-    if terms == [] do
-      []
-    else
-      # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
-      # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
-      likes = Enum.map(terms, &("%" <> &1 <> "%"))
+    lexical =
+      if terms == [] do
+        []
+      else
+        lexical_candidates(terms, scopes, limit)
+      end
 
-      %{rows: rows} =
-        Repo.query!(
-          """
-          SELECT ent.key,
-                 (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap,
-                 CASE WHEN ent.key LIKE 'net:%' THEN 1 ELSE 0 END AS is_net
-            FROM node ent
-           WHERE ent.type = 'entity' AND ent.scope = ANY($1)
-             AND lower(ent.key) LIKE ANY($3::text[])
-             AND EXISTS (
-               SELECT 1 FROM edge e
-                WHERE e.src = ent.id AND e.type = ANY($4) AND e.reward >= 0
-                  AND e.visibility_scope = ANY($1)
-             )
-           ORDER BY overlap DESC, is_net ASC, ent.key
-           LIMIT $2
-          """,
-          [scopes, limit, likes, @candidate_relations]
-        )
+    vector = if qvec, do: vector_candidates(qvec, scopes, limit), else: []
+    Enum.uniq(lexical ++ vector) |> Enum.take(limit)
+  end
 
-      Enum.map(rows, fn [key, _overlap, _is_net] -> key end)
-    end
+  defp lexical_candidates(terms, scopes, limit) do
+    # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
+    # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
+    likes = Enum.map(terms, &("%" <> &1 <> "%"))
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key,
+               (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap,
+               CASE WHEN ent.key LIKE 'net:%' THEN 1 ELSE 0 END AS is_net
+          FROM node ent
+         WHERE ent.type = 'entity' AND ent.scope = ANY($1)
+           AND lower(ent.key) LIKE ANY($3::text[])
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = ANY($4) AND e.reward >= 0
+                AND e.visibility_scope = ANY($1)
+           )
+         ORDER BY overlap DESC, is_net ASC, ent.key
+         LIMIT $2
+        """,
+        [scopes, limit, likes, @candidate_relations]
+      )
+
+    Enum.map(rows, fn [key, _overlap, _is_net] -> key end)
+  end
+
+  defp vector_candidates(qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key
+          FROM node ent
+         WHERE ent.type = 'entity' AND ent.scope = ANY($1)
+           AND ent.vec IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = ANY($3) AND e.reward >= 0
+                AND e.visibility_scope = ANY($1)
+           )
+         ORDER BY ent.vec <=> $4
+         LIMIT $2
+        """,
+        [scopes, limit, @candidate_relations, qvec]
+      )
+
+    direct = Enum.map(rows, fn [key] -> key end)
+
+    seed_terms =
+      qvec
+      |> vector_seed_keys(scopes, min(limit, 6))
+      |> Enum.flat_map(&query_terms/1)
+
+    Enum.uniq(lexical_candidates(seed_terms, scopes, limit) ++ direct)
+  end
+
+  defp vector_seed_keys(qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT n.key
+          FROM node n
+         WHERE n.scope = ANY($1) AND n.vec IS NOT NULL
+         ORDER BY n.vec <=> $3
+         LIMIT $2
+        """,
+        [scopes, limit, qvec]
+      )
+
+    Enum.map(rows, fn [key] -> key end)
   end
 
   @doc """
@@ -219,6 +274,13 @@ defmodule Swarm.Graph.Network do
     |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
     |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
     |> Enum.uniq()
+  end
+
+  defp query_vec(opts) do
+    case Keyword.get(opts, :query_vec) do
+      [_ | _] = vec -> Pgvector.new(vec)
+      _ -> nil
+    end
   end
 
   # `net:<kind>:<name>` → %{key, kind, name}. A malformed key degrades gracefully to kind "entity".

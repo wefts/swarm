@@ -323,6 +323,25 @@ defmodule Swarm.WorldMap.CoverageTest do
                Coverage.validate(d)
     end
 
+    test "semantic network route recovers a held-out paraphrase with no lexical cue" do
+      facts = [net_fact("has_address", "192.0.2.10")]
+
+      d =
+        Coverage.describe("How is the site addressed internally?", [@network_scope],
+          semantic_route: {:neighborhood, :network},
+          network_serve: true,
+          network_keys: ["net:site:example-alpha"],
+          network_fun: net_fun(facts),
+          network_min_corroboration: 1
+        )
+
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+
+      assert {:ok, %Validated{intent: :neighborhood, domain: :network, atoms: ^facts}} =
+               Coverage.validate(d)
+    end
+
     test "no candidate → :no_candidate → escalate" do
       d =
         Coverage.describe("what subnets does the orbit tunnel carry", [@network_scope],

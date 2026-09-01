@@ -11,6 +11,9 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
   # ADR-20: the who facts are written at the ANCHOR's scope (the registered LDAP Source).
   @who_scope Swarm.GraphCase.test_src()
+  @dim Swarm.Config.embedding_dim()
+
+  defp vecn(i), do: for(j <- 0..(@dim - 1), do: if(j == i, do: 1.0, else: 0.0))
 
   defp anchor,
     do: %{id: Store.upsert_node("source", "ldap:directory", scope: @who_scope), scope: @who_scope}
@@ -413,6 +416,23 @@ defmodule Swarm.Enrichment.WhoMapTest do
 
       # scope-fenced
       assert WhoMap.candidates("Jane Doe", ["public"]) == []
+    end
+
+    test "candidates/3 uses vector fallback for held-out contact phrasing and keeps scope fences" do
+      a = anchor()
+      WhoMap.write(a, [fact("u1", "person", "in_group", "platform", "group")], "p")
+      [[group_id]] = node_id("who:group:platform")
+
+      Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [group_id, Pgvector.new(vecn(9))])
+
+      assert ["who:group:platform"] =
+               WhoMap.candidates("who should I contact for this service?", [@who_scope],
+                 query_vec: vecn(9)
+               )
+
+      assert WhoMap.candidates("who should I contact for this service?", ["public"],
+               query_vec: vecn(9)
+             ) == []
     end
 
     test "candidates/2 resolves role-family + employment despite plurals and 2-char acronyms" do

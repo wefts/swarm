@@ -44,7 +44,7 @@ defmodule Swarm.WorldMap.Domain do
           # neighborhood-domain fields (nil for non-neighborhood domains)
           neighborhood_fun: (String.t(), [String.t()], keyword() -> [map()]) | nil,
           subject_fun: (String.t() -> String.t()) | nil,
-          candidates_fun: (String.t(), [String.t()] -> [String.t()]) | nil,
+          candidates_fun: (String.t(), [String.t()], keyword() -> [String.t()]) | nil,
           serve_opt: atom() | nil,
           display_label: String.t() | nil,
           order: pos_integer() | nil
@@ -59,7 +59,8 @@ defmodule Swarm.WorldMap.Domain do
                            ~s|carries, what a host/subnet is protected by, what a cluster contains, | <>
                            ~s|where a tunnel terminates, or the public/outbound/egress IP address | <>
                            ~s|of a host, service, or runner. Relation names may use underscores; | <>
-                           ~s|`has_outbound_ip_address` answers a public/outbound IP ask. Answer | <>
+                           ~s|`has_outbound_ip_address` answers a public/outbound IP ask, and | <>
+                           ~s|`has_address` answers a private/internal IP or address ask. Answer | <>
                            ~s|sufficient=false if the facts are | <>
                            ~s|about a DIFFERENT entity or a DIFFERENT relation than asked, or do | <>
                            ~s|not contain the asked fact (e.g. asks a public IP, facts give only | <>
@@ -92,7 +93,8 @@ defmodule Swarm.WorldMap.Domain do
                        ~s|profile — "who is X"), facts describing THAT person (their title, team, | <>
                        ~s|org, role, manager, or location) ARE sufficient — they say who the person | <>
                        ~s|is. | <>
-                       ~s|If the question asks who owns/manages/runs a SERVICE, a fact stating that | <>
+                       ~s|If the question asks who owns/manages/runs/supports/looks after a SERVICE, | <>
+                       ~s|or who to contact for that SERVICE, a fact stating that | <>
                        ~s|service is managed_by_team <TEAM> is sufficient (the team is the answer). | <>
                        ~s|Answer ONLY JSON: {"sufficient": true} or {"sufficient": false}.|
 
@@ -130,7 +132,7 @@ defmodule Swarm.WorldMap.Domain do
       relations: @network_relations,
       neighborhood_fun: &Swarm.Graph.Network.neighborhood/3,
       subject_fun: &network_subject/1,
-      candidates_fun: &Swarm.Graph.Network.candidates/2,
+      candidates_fun: &Swarm.Graph.Network.candidates/3,
       serve_opt: :network_serve,
       display_label: "Network",
       order: 2
@@ -154,7 +156,7 @@ defmodule Swarm.WorldMap.Domain do
       relations: @who_relations,
       neighborhood_fun: &Swarm.Enrichment.WhoMap.neighborhood/3,
       subject_fun: &Swarm.Enrichment.WhoMap.display_subject/1,
-      candidates_fun: &Swarm.Enrichment.WhoMap.candidates/2,
+      candidates_fun: &Swarm.Enrichment.WhoMap.candidates/3,
       serve_opt: :who_serve,
       display_label: "Directory",
       order: 1

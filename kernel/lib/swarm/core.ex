@@ -14,6 +14,7 @@ defmodule Swarm.Core do
   alias Swarm.{Activity, Consilium, Conversations, Deliberation, Gate, Repo}
   alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
+  alias Swarm.WorldMap.SemanticRouter
 
   require Logger
 
@@ -473,42 +474,15 @@ defmodule Swarm.Core do
       # keys still lead — active_keys only fill in what the query text alone can't.
       # No new no-leak surface: a bogus/foreign-scoped key here simply fails the
       # gate's existing scope+evidence checks below, same as a wrong guess would.
-      candidate_keys =
-        Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits) ++ active_keys(opts))
+      descriptor = coverage_descriptor(query, scopes, hits, profile, opts, :cheap)
 
-      # Neighborhood serve paths (network, who, …) are registry-driven (E2b): for each domain in
-      # `Domain.neighborhood_domains/0`, probe its OWN candidate source (net:<kind>:<name> via
-      # Network.candidates; who:<kind>:<name> — persons by profile content, teams/roles/sites by key
-      # — via WhoMap.candidates), and read its serve flag + corroboration floor from config. A new
-      # neighborhood domain = one Domain registry entry, no wiring here. Flat `<key>_*` opts are what
-      # Coverage.describe/3 expects.
-      #
-      # `active_keys(opts)` is unioned into EVERY domain's own candidates here too (chat-thread
-      # epic 2, live-verify finding): the generic `candidate_keys` above feeds Procedure/hit_keys
-      # only — a neighborhood domain reads its candidates from THIS opt, a wholly separate pool,
-      # so without this union a pronoun follow-up ("who manages it?") that matches a domain's cue
-      # but carries no key of its own would never see the previous turn's key at all. A
-      # wrong-domain/foreign key here is harmless: Stage 1 (`Coverage.validate/1`) only mints a
-      # `Validated` when the key actually resolves to real neighborhood facts IN that domain.
-      neighborhood_opts =
-        Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
-          [
-            {:"#{dom.key}_keys",
-             Enum.uniq(dom.candidates_fun.(query, scopes) ++ active_keys(opts))},
-            {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
-            {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
-          ]
-        end)
-
-      descriptor =
-        WorldMap.Coverage.describe(
-          query,
-          scopes,
-          [candidate_keys: candidate_keys, profile: profile, entity_serve: entity_serve?(opts)] ++
-            neighborhood_opts
-        )
-
-      run_gate(descriptor, opts)
+      if semantic_fallback?(descriptor) do
+        semantic = SemanticRouter.route(query, opts)
+        descriptor = coverage_descriptor(query, scopes, hits, profile, opts, semantic)
+        run_gate(descriptor, opts)
+      else
+        run_gate(descriptor, opts)
+      end
     else
       :escalate
     end
@@ -519,6 +493,46 @@ defmodule Swarm.Core do
     e ->
       Logger.warning("world-map gate: coverage probe failed (#{inspect(e)}) — escalating")
       :escalate
+  end
+
+  defp coverage_descriptor(query, scopes, hits, profile, opts, semantic) do
+    {semantic_route, candidate_opts} =
+      case semantic do
+        %{route: route, query_vec: vec} -> {route, [query_vec: vec]}
+        _ -> {:none, []}
+      end
+
+    candidate_keys =
+      Enum.uniq(
+        Procedure.candidates(query, scopes, candidate_opts) ++ hit_keys(hits) ++ active_keys(opts)
+      )
+
+    neighborhood_opts =
+      Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
+        [
+          {:"#{dom.key}_keys",
+           Enum.uniq(dom.candidates_fun.(query, scopes, candidate_opts) ++ active_keys(opts))},
+          {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
+          {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
+        ]
+      end)
+
+    WorldMap.Coverage.describe(
+      query,
+      scopes,
+      [
+        candidate_keys: candidate_keys,
+        profile: profile,
+        entity_serve: entity_serve?(opts),
+        semantic_route: semantic_route
+      ] ++ neighborhood_opts
+    )
+  end
+
+  defp semantic_fallback?(%WorldMap.Coverage.Descriptor{intent: :unknown}), do: true
+
+  defp semantic_fallback?(%WorldMap.Coverage.Descriptor{blockers: blockers}) do
+    Enum.any?(blockers, &(&1 in [:no_candidate, :no_corroboration]))
   end
 
   # Run the (LLM-bearing) sufficiency check under a NOLINK task bounded to the breaker:
