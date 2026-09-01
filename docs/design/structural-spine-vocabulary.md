@@ -202,6 +202,48 @@ Open options:
 Until an ADR settles this, extraction should prefer conservative omission over a
 flat edge that transfers a fact across conditions.
 
+## Anchor Types and Typing
+
+The structural spine needs a small set of anchor concepts in addition to the
+relation vocabulary. These are not new graph node types yet. They are governed
+concept nodes used through `instance_of`.
+
+Initial anchor set:
+
+| Anchor Concept | Evidence Shape | Required Structural Questions |
+| --- | --- | --- |
+| `concept:platform` | Human-maintained corpus sections group large internal platforms and their components. | What does the platform contain? What depends on the platform? What breaks if the platform is unavailable? |
+| `concept:network-area` | The existing network map and corpus hierarchy already separate gateways, routes, addresses, and agency/site networking. | Which gateway carries an area? What is behind a gateway? Which services depend on this network area? |
+| `concept:service` | Corpus sections and extracted entities distinguish user-facing and SaaS-style services from platforms and infrastructure. | Who operates the service? Where is the service hosted? What does the service depend on? |
+| `concept:procedure` | Procedure sections and the existing procedure serve path already model ordered operational actions. | How is a task performed? Which procedure applies to a service? What breaks when a procedure is missing or stale? |
+| `concept:technology` | Technology names appear frequently in the ingested corpus, but not as one top-level CMS container. Use the broader technology anchor instead of a narrow CMS anchor. | What is known about a technology? Which services use it? Which known issues attach to it? |
+
+Rejected narrow anchor: `concept:cms`. CMS is too specific for the first pass.
+It may become a child concept of `concept:technology` after extraction proves a
+stable corpus distinction between CMS, framework, runtime, and cloud provider.
+
+Typing rule:
+
+```text
+subject instance_of concept:platform
+subject instance_of concept:service
+subject instance_of concept:technology
+```
+
+Use `instance_of concept:<anchor>` first, rather than extending
+`Swarm.Graph.Contract.types/0`.
+
+Reasons:
+
+- It keeps the closed node-type contract stable while the anchor set is still
+  being calibrated.
+- It reuses the proposed relation vocabulary instead of creating a second typing
+  channel.
+- It allows multiple compatible types on one referent, such as a service that is
+  also a technology-specific deployment.
+- It can be promoted later to contract-level node types if live measurements show
+  that stricter validation is worth the migration.
+
 ## ADR Proposal: Relation Contract Tightening
 
 If implementation shows discipline is not enough, propose an ADR to make
