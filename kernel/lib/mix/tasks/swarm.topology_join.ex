@@ -112,8 +112,29 @@ defmodule Mix.Tasks.Swarm.TopologyJoin do
       Mix.shell().info(
         "#{row.src} --#{row.relation}--> #{row.dst} " <>
           "edge=#{row.edge_id} seen=#{row.seen_count} reliability=#{Float.round(row.reliability || 0.0, 3)} " <>
-          "origins=#{inspect(row.origins)} evidence=#{inspect(row.evidence)}"
+          "origins=#{inspect(row.origins)} evidence=#{inspect(row.evidence)}" <>
+          cluster_context(row)
       )
     end)
   end
+
+  defp cluster_context(%{cluster_context: []}), do: ""
+  defp cluster_context(%{cluster_context: nil}), do: ""
+
+  defp cluster_context(%{cluster_context: contexts}) when is_list(contexts) do
+    rendered =
+      contexts
+      |> Enum.map(fn context ->
+        cluster = Map.fetch!(context, :cluster)
+        routed = Map.fetch!(context, :routed_members)
+        total = Map.fetch!(context, :total_members)
+
+        "cluster=#{cluster} routed_hosts=#{routed}/#{total}"
+      end)
+      |> Enum.join(",")
+
+    " cluster_context=[#{rendered}]"
+  end
+
+  defp cluster_context(%{}), do: ""
 end

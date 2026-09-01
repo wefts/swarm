@@ -7,8 +7,8 @@ defmodule Swarm.Enrichment.TopologyJoin do
 
   * `net:site:* contains net:cluster:*` when a cluster host address falls inside a
     site range.
-  * `net:cluster:* routes_via net:gateway:*` when a cluster host address falls
-    inside a range carried by a gateway.
+  * `net:host:* routes_via net:gateway:*` when that host's address falls inside
+    a range carried by a gateway.
   * `alias_of` bridges for exact IP/FQDN cross-namespace duplicate keys.
   * `net:cluster:<platform> contains net:cluster:<platform>-<env>` for governed
     environment variants, while recording do-not-merge blockers.
@@ -72,7 +72,16 @@ defmodule Swarm.Enrichment.TopologyJoin do
 
     Repo.query!(
       """
-      SELECT e.id, s.key, e.type, d.key, e.reliability::float8, e.seen_count,
+      WITH routed_hosts AS (
+        SELECT DISTINCT e.src AS host_id
+          FROM edge e
+          JOIN node g ON g.id = e.dst
+         WHERE g.key = $1
+           AND e.type IN ('routes_via', 'egresses_via')
+           AND e.reward >= 0
+           AND e.visibility_scope = ANY($2)
+      )
+      SELECT e.id, s.id, s.key, e.type, d.id, d.key, e.reliability::float8, e.seen_count,
              COALESCE(array_agg(DISTINCT ep.provenance) FILTER (WHERE ep.provenance IS NOT NULL), '{}') AS provenances,
              COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS origins
         FROM edge e
@@ -86,28 +95,122 @@ defmodule Swarm.Enrichment.TopologyJoin do
          AND (
            (s.key = $1 AND e.type IN ('carries', 'contains', 'routes_via', 'egresses_via', 'terminates_at'))
            OR (d.key = $1 AND e.type IN ('routes_via', 'egresses_via', 'terminates_at'))
+           OR (
+             e.type = 'contains'
+             AND s.key LIKE 'net:cluster:%'
+             AND d.key LIKE 'net:host:%'
+             AND d.id IN (SELECT host_id FROM routed_hosts)
+           )
          )
-       GROUP BY e.id, s.key, e.type, d.key, e.reliability, e.seen_count
+       GROUP BY e.id, s.id, s.key, e.type, d.id, d.key, e.reliability, e.seen_count
        ORDER BY s.key, e.type, d.key
       """,
       [gateway, scopes]
     ).rows
-    |> Enum.map(fn [id, src, rel, dst, reliability, seen, provenances, origins] ->
-      %{
-        edge_id: id,
-        src: src,
-        relation: rel,
-        dst: dst,
-        reliability: reliability,
-        seen_count: seen,
-        evidence: Enum.sort(provenances),
-        origins: Enum.sort(origins)
-      }
+    |> then(fn rows ->
+      context_by_host = cluster_context_by_host(gateway, scopes)
+
+      Enum.map(rows, fn [
+                          id,
+                          src_id,
+                          src,
+                          rel,
+                          dst_id,
+                          dst,
+                          reliability,
+                          seen,
+                          provenances,
+                          origins
+                        ] ->
+        cluster_context =
+          cond do
+            kind(src) == "host" -> Map.get(context_by_host, src_id, [])
+            kind(dst) == "host" -> Map.get(context_by_host, dst_id, [])
+            true -> []
+          end
+
+        %{
+          edge_id: id,
+          src: src,
+          relation: rel,
+          dst: dst,
+          reliability: reliability,
+          seen_count: seen,
+          evidence: Enum.sort(provenances),
+          origins: Enum.sort(origins),
+          cluster_context: cluster_context
+        }
+      end)
+    end)
+  end
+
+  defp cluster_context_by_host(gateway, scopes) do
+    Repo.query!(
+      """
+      WITH routed_hosts AS (
+        SELECT DISTINCT e.src AS host_id
+          FROM edge e
+          JOIN node g ON g.id = e.dst
+         WHERE g.key = $1
+           AND e.type IN ('routes_via', 'egresses_via')
+           AND e.reward >= 0
+           AND e.visibility_scope = ANY($2)
+      ),
+      cluster_members AS (
+        SELECT e.src AS cluster_id, c.key AS cluster_key, e.dst AS host_id
+          FROM edge e
+          JOIN node c ON c.id = e.src
+          JOIN node h ON h.id = e.dst
+         WHERE e.type = 'contains'
+           AND e.reward >= 0
+           AND e.visibility_scope = ANY($2)
+           AND c.scope = ANY($2)
+           AND h.scope = ANY($2)
+           AND c.key LIKE 'net:cluster:%'
+           AND h.key LIKE 'net:host:%'
+      ),
+      cluster_counts AS (
+        SELECT cluster_id, count(*) AS member_count
+          FROM cluster_members
+         GROUP BY cluster_id
+      ),
+      routed_counts AS (
+        SELECT cm.cluster_id, count(*) AS routed_member_count
+          FROM cluster_members cm
+          JOIN routed_hosts rh ON rh.host_id = cm.host_id
+         GROUP BY cm.cluster_id
+      )
+      SELECT cm.host_id,
+             cm.cluster_key,
+             cc.member_count,
+             rc.routed_member_count
+        FROM cluster_members cm
+        JOIN routed_hosts routed ON routed.host_id = cm.host_id
+        JOIN cluster_counts cc ON cc.cluster_id = cm.cluster_id
+        JOIN routed_counts rc ON rc.cluster_id = cm.cluster_id
+       ORDER BY cm.host_id, cm.cluster_key
+      """,
+      [gateway, scopes]
+    ).rows
+    |> Enum.group_by(fn [host_id, _cluster_key, _member_count, _routed_member_count] ->
+      host_id
+    end)
+    |> Map.new(fn {host_id, rows} ->
+      contexts =
+        Enum.map(rows, fn [_host_id, cluster_key, member_count, routed_member_count] ->
+          %{
+            cluster: cluster_key,
+            routed_members: routed_member_count,
+            total_members: member_count
+          }
+        end)
+
+      {host_id, contexts}
     end)
   end
 
   defp topology_join_candidates(rows) do
-    cluster_hosts =
+    cluster_edges_by_host =
       rows
       |> Enum.filter(
         &(&1.type == "contains" and kind(&1.src_key) == "cluster" and kind(&1.dst_key) == "host")
@@ -120,20 +223,34 @@ defmodule Swarm.Enrichment.TopologyJoin do
         &(&1.type in ["has_address", "has_outbound_ip_address"] and kind(&1.src_key) == "host")
       )
       |> Enum.flat_map(fn row ->
-        with {:ok, ip} <- parse_ip(name(row.dst_key)),
-             cluster_edges when cluster_edges != [] <- Map.get(cluster_hosts, row.src_id, []) do
-          Enum.map(cluster_edges, fn cluster_edge ->
-            %{
-              host_key: row.src_key,
-              cluster_id: cluster_edge.src_id,
-              cluster_key: cluster_edge.src_key,
-              ip: ip,
-              evidence: [row, cluster_edge]
-            }
-          end)
-        else
-          _ -> []
+        case parse_ip(name(row.dst_key)) do
+          {:ok, ip} ->
+            [
+              %{
+                host_id: row.src_id,
+                host_key: row.src_key,
+                ip: ip,
+                address_evidence: [row],
+                cluster_edges: Map.get(cluster_edges_by_host, row.src_id, [])
+              }
+            ]
+
+          :error ->
+            []
         end
+      end)
+
+    cluster_host_addresses =
+      Enum.flat_map(host_addresses, fn host ->
+        Enum.map(host.cluster_edges, fn cluster_edge ->
+          %{
+            host_key: host.host_key,
+            cluster_id: cluster_edge.src_id,
+            cluster_key: cluster_edge.src_key,
+            ip: host.ip,
+            evidence: host.address_evidence ++ [cluster_edge]
+          }
+        end)
       end)
 
     site_ranges =
@@ -148,7 +265,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       direct_gateway_ranges(rows) ++ tunnel_gateway_ranges(rows)
 
     site_joins =
-      for host <- host_addresses,
+      for host <- cluster_host_addresses,
           range <- site_ranges,
           in_range?(host.ip, range.range) do
         candidate(
@@ -167,13 +284,13 @@ defmodule Swarm.Enrichment.TopologyJoin do
           range <- gateway_ranges,
           in_range?(host.ip, range.range) do
         candidate(
-          host.cluster_id,
+          host.host_id,
           range.src_id,
           "routes_via",
           range.scope,
-          host.cluster_key,
+          host.host_key,
           range.src_key,
-          range.evidence ++ host.evidence
+          range.evidence ++ host.address_evidence
         )
       end
 

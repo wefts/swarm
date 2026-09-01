@@ -1,6 +1,8 @@
 defmodule Swarm.Enrichment.TopologyJoinTest do
   use Swarm.GraphCase, async: false
 
+  import ExUnit.CaptureIO
+
   alias Swarm.Enrichment.NetworkMap
   alias Swarm.Enrichment.TopologyJoin
   alias Swarm.Graph.Store
@@ -27,13 +29,20 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
     )
   end
 
-  test "derives site and gateway joins from host addresses inside evidenced ranges" do
+  test "derives site joins and host-level gateway joins from host addresses inside evidenced ranges" do
     write([
       %{
         subject: "platform-alpha",
         subject_kind: "cluster",
         relation: "contains",
         object: "app01.example.test",
+        object_kind: "host"
+      },
+      %{
+        subject: "platform-alpha",
+        subject_kind: "cluster",
+        relation: "contains",
+        object: "app02.example.test",
         object_kind: "host"
       },
       %{
@@ -68,15 +77,36 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
         JOIN node s ON s.id = e.src
         JOIN node d ON d.id = e.dst
        WHERE e.type IN ('contains', 'routes_via')
-         AND s.key IN ('net:site:site-alpha', 'net:cluster:platform-alpha')
+         AND s.key IN (
+           'net:site:site-alpha',
+           'net:host:app01.example.test',
+           'net:cluster:platform-alpha'
+         )
          AND d.key IN ('net:cluster:platform-alpha', 'net:gateway:gateway-a')
        ORDER BY s.key, e.type, d.key
       """).rows
 
-    assert ["net:cluster:platform-alpha", "routes_via", "net:gateway:gateway-a", "derived", rel] =
+    assert [
+             "net:host:app01.example.test",
+             "routes_via",
+             "net:gateway:gateway-a",
+             "derived",
+             rel
+           ] =
              Enum.find(rows, &(Enum.at(&1, 1) == "routes_via"))
 
     assert rel >= 0.8
+
+    refute Enum.any?(
+             rows,
+             &(&1 == [
+                 "net:cluster:platform-alpha",
+                 "routes_via",
+                 "net:gateway:gateway-a",
+                 "derived",
+                 rel
+               ])
+           )
 
     assert Enum.any?(
              rows,
@@ -88,6 +118,30 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
                  rel
                ])
            )
+
+    tree = TopologyJoin.gateway_tree("gateway-a", [@scope])
+
+    assert %{
+             cluster_context: [
+               %{cluster: "net:cluster:platform-alpha", routed_members: 1, total_members: 2}
+             ]
+           } =
+             Enum.find(
+               tree,
+               &(&1.src == "net:cluster:platform-alpha" and &1.relation == "contains" and
+                   &1.dst == "net:host:app01.example.test")
+             )
+
+    assert %{
+             cluster_context: [
+               %{cluster: "net:cluster:platform-alpha", routed_members: 1, total_members: 2}
+             ]
+           } =
+             Enum.find(
+               tree,
+               &(&1.src == "net:host:app01.example.test" and &1.relation == "routes_via" and
+                   &1.dst == "net:gateway:gateway-a")
+             )
   end
 
   test "fails closed when the host has no address evidence inside a WAN range" do
@@ -113,7 +167,7 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
     assert Repo.query!("SELECT count(*) FROM edge WHERE type = 'routes_via'").rows == [[0]]
   end
 
-  test "derives gateway joins through tunnel carries plus terminates_at evidence" do
+  test "derives host-level gateway joins through tunnel carries plus terminates_at evidence" do
     write([
       %{
         subject: "platform-alpha",
@@ -149,7 +203,7 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
 
     assert [
              [
-               "net:cluster:platform-alpha",
+               "net:host:app01.example.test",
                "routes_via",
                "net:gateway:gateway-a",
                ["enrich:topology_join"]
@@ -165,6 +219,58 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
               WHERE e.type = 'routes_via'
               GROUP BY s.key, e.type, d.key
              """).rows
+  end
+
+  test "mix task prints host route cluster context as an honest quantifier" do
+    write([
+      %{
+        subject: "platform-alpha",
+        subject_kind: "cluster",
+        relation: "contains",
+        object: "app01.example.test",
+        object_kind: "host"
+      },
+      %{
+        subject: "platform-alpha",
+        subject_kind: "cluster",
+        relation: "contains",
+        object: "app02.example.test",
+        object_kind: "host"
+      },
+      %{
+        subject: "app01.example.test",
+        subject_kind: "host",
+        relation: "has_address",
+        object: "198.51.100.10",
+        object_kind: "address"
+      },
+      %{
+        subject: "gateway-a",
+        subject_kind: "gateway",
+        relation: "carries",
+        object: "198.51.100.0/24",
+        object_kind: "subnet"
+      }
+    ])
+
+    output =
+      capture_io(fn ->
+        Mix.Task.reenable("swarm.topology_join")
+
+        Mix.Tasks.Swarm.TopologyJoin.run([
+          "--scopes",
+          @scope,
+          "--apply",
+          "--gateway",
+          "gateway-a"
+        ])
+      end)
+
+    assert output =~
+             "net:host:app01.example.test --routes_via--> net:gateway:gateway-a"
+
+    assert output =~
+             "cluster_context=[cluster=net:cluster:platform-alpha routed_hosts=1/2]"
   end
 
   test "bridges exact IP and FQDN cross-namespace duplicates with alias_of" do
