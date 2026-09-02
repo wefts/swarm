@@ -131,6 +131,8 @@ config :swarm, :ml_pool,
   backoff_ms: 500,
   backoff_max_ms: 5_000
 
+config :swarm, :ml_prewarm, enabled: false
+
 # Core API: the gRPC endpoint a Channel adapter (CLI, web) speaks to (Domain 11).
 config :swarm, :core_api, port: 50061, start_server: true
 

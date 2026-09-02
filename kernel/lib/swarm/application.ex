@@ -14,6 +14,7 @@ defmodule Swarm.Application do
         {GRPC.Client.Supervisor, []}
       ] ++
         ml_pool() ++
+        ml_prewarm() ++
         [
           # Ingestion (Domain 2): dedup pre-filter, bounded queue, plugin registry.
           Swarm.Ingest.Dedup,
@@ -38,6 +39,19 @@ defmodule Swarm.Application do
   # service. Started after GRPC.Client.Supervisor (its workers depend on it).
   defp ml_pool do
     if Swarm.Config.ml_pool().enabled, do: [Swarm.ML.ChannelPool], else: []
+  end
+
+  # Best-effort model warmup for deployed instances. Disabled in tests and local
+  # shells unless explicitly enabled; Hive enables it so the first browser ask after
+  # a deploy does not pay cold model load inside the gate path.
+  defp ml_prewarm do
+    cfg = Application.get_env(:swarm, :ml_prewarm, [])
+
+    if Keyword.get(cfg, :enabled, false) do
+      [{Swarm.ML.Prewarm, Keyword.take(cfg, [:timeout_ms])}]
+    else
+      []
+    end
   end
 
   # Stagnation watchdog (swarm ADR-12 / T13) — periodically surfaces unclaimed

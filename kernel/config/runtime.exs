@@ -160,6 +160,14 @@ case System.get_env("SWARM_TIER_GATE_TECHNOLOGY_MIN_CORROB") do
     :ok
 end
 
+case System.get_env("SWARM_TIER_GATE_BREAKER_MS") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, breaker_ms: String.to_integer(n)
+
+  _ ->
+    :ok
+end
+
 # Lexical retrieval engine (ADR-0016) — a rebuild-free flip / rollback between the
 # pg_search BM25 arm (`bm25`, the shipped default) and the retained native `ts_rank`
 # arm (`native`). Set `SWARM_LEXICAL_ENGINE=native` to roll back instantly at deploy
@@ -210,6 +218,31 @@ end
 case System.get_env("SWARM_DEFAULT_COHORT_GROUP") do
   nil -> :ok
   v -> config :swarm, :identity, default_cohort: String.trim(v)
+end
+
+case System.get_env("SWARM_CORE_API_START_SERVER") do
+  "false" -> config :swarm, :core_api, start_server: false
+  "true" -> config :swarm, :core_api, start_server: true
+  _ -> :ok
+end
+
+case System.get_env("SWARM_ML_PREWARM") do
+  "true" ->
+    config :swarm, :ml_prewarm, enabled: true
+
+  "false" ->
+    config :swarm, :ml_prewarm, enabled: false
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_ML_PREWARM_TIMEOUT_MS") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :ml_prewarm, timeout_ms: String.to_integer(n)
+
+  _ ->
+    :ok
 end
 
 if config_env() == :test do

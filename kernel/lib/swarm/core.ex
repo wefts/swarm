@@ -491,9 +491,17 @@ defmodule Swarm.Core do
   # --- ADR-17 tier-routing gate (Fork B) wiring ------------------------------
 
   # Never let the gate make an ask SLOWER than pure escalation (spec §3, gemini's
-  # sink-risk): the gate runs under a hard time budget; a timeout or crash escalates,
-  # so the worst case is (budget + consilium), capped — never an unbounded double-pay.
-  @gate_breaker_ms 3000
+  # sink-risk): the Stage-2 entail check runs under a hard time budget; a timeout
+  # or crash escalates, so the worst case is (semantic routing + breaker + consilium),
+  # capped — never an unbounded double-pay.
+  #
+  # Budget note (2026-09-02): after semantic routing entered the gate path, live
+  # Core.ask warm structured probes measured up to ~3.8s end-to-end, and the first
+  # cold post-deploy probe tripped the old 3s breaker before the qwen entail model
+  # finished loading. The breaker bounds the LLM-bearing Stage-2 check only; semantic
+  # embedding happens before it. Keep this ceiling explicit so any new gate stage must
+  # be paid for deliberately.
+  @gate_breaker_default_ms 7_000
 
   @spec try_structured_gate(String.t(), [String.t()], [hit()], Aggregation.profile(), keyword()) ::
           {:serve, answer()} | :escalate
@@ -583,7 +591,9 @@ defmodule Swarm.Core do
         WorldMap.Gate.sufficient?(descriptor, gate_opts)
       end)
 
-    case Task.yield(task, @gate_breaker_ms) || Task.shutdown(task, :brutal_kill) do
+    breaker_ms = gate_breaker_ms()
+
+    case Task.yield(task, breaker_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:serve, %WorldMap.Gate.Answer{} = answer, audit}} ->
         log_gate(audit)
         {:serve, structured_answer(answer)}
@@ -593,12 +603,15 @@ defmodule Swarm.Core do
         :escalate
 
       _timeout_or_crash ->
-        Logger.info(
-          "world-map gate: circuit-break (>#{@gate_breaker_ms}ms or crash) — escalating"
-        )
+        Logger.info("world-map gate: circuit-break (>#{breaker_ms}ms or crash) — escalating")
 
         :escalate
     end
+  end
+
+  defp gate_breaker_ms do
+    Application.get_env(:swarm, :tier_gate, [])
+    |> Keyword.get(:breaker_ms, @gate_breaker_default_ms)
   end
 
   # Map the gate's evidence-closed answer onto the Core `answer()` shape. The gate's own
