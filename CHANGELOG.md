@@ -3,6 +3,26 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.6.0](https://github.com/wefts/swarm/compare/v0.5.0..v0.6.0) - 2026-09-02
+
+### Bug Fixes
+
+- **(core)** gate escalation grounding by relevance - ([46e490c](https://github.com/wefts/swarm/commit/46e490cb42db0cec497ac2f6b2b79d2a31264bed)) - Serhii BOREMCHUK
+- **(core)** prewarm gate fleet and size breaker - ([94f7aca](https://github.com/wefts/swarm/commit/94f7aca5a1e808c18462e45ae2a0b6c2a18c6e1d)) - Serhii BOREMCHUK
+- **(core)** reject mismatched live baselines - ([d2e3b1a](https://github.com/wefts/swarm/commit/d2e3b1aed2bbdbd9b4256539cf04db34b69c7606)) - Serhii BOREMCHUK
+- **(core)** include visibility scopes in baselines - ([8c78aeb](https://github.com/wefts/swarm/commit/8c78aeb8968a0df9ba1f9d628e957fbacf14a09d)) - Serhii BOREMCHUK
+- **(topology)** require explicit staging apply - ([ce3fd55](https://github.com/wefts/swarm/commit/ce3fd556332530be76c956c80910dae88ebe0768)) - Serhii BOREMCHUK
+- **(topology)** derive cross-source routes privately - ([64c2cb7](https://github.com/wefts/swarm/commit/64c2cb7947aa540bfaa0d4919f274390bfa76e8b)) - Serhii BOREMCHUK
+
+### Features
+
+- **(network)** derive route facts at read time - ([e99633c](https://github.com/wefts/swarm/commit/e99633c647642d625638fa8b488fa32143106766)) - Serhii BOREMCHUK
+
+### Tests
+
+- **(core)** add live ask batch runner - ([84b01e0](https://github.com/wefts/swarm/commit/84b01e0a881dfc54392c7ef5e94a18e5bec00326)) - Serhii BOREMCHUK
+
+---
 ## [0.5.0](https://github.com/wefts/swarm/compare/v0.4.0..v0.5.0) - 2026-09-02
 
 ### Bug Fixes
