@@ -179,6 +179,130 @@ defmodule Swarm.Graph.ContractTest do
     end
   end
 
+  describe "governed relation endpoint kinds" do
+    test "accepts a legal governed network relation" do
+      host = add_node!(%{type: "entity", key: "net:host:web-a.example.test", scope: "public"})
+      address = add_node!(%{type: "entity", key: "net:address:192.0.2.10", scope: "public"})
+
+      assert {:ok, _} =
+               Graph.add_edge(host, address, "has_public_address", "ev-net-1", scope: "public")
+
+      assert edge_count() == 1
+    end
+
+    test "rejects an illegal governed network relation with a contract reason" do
+      host = add_node!(%{type: "entity", key: "net:host:web-a.example.test", scope: "public"})
+
+      service =
+        add_node!(%{type: "entity", key: "net:service:frontend.example.test", scope: "public"})
+
+      assert {:error,
+              {:contract,
+               {:relation_endpoint_kinds_mismatch,
+                %{relation: "has_private_address", subject_kinds: subject_kinds}}}} =
+               Graph.add_edge(host, service, "has_private_address", "ev-net-1", scope: "public")
+
+      assert "host" in subject_kinds
+      assert edge_count() == 0
+    end
+
+    test "keeps unknown relation names open" do
+      host = add_node!(%{type: "entity", key: "net:host:web-a.example.test", scope: "public"})
+
+      service =
+        add_node!(%{type: "entity", key: "net:service:frontend.example.test", scope: "public"})
+
+      assert {:ok, _} =
+               Graph.add_edge(host, service, "connector_defined_relation", "ev-open-1",
+                 scope: "public"
+               )
+
+      assert edge_count() == 1
+    end
+
+    test "treats article nodes as pages for page relation contracts" do
+      article = add_node!(%{type: "article", key: "docs/page-a", scope: "public"})
+      step = add_node!(%{type: "step", key: "docs/page-a#step-1", scope: "public"})
+
+      assert {:ok, _} =
+               Graph.add_edge(article, step, "has_step", "ev-page-1",
+                 scope: "public",
+                 step_ordinal: 1
+               )
+
+      assert edge_count() == 1
+    end
+
+    test "treats entity subjects as procedures only for has_step edges to step nodes" do
+      procedure =
+        add_node!(%{type: "entity", key: "reset example.test password", scope: "public"})
+
+      step = add_node!(%{type: "step", key: "open the example.test portal", scope: "public"})
+
+      concept =
+        add_node!(%{
+          type: "concept",
+          key: "open the example.test portal concept",
+          scope: "public"
+        })
+
+      assert {:ok, _} =
+               Graph.add_edge(procedure, step, "has_step", "ev-proc-1",
+                 scope: "public",
+                 step_ordinal: 1
+               )
+
+      assert {:error,
+              {:contract,
+               {:relation_endpoint_kinds_mismatch,
+                %{relation: "has_step", object_kinds: object_kinds}}}} =
+               Graph.add_edge(procedure, concept, "has_step", "ev-proc-2",
+                 scope: "public",
+                 step_ordinal: 2
+               )
+
+      refute "step" in object_kinds
+      assert edge_count() == 1
+    end
+
+    test "alias_of accepts the same inferred kind and rejects host-to-gateway aliases" do
+      host_a = add_node!(%{type: "entity", key: "net:host:web-a.example.test", scope: "public"})
+      host_b = add_node!(%{type: "entity", key: "net:host:web-b.example.test", scope: "public"})
+
+      gateway =
+        add_node!(%{type: "entity", key: "net:gateway:gateway-a.example.test", scope: "public"})
+
+      assert {:ok, _} = Graph.add_edge(host_a, host_b, "alias_of", "ev-alias-1", scope: "public")
+
+      assert {:error,
+              {:contract,
+               {:relation_endpoint_kinds_mismatch,
+                %{relation: "alias_of", subject_kinds: subject_kinds, object_kinds: object_kinds}}}} =
+               Graph.add_edge(host_a, gateway, "alias_of", "ev-alias-2", scope: "public")
+
+      assert "host" in subject_kinds
+      assert "gateway" in object_kinds
+      assert edge_count() == 1
+    end
+
+    test "alias_of accepts deterministic bare IP and FQDN bridges to typed network keys" do
+      bare_address = add_node!(%{type: "entity", key: "192.0.2.10", scope: "public"})
+      typed_address = add_node!(%{type: "entity", key: "net:address:192.0.2.10", scope: "public"})
+      bare_host = add_node!(%{type: "entity", key: "app01.example.test", scope: "public"})
+
+      typed_host =
+        add_node!(%{type: "entity", key: "net:host:app01.example.test", scope: "public"})
+
+      assert {:ok, _} =
+               Graph.add_edge(bare_address, typed_address, "alias_of", "ev-ip-1", scope: "public")
+
+      assert {:ok, _} =
+               Graph.add_edge(bare_host, typed_host, "alias_of", "ev-fqdn-1", scope: "public")
+
+      assert edge_count() == 2
+    end
+  end
+
   describe "DB-level defense-in-depth (non-Store / raw-SQL writers)" do
     test "the scope vocabulary CHECK rejects an out-of-vocab node scope via raw SQL" do
       assert_raise Postgrex.Error, ~r/node_scope_vocab/, fn ->

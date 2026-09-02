@@ -503,9 +503,9 @@ defmodule Swarm.Graph.NetworkTest do
              )
   end
 
-  test "candidates/3 finds non-net entities with direct address facts" do
-    subject = Store.upsert_node("entity", "Nebula CI runners", scope: @net_scope)
-    address = Store.upsert_node("entity", "192.0.2.10", scope: @net_scope)
+  test "candidates/3 finds typed service entities with direct address facts" do
+    subject = Store.upsert_node("entity", "net:service:nebula-ci-runners", scope: @net_scope)
+    address = Store.upsert_node("entity", "net:address:192.0.2.10", scope: @net_scope)
 
     {:ok, _} =
       Store.add_edge(subject, address, "has_outbound_ip_address", "example.test:net",
@@ -515,13 +515,13 @@ defmodule Swarm.Graph.NetworkTest do
         source_node_id: subject
       )
 
-    assert ["Nebula CI runners"] =
+    assert ["net:service:nebula-ci-runners"] =
              Network.candidates("Яке публічне IP у nebula runners?", [@net_scope])
   end
 
   test "candidates/3 uses vector fallback for held-out paraphrases and keeps scope fences" do
     site = Store.upsert_node("entity", "net:site:example-alpha", scope: @net_scope)
-    address = Store.upsert_node("entity", "192.0.2.44", scope: @net_scope)
+    address = Store.upsert_node("entity", "net:address:192.0.2.44", scope: @net_scope)
 
     Swarm.Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [site, Pgvector.new(vecn(5))])
 
@@ -545,7 +545,7 @@ defmodule Swarm.Graph.NetworkTest do
 
   test "candidates/3 uses vector-nearest scoped nodes to seed unembedded net keys" do
     site = Store.upsert_node("entity", "net:site:example-beta", scope: @net_scope)
-    address = Store.upsert_node("entity", "192.0.2.45", scope: @net_scope)
+    address = Store.upsert_node("entity", "net:address:192.0.2.45", scope: @net_scope)
     article = Store.upsert_node("article", "Example Beta", scope: @net_scope)
 
     Swarm.Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [article, Pgvector.new(vecn(6))])
@@ -621,8 +621,10 @@ defmodule Swarm.Graph.NetworkTest do
   end
 
   test "neighborhood/3 S2: fresh structural edges do not stale configuration facts" do
-    subject = Store.upsert_node("entity", "Galaxy CI/CD runners", scope: @net_scope)
-    address = Store.upsert_node("entity", "203.0.113.118", scope: @net_scope)
+    subject =
+      Store.upsert_node("entity", "net:service:ci-runners.example.test", scope: @net_scope)
+
+    address = Store.upsert_node("entity", "net:address:203.0.113.118", scope: @net_scope)
     dependency = Store.upsert_node("entity", "Build egress profile", scope: @net_scope)
     site = Store.upsert_node("entity", "net:site:dev", scope: @net_scope)
 
@@ -660,11 +662,14 @@ defmodule Swarm.Graph.NetworkTest do
         source_node_id: subject
       )
 
-    facts = Network.neighborhood("Galaxy CI/CD runners", [@net_scope], min_corroboration: 1)
+    facts =
+      Network.neighborhood("net:service:ci-runners.example.test", [@net_scope],
+        min_corroboration: 1
+      )
 
     assert Enum.any?(
              facts,
-             &match?(%{relation: "has_outbound_ip_address", object: "203.0.113.118"}, &1)
+             &match?(%{relation: "has_outbound_ip_address", object: "address/203.0.113.118"}, &1)
            )
 
     assert Enum.any?(facts, &match?(%{relation: "contains", object: "site/dev"}, &1))

@@ -14,7 +14,7 @@ defmodule Swarm.Graph.ProcedureTest do
 
   defp vecn(i), do: for(j <- 0..(@dim - 1), do: if(j == i, do: 1.0, else: 0.0))
   defp ent(key, scope), do: Store.upsert_node("entity", key, scope: scope)
-  defp step_node(key, scope), do: Store.upsert_node("concept", key, scope: scope)
+  defp step_node(key, scope), do: Store.upsert_node("step", key, scope: scope)
 
   defp has_step(proc, step, ordinal, origin, scope) do
     {:ok, _} =

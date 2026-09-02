@@ -101,8 +101,8 @@ defmodule Swarm.CoreTest do
   describe "ADR-17 tier-routing gate (Fork B) wire" do
     defp seed_procedure do
       p = Store.upsert_node("entity", "ldap password reset", scope: "public")
-      s1 = Store.upsert_node("concept", "open the self-service portal", scope: "public")
-      s2 = Store.upsert_node("concept", "choose a new password", scope: "public")
+      s1 = Store.upsert_node("step", "open the self-service portal", scope: "public")
+      s2 = Store.upsert_node("step", "choose a new password", scope: "public")
 
       for {s, ord} <- [{s1, 1}, {s2, 2}] do
         {:ok, _} =
