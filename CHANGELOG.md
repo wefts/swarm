@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.7.0](https://github.com/wefts/swarm/compare/v0.6.0..v0.7.0) - 2026-09-02
+
+### Features
+
+- **(ontology)** add document-kind grounding controls - ([dce47cc](https://github.com/wefts/swarm/commit/dce47ccbd18fe08444251bb2b8512929a89d6e17)) - Serhii BOREMCHUK
+
+---
 ## [0.6.0](https://github.com/wefts/swarm/compare/v0.5.0..v0.6.0) - 2026-09-02
 
 ### Bug Fixes
