@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.5.0](https://github.com/wefts/swarm/compare/v0.4.0..v0.5.0) - 2026-09-02
+
+### Bug Fixes
+
+- **(ml)** disable thinking for intermediate generation - ([03d08ab](https://github.com/wefts/swarm/commit/03d08abcf6ef7cea2ef696c76849e83dc61e981e)) - Serhii BOREMCHUK
+- **(world-map)** route qualified ip address cues - ([8ab4cfd](https://github.com/wefts/swarm/commit/8ab4cfd03c4804bcbf841f5c282d7d4d770359ae)) - Serhii BOREMCHUK
+
+### Features
+
+- **(world-map)** add structured technology serve - ([6f180c1](https://github.com/wefts/swarm/commit/6f180c17872eb0d333517888d11ac71667f6aa25)) - Serhii BOREMCHUK
+
+---
 ## [0.4.0](https://github.com/wefts/swarm/compare/v0.3.0..v0.4.0) - 2026-09-02
 
 ### Features
