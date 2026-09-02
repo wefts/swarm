@@ -190,6 +190,11 @@ Conditionality is an open design issue. Some structural facts are only true unde
 a condition: environment, site, tenant, time window, default/exception row, or
 operational mode.
 
+Temporal conditionality is split out in
+[`temporal-fact-model.md`](temporal-fact-model.md): relation declarations must
+say whether a fact is current state, historical event, or invariant, and state
+supersession uses source validity time rather than ingest time.
+
 Do not encode conditions by minting relation variants such as
 `depends_on_in_prod` or `contains_at_site`. That creates an unbounded vocabulary.
 
