@@ -51,6 +51,7 @@ defmodule Swarm.Graph.Store do
   @spec upsert_node(String.t(), String.t(), keyword()) :: integer()
   def upsert_node(type, key, opts \\ []) when is_binary(type) and is_binary(key) do
     scope = Keyword.get(opts, :scope, "private")
+    metadata = display_metadata(Keyword.get(opts, :display_key), key)
 
     # swarm ADR-4: validate at the boundary, fail-loud (raw-SQL path has no
     # changeset). A malformed type/scope must never reach the shared substrate.
@@ -65,15 +66,25 @@ defmodule Swarm.Graph.Store do
     canonical = resolve_alias(type, key)
 
     sql = """
-    INSERT INTO node (type, key, scope)
-    VALUES ($1, $2, $3)
-    ON CONFLICT (type, key) DO UPDATE SET updated_at = now()
+    INSERT INTO node (type, key, scope, provenance)
+    VALUES ($1, $2, $3, $4::jsonb)
+    ON CONFLICT (type, key) DO UPDATE
+      SET updated_at = now(),
+          provenance = node.provenance || $4::jsonb
     RETURNING id
     """
 
-    %{rows: [[id]]} = Repo.query!(sql, [type, canonical, scope])
+    %{rows: [[id]]} = Repo.query!(sql, [type, canonical, scope, metadata])
     id
   end
+
+  @spec display_metadata(term(), String.t()) :: map()
+  defp display_metadata(display_key, identity_key)
+       when is_binary(display_key) and display_key != "" and display_key != identity_key do
+    %{"display_key" => display_key}
+  end
+
+  defp display_metadata(_display_key, _identity_key), do: %{}
 
   # Consult the standing alias table (swarm ADR-14 §3.2): an aliased key resolves
   # to its canonical form before minting; an unknown key passes through unchanged.

@@ -21,6 +21,7 @@ defmodule Swarm.Connector.Sync do
   """
 
   alias Swarm.Ingest
+  alias Swarm.Ingest.SkipLedger
 
   require Logger
 
@@ -29,6 +30,7 @@ defmodule Swarm.Connector.Sync do
           mode: :full | :delta,
           ingested: non_neg_integer(),
           duplicates: non_neg_integer(),
+          skipped: non_neg_integer(),
           errors: non_neg_integer(),
           pages: non_neg_integer(),
           ceilings: non_neg_integer(),
@@ -42,6 +44,7 @@ defmodule Swarm.Connector.Sync do
            mode: :full | :delta,
            ingested: non_neg_integer(),
            duplicates: non_neg_integer(),
+           skipped: non_neg_integer(),
            errors: non_neg_integer(),
            pages: non_neg_integer(),
            ceilings: non_neg_integer(),
@@ -64,6 +67,7 @@ defmodule Swarm.Connector.Sync do
       mode: mode,
       ingested: 0,
       duplicates: 0,
+      skipped: 0,
       errors: 0,
       pages: 0,
       ceilings: 0,
@@ -92,13 +96,14 @@ defmodule Swarm.Connector.Sync do
 
   # Coverage reconciliation (the early-`:done` / silent-drop guard). If the source
   # can declare a total — via `:expected_total` in opts or a page's `:total` — and
-  # fewer items were delivered than that, the run is NOT complete, even though the
-  # connector said `:done`. This is the only defense against a connector lying
-  # about exhaustion; with no declared total it is undetectable (see ADR-5).
+  # fewer items were delivered or explicitly skipped than that, the run is NOT
+  # complete, even though the connector said `:done`. This is the only defense
+  # against a connector lying about exhaustion; with no declared total it is
+  # undetectable (see ADR-5).
   @spec reconcile(acc(), module(), keyword()) :: report()
   defp reconcile(acc, module, opts) do
     expected = Keyword.get(opts, :expected_total) || acc.total_hint
-    delivered = acc.ingested + acc.duplicates
+    delivered = acc.ingested + acc.duplicates + acc.skipped
 
     acc =
       if is_integer(expected) and acc.complete? and delivered < expected do
@@ -120,8 +125,10 @@ defmodule Swarm.Connector.Sync do
     case fetch_with_retry(module, cursor, opts, max_retries) do
       {:ok, page} ->
         acc =
-          page.events
+          page
+          |> Map.get(:events, [])
           |> Enum.reduce(%{acc | pages: acc.pages + 1}, &ingest_one/2)
+          |> record_skips(module, page)
           |> note_truncation(module, page)
           |> note_total(page)
 
@@ -193,6 +200,58 @@ defmodule Swarm.Connector.Sync do
   defp log_ingest_error(acc, reason) do
     Logger.warning("connector sync: ingest rejected event (#{inspect(reason)})")
     %{acc | errors: acc.errors + 1}
+  end
+
+  @spec record_skips(acc(), module(), map()) :: acc()
+  defp record_skips(acc, module, page) do
+    page
+    |> Map.get(:skips, [])
+    |> Enum.reduce(acc, fn skip, acc ->
+      case SkipLedger.record(enrich_skip(skip, module)) do
+        :ok -> %{acc | skipped: acc.skipped + 1}
+        {:error, reason} -> log_skip_error(acc, reason)
+      end
+    end)
+  end
+
+  defp enrich_skip(skip, module) do
+    info = connector_info(module)
+
+    source =
+      Map.get(skip, :source) || Map.get(skip, "source") || Map.get(info, :source) ||
+        Map.get(info, :name)
+
+    skip
+    |> atomize_known_skip_keys()
+    |> Map.put_new(:connector, inspect(module))
+    |> Map.put_new(:source, source)
+  end
+
+  defp atomize_known_skip_keys(skip) do
+    %{}
+    |> maybe_put(:source_ref, Map.get(skip, :source_ref) || Map.get(skip, "source_ref"))
+    |> maybe_put(:reason, Map.get(skip, :reason) || Map.get(skip, "reason"))
+    |> maybe_put(:occurred_at, Map.get(skip, :occurred_at) || Map.get(skip, "occurred_at"))
+    |> maybe_put(:source, Map.get(skip, :source) || Map.get(skip, "source"))
+    |> maybe_put(:connector, Map.get(skip, :connector) || Map.get(skip, "connector"))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp connector_info(module) do
+    if function_exported?(module, :describe, 0) do
+      module.describe()
+    else
+      %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp log_skip_error(acc, reason) do
+    Logger.warning("connector sync: rejected skip record (#{inspect(reason)})")
+    %{acc | errors: acc.errors + 1, complete?: false}
   end
 
   @spec bump_watermark(acc(), map()) :: acc()

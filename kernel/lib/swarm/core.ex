@@ -298,11 +298,12 @@ defmodule Swarm.Core do
   defp visible_active_content_hits(active_keys, scopes) do
     Repo.query!(
       """
-      SELECT n.id, n.type, n.key, n.reliability, c.source_ref
+      SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref
       FROM node n
       JOIN content c ON c.node_id = n.id
-      WHERE n.scope = ANY($1) AND n.key = ANY($2)
-      ORDER BY array_position($2, n.key)
+      WHERE n.scope = ANY($1)
+        AND (coalesce(nullif(n.provenance->>'display_key', ''), n.key) = ANY($2) OR n.key = ANY($2))
+      ORDER BY array_position($2, coalesce(nullif(n.provenance->>'display_key', ''), n.key))
       LIMIT 5
       """,
       [scopes, active_keys]
@@ -357,14 +358,20 @@ defmodule Swarm.Core do
   # With an `owner` (a resolved asker, T8), AND a `key ILIKE %owner%` filter so
   # "my X" returns only the asker's items — still scope-filtered (default-deny).
   defp search_sql(scopes, pats, limit, nil) do
-    {"SELECT id, type, key FROM node WHERE scope = ANY($1) AND key ILIKE ANY($2) ORDER BY key LIMIT $3",
+    display_key = display_key_sql()
+
+    {"SELECT id, type, #{display_key} AS key FROM node WHERE scope = ANY($1) AND (#{display_key} ILIKE ANY($2) OR key ILIKE ANY($2)) ORDER BY key LIMIT $3",
      [scopes, pats, limit]}
   end
 
   defp search_sql(scopes, pats, limit, owner) do
-    {"SELECT id, type, key FROM node WHERE scope = ANY($1) AND key ILIKE ANY($2) AND key ~* $4 ORDER BY key LIMIT $3",
+    display_key = display_key_sql()
+
+    {"SELECT id, type, #{display_key} AS key FROM node WHERE scope = ANY($1) AND (#{display_key} ILIKE ANY($2) OR key ILIKE ANY($2)) AND (#{display_key} ~* $4 OR key ~* $4) ORDER BY key LIMIT $3",
      [scopes, pats, limit, owner_boundary(owner)]}
   end
+
+  defp display_key_sql, do: "coalesce(nullif(provenance->>'display_key', ''), key)"
 
   # Match the owner as a DELIMITED token, not a bare substring, so a short id
   # ("al") can't match another asker ("alice-…"). A convenience to reduce

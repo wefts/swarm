@@ -204,7 +204,7 @@ defmodule Swarm.Graph.Retrieval do
   @bm25_scope_filter "paradedb.term_set(terms => (SELECT array_agg(paradedb.term('scope', s)) FROM unnest($6::text[]) AS s))"
   @bm25_query "paradedb.boolean(must => ARRAY[#{@bm25_scope_filter}, paradedb.boolean(should => ARRAY[paradedb.match('text', $1), paradedb.boost(factor => $7::real, query => paradedb.match('title', $1))])])"
 
-  # The native title arm CTE (ts_rank_cd over node.key, scope-filtered, ordered+LIMITed),
+  # The native title arm CTE (ts_rank_cd over display title, scope-filtered, ordered+LIMITed),
   # reused verbatim in bm25 mode so title-lookups keep the aggressive per-node boost.
   # `titled_q` is the tsvector query param index, `scope_p` the scopes[] param index.
   defp titled_cte(titled_q, scope_p) do
@@ -212,15 +212,18 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC, node_id) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), to_tsquery('simple', $#{titled_q})) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), to_tsquery('simple', $#{titled_q})) AS trank
         FROM node n
-        WHERE n.scope = ANY($#{scope_p}) AND to_tsvector('simple', n.key) @@ to_tsquery('simple', $#{titled_q})
+        WHERE n.scope = ANY($#{scope_p}) AND to_tsvector('simple', #{display_key_sql("n")}) @@ to_tsquery('simple', $#{titled_q})
         ORDER BY trank DESC, n.id
         LIMIT $3
       ) tn
     )
     """
   end
+
+  defp display_key_sql(alias_name),
+    do: "coalesce(nullif(#{alias_name}.provenance->>'display_key', ''), #{alias_name}.key)"
 
   defp fused_bm25(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     sql = """
@@ -307,7 +310,7 @@ defmodule Swarm.Graph.Retrieval do
   defp fused_native(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     # Lexical-only (no query vector): a body-keyword match is the only per-chunk
     # signal, so `cos` is unknown (nil). The **title arm** (ADR-0016) is the
-    # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over `node.key` — LEFT
+    # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over the display title — LEFT
     # JOINed so each surviving chunk learns its node's title rank; the per-node
     # title boost is applied ONCE in `group_by_node` (never multiplied by chunk
     # count). Scope is enforced on BOTH the body arm and `titled` (no-leak). The
@@ -319,9 +322,9 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), (SELECT tsq FROM q)) AS trank
         FROM node n
-        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', #{display_key_sql("n")}) @@ (SELECT tsq FROM q)
         ORDER BY trank DESC
         LIMIT $3
       ) tn
@@ -359,7 +362,7 @@ defmodule Swarm.Graph.Retrieval do
     # **Weighted RRF** (Card 7): the lexical term is scaled by `$6`, the dense term
     # by `$7`, so an exact keyword hit resists demotion by a multi-chunk dense
     # "magnet"; PARAPHRASE ranking is untouched. The **title arm** (ADR-0016) is the
-    # `titled` CTE (in-scope nodes ranked by `ts_rank_cd` over `node.key`), LEFT
+    # `titled` CTE (in-scope nodes ranked by `ts_rank_cd` over the display title), LEFT
     # JOINed so each chunk learns its node's title rank; the per-node title boost is
     # added ONCE in `group_by_node`, so a page whose title IS the query floats over
     # body-only mentions WITHOUT a chunk-count multiplier and WITHOUT bypassing the
@@ -372,9 +375,9 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), (SELECT tsq FROM q)) AS trank
         FROM node n
-        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', #{display_key_sql("n")}) @@ (SELECT tsq FROM q)
         ORDER BY trank DESC
         LIMIT $3
       ) tn
@@ -539,7 +542,7 @@ defmodule Swarm.Graph.Retrieval do
     meta =
       Repo.query!(
         """
-        SELECT n.id, n.type, n.key, n.reliability, c.source_ref
+        SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref
         FROM node n
         LEFT JOIN content c ON c.node_id = n.id
         WHERE n.id = ANY($1)

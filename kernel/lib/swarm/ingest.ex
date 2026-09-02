@@ -16,6 +16,10 @@ defmodule Swarm.Ingest do
     `origin` (the source identity, distinct from the per-event `provenance`);
     every relation in the event shares it, so N derivative events of one source
     reinforce an edge once, not N times. Absent ⇒ defaults to `provenance`.
+  - **entity identity vs display key** — an entity may carry `identity` (or
+    `source_ref`) as its stable graph key while keeping `key` as the human-readable
+    display title. Relations may use `from_ref`/`to_ref` to target those stable
+    identities; absent refs fall back to the legacy `from`/`to` title fields.
 
   **Visibility on ingest (ADR-5).** Node scope comes from the event; default-deny
   is `private`. An edge inherits the greatest lower bound of its two endpoints
@@ -135,12 +139,32 @@ defmodule Swarm.Ingest do
 
   @spec normalize_entity(map()) :: map()
   defp normalize_entity(e) do
+    key = nfc(Map.fetch!(e, :key))
+    identity = e |> entity_identity(key) |> nfc()
+    source_ref = optional_nfc(Map.get(e, :source_ref))
+
     %{
       type: nfc(Map.fetch!(e, :type)),
-      key: nfc(Map.fetch!(e, :key)),
+      key: key,
+      identity: identity,
+      source_ref: source_ref,
       scope: Map.get(e, :scope, "private"),
       content: e |> Map.get(:content, "") |> nfc()
     }
+  end
+
+  @spec entity_identity(map(), String.t()) :: String.t()
+  defp entity_identity(e, fallback) do
+    cond do
+      is_binary(Map.get(e, :identity)) and Map.get(e, :identity) != "" ->
+        Map.get(e, :identity)
+
+      is_binary(Map.get(e, :source_ref)) and Map.get(e, :source_ref) != "" ->
+        Map.get(e, :source_ref)
+
+      true ->
+        fallback
+    end
   end
 
   @spec normalize_relation(map()) :: map()
@@ -148,6 +172,8 @@ defmodule Swarm.Ingest do
     %{
       from: nfc(Map.fetch!(r, :from)),
       to: nfc(Map.fetch!(r, :to)),
+      from_ref: r |> Map.get(:from_ref, Map.fetch!(r, :from)) |> nfc(),
+      to_ref: r |> Map.get(:to_ref, Map.fetch!(r, :to)) |> nfc(),
       type: nfc(Map.fetch!(r, :type))
     }
   end
@@ -170,6 +196,10 @@ defmodule Swarm.Ingest do
   @spec nfc(String.t()) :: String.t()
   defp nfc(s) when is_binary(s), do: :unicode.characters_to_nfc_binary(s)
 
+  @spec optional_nfc(term()) :: String.t() | nil
+  defp optional_nfc(s) when is_binary(s) and s != "", do: nfc(s)
+  defp optional_nfc(_), do: nil
+
   @spec fetch_string(map(), atom()) :: {:ok, String.t()} | {:error, term()}
   defp fetch_string(map, key) do
     case Map.get(map, key) do
@@ -189,7 +219,7 @@ defmodule Swarm.Ingest do
       Swarm.Repo.transaction(fn ->
         ids = upsert_entities(norm.entities)
         persist_content(norm.entities, ids, norm.provenance)
-        scopes = Map.new(norm.entities, &{&1.key, &1.scope})
+        scopes = refs_to_scopes(norm.entities)
         write_relations(norm.relations, ids, scopes, norm.provenance, norm.origin)
       end)
 
@@ -207,7 +237,30 @@ defmodule Swarm.Ingest do
 
   @spec upsert_entities([map()]) :: %{optional(String.t()) => integer()}
   defp upsert_entities(entities) do
-    Map.new(entities, fn e -> {e.key, Store.upsert_node(e.type, e.key, scope: e.scope)} end)
+    entities
+    |> Enum.map(fn e ->
+      id = Store.upsert_node(e.type, e.identity, scope: e.scope, display_key: e.key)
+      {e, id}
+    end)
+    |> refs_to_ids()
+  end
+
+  @spec refs_to_ids([{map(), integer()}]) :: %{optional(String.t()) => integer()}
+  defp refs_to_ids(entity_ids) do
+    Enum.reduce(entity_ids, %{}, fn {e, id}, acc ->
+      acc
+      |> Map.put(e.identity, id)
+      |> Map.put(e.key, id)
+    end)
+  end
+
+  @spec refs_to_scopes([map()]) :: %{optional(String.t()) => String.t()}
+  defp refs_to_scopes(entities) do
+    Enum.reduce(entities, %{}, fn e, acc ->
+      acc
+      |> Map.put(e.identity, e.scope)
+      |> Map.put(e.key, e.scope)
+    end)
   end
 
   # Persist each content-bearing entity's raw body (swarm ADR-14 §2, Phase A):
@@ -218,9 +271,9 @@ defmodule Swarm.Ingest do
   @spec persist_content([map()], map(), String.t()) :: :ok
   defp persist_content(entities, ids, provenance) do
     Enum.each(entities, fn e ->
-      with id when is_integer(id) <- Map.get(ids, e.key),
+      with id when is_integer(id) <- Map.get(ids, e.identity),
            body when is_binary(body) <- Map.get(e, :content, "") do
-        Content.put_body(id, body, source_ref: provenance)
+        Content.put_body(id, body, source_ref: e.source_ref || provenance)
       end
     end)
 
@@ -245,9 +298,9 @@ defmodule Swarm.Ingest do
 
   @spec write_relation(map(), map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
   defp write_relation(rel, ids, scopes, provenance, origin) do
-    case {Map.get(ids, rel.from), Map.get(ids, rel.to)} do
+    case {Map.get(ids, rel.from_ref), Map.get(ids, rel.to_ref)} do
       {src, dst} when is_integer(src) and is_integer(dst) ->
-        scope = narrowest(Map.get(scopes, rel.from), Map.get(scopes, rel.to))
+        scope = narrowest(Map.get(scopes, rel.from_ref), Map.get(scopes, rel.to_ref))
 
         case Store.add_edge(src, dst, rel.type, provenance, scope: scope, origin: origin) do
           {:ok, _} -> :ok
