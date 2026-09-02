@@ -27,6 +27,7 @@ defmodule Swarm.Graph.Retrieval do
   """
 
   alias Swarm.Graph.Corroboration
+  alias Swarm.Graph.DocumentKind
   alias Swarm.Graph.Traverse
   alias Swarm.ML.Embeddings
   alias Swarm.Repo
@@ -43,6 +44,8 @@ defmodule Swarm.Graph.Retrieval do
           score: float(),
           relevance: float(),
           confidence: float(),
+          document_kind: DocumentKind.kind(),
+          structural_evidence: [String.t()],
           spans: [%{ordinal: integer(), text: String.t()}]
         }
 
@@ -109,8 +112,9 @@ defmodule Swarm.Graph.Retrieval do
       |> fused_chunks(scopes, candidates, k, qvec, lex_w, dense_w)
       |> group_by_node(spans, floor, k, title_w)
       |> Enum.sort_by(& &1.score, :desc)
-      |> Enum.take(limit)
       |> attach_identity(scopes)
+      |> rerank_by_document_kind(query)
+      |> Enum.take(limit)
 
     expanded =
       if Keyword.get(opts, :expand, true),
@@ -537,6 +541,7 @@ defmodule Swarm.Graph.Retrieval do
       |> Map.new(fn [id, type, key, rel] -> {id, {type, key, rel}} end)
 
     corr = Corroboration.for_nodes(ids, scopes: scopes)
+    evidence = structural_evidence(ids, scopes)
 
     Enum.map(memories, fn m ->
       {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
@@ -548,10 +553,46 @@ defmodule Swarm.Graph.Retrieval do
         type: type,
         key: key,
         confidence: confidence,
+        structural_evidence: Map.get(evidence, m.node_id, []),
         relevance: Float.round(m.relevance, 4)
       })
     end)
   end
+
+  defp structural_evidence(ids, scopes) do
+    Repo.query!(
+      """
+      SELECT src, array_agg(DISTINCT type ORDER BY type)
+      FROM edge
+      WHERE src = ANY($1) AND visibility_scope = ANY($2) AND type = ANY($3)
+      GROUP BY src
+      """,
+      [ids, scopes, ["has_step"]]
+    )
+    |> Map.get(:rows)
+    |> Map.new(fn [node_id, relations] -> {node_id, relations} end)
+  end
+
+  # Ontology small-slice: kind is a retrieval-time hint, not a graph label. It only reorders the
+  # already scope-filtered, already relevant memory set; it never admits or filters rows.
+  defp rerank_by_document_kind(memories, query) do
+    query_kind = DocumentKind.query_kind(query)
+
+    memories
+    |> Enum.map(fn memory ->
+      kind = DocumentKind.classify(memory)
+
+      memory
+      |> Map.put(:document_kind, kind)
+      |> Map.update!(:score, &(&1 * kind_factor(query_kind, kind)))
+    end)
+    |> Enum.sort_by(& &1.score, :desc)
+  end
+
+  defp kind_factor(:unknown, _kind), do: 1.0
+  defp kind_factor(kind, kind), do: 1.15
+  defp kind_factor(:policy, :procedure), do: 0.75
+  defp kind_factor(_query_kind, _doc_kind), do: 1.0
 
   # --- stage 2: traversal expansion -----------------------------------------
 

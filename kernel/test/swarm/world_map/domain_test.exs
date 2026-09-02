@@ -74,6 +74,20 @@ defmodule Swarm.WorldMap.DomainTest do
       assert "mentioned_in" in d.relations
       assert "used_by" in d.relations
     end
+
+    test "structural relation contracts expose signatures and reject mistyped triples" do
+      assert %{inverse: "contains", serve_domains: domains} = Domain.structural_relation(:part_of)
+      assert :structural in domains
+
+      assert %{subject_kinds: subject_kinds, object_kinds: object_kinds} =
+               Domain.structural_relation("hosted_on")
+
+      assert "service" in subject_kinds
+      assert "host" in object_kinds
+      assert Domain.relation_admissible?(:hosted_on, :service, :host)
+      refute Domain.relation_admissible?(:hosted_on, :gateway, :subnet)
+      refute Domain.relation_admissible?(:unknown_relation, :service, :host)
+    end
   end
 
   describe "policy_filter/2 — global answer-time privacy chokepoint" do

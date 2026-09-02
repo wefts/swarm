@@ -205,6 +205,44 @@ defmodule Swarm.Graph.RetrievalTest do
     refute "Public Holidays" in keys(mems)
   end
 
+  test "document-kind rerank floats policy for policy-shaped queries and procedure for how-to queries" do
+    policy = node!("Example.test AI Governance Policy", "public")
+
+    chunk!(
+      policy,
+      0,
+      "Example.test AI tools require approval, governance review, and policy compliance.",
+      0
+    )
+
+    procedure = node!("Install Example.test AI Tools", "public")
+
+    chunk!(
+      procedure,
+      0,
+      "How-to install and configure Example.test AI tools. Step 1 open the TEST-NET portal.",
+      1
+    )
+
+    %{memories: policy_mems} =
+      Retrieval.search("approval policy for Example.test AI tools", ["public"],
+        dense: false,
+        expand: false
+      )
+
+    assert hd(keys(policy_mems)) == "Example.test AI Governance Policy"
+    assert hd(policy_mems).document_kind == :policy
+
+    %{memories: procedure_mems} =
+      Retrieval.search("how to install Example.test AI tools", ["public"],
+        dense: false,
+        expand: false
+      )
+
+    assert hd(keys(procedure_mems)) == "Install Example.test AI Tools"
+    assert hd(procedure_mems).document_kind == :procedure
+  end
+
   test "stage-2 traversal expands seeds into multi-hop neighbours" do
     seed = node!("Seed", "public")
     neighbour = node!("Neighbour", "public")

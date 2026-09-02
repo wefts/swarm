@@ -215,7 +215,7 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "ticket: TCK-7"
   end
 
-  test "escalate gates zero-relevance grounding tail and citations" do
+  test "escalate restricts grounding to an exact named-title hit before min-hit gating" do
     test_pid = self()
 
     retr = fn _q, _s, _o ->
@@ -224,15 +224,15 @@ defmodule Swarm.CoreResultTest do
          %{
            id: 1,
            type: "page",
-           key: "AI Solution at Smile",
+           key: "Example.test AI Solution",
            score: 0.79,
            relevance: 0.79,
-           spans: [%{ordinal: 1, text: "AI Solution at Smile provides agent services."}]
+           spans: [%{ordinal: 1, text: "Example.test AI Solution provides agent services."}]
          },
          %{
            id: 2,
            type: "page",
-           key: "Agentic AI",
+           key: "Example.test Agentic AI",
            score: 0.59,
            relevance: 0.59,
            spans: [%{ordinal: 1, text: "Agentic AI gives adjacent architecture context."}]
@@ -240,7 +240,7 @@ defmodule Swarm.CoreResultTest do
          %{
            id: 3,
            type: "page",
-           key: "Smile CA",
+           key: "Install Example.test Certificate",
            score: 0.58,
            relevance: 0.58,
            spans: [%{ordinal: 1, text: "Certificate authority material."}]
@@ -248,7 +248,7 @@ defmodule Swarm.CoreResultTest do
          %{
            id: 4,
            type: "page",
-           key: "DevOps at Smile",
+           key: "Example.test DevOps",
            score: 0.0,
            relevance: 0.0,
            spans: [%{ordinal: 1, text: "Helpdesk, Docker and Podman installation notes."}]
@@ -260,21 +260,23 @@ defmodule Swarm.CoreResultTest do
       send(test_pid, {:grounding_prompt, prompt})
 
       if Keyword.get(opts, :json),
-        do: {:ok, ~s({"answer":"AI Solution summary","confidence":0.8,"supported":true})},
-        else: {:ok, "AI Solution summary"}
+        do:
+          {:ok,
+           ~s({"answer":"Example.test AI Solution summary","confidence":0.8,"supported":true})},
+        else: {:ok, "Example.test AI Solution summary"}
     end
 
-    a = Core.ask("розкажи про AI Solution at Smile", escalate_opts(gen, retriever: retr))
+    a = Core.ask("розкажи про Example.test AI Solution", escalate_opts(gen, retriever: retr))
     assert a.status == :found
 
     assert_received {:grounding_prompt, prompt}
-    assert prompt =~ "AI Solution at Smile"
-    assert prompt =~ "Agentic AI"
-    assert prompt =~ "Smile CA"
+    assert prompt =~ "Example.test AI Solution"
+    refute prompt =~ "Agentic AI"
+    refute prompt =~ "Certificate authority"
     refute prompt =~ "Helpdesk"
     refute prompt =~ "Docker"
     refute prompt =~ "Podman"
-    refute Enum.any?(a.citations, &(&1.ref == "DevOps at Smile"))
+    assert Enum.map(a.citations, & &1.ref) == ["Example.test AI Solution"]
   end
 
   test "escalate gates broad query-term claim facts when passage grounding is present" do
@@ -284,7 +286,9 @@ defmodule Swarm.CoreResultTest do
 
     s2 = add_node!(%{type: "entity", key: "Experts at Smile", scope: "public"})
     o2 = add_node!(%{type: "entity", key: "training paths", scope: "public"})
-    {:ok, _} = Graph.add_edge(s2, o2, "created", "p1", evidence_kind: "claim", scope: "public")
+
+    {:ok, _} =
+      Graph.add_edge(s2, o2, "created_by", "p1", evidence_kind: "claim", scope: "public")
 
     test_pid = self()
 
@@ -349,6 +353,64 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "page: B"
     assert prompt =~ "page: C"
     refute prompt =~ "page: D"
+  end
+
+  test "broad example.test ask without exact title still keeps the minimum grounding set" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "Example.test Policy",
+           score: 0.1,
+           relevance: 0.1,
+           spans: [%{text: "Example.test policy overview"}]
+         },
+         %{
+           id: 2,
+           type: "page",
+           key: "Example.test Procedure",
+           score: 0.02,
+           relevance: 0.02,
+           spans: [%{text: "Example.test procedure overview"}]
+         },
+         %{
+           id: 3,
+           type: "page",
+           key: "Example.test Reference",
+           score: 0.01,
+           relevance: 0.01,
+           spans: [%{text: "Example.test reference overview"}]
+         },
+         %{
+           id: 4,
+           type: "page",
+           key: "Example.test Incident",
+           score: 0.0,
+           relevance: 0.0,
+           spans: [%{text: "Example.test incident overview"}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"broad example.test summary","confidence":0.8,"supported":true})},
+        else: {:ok, "broad example.test summary"}
+    end
+
+    Core.ask("tell me about Example.test", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "page: Example.test Policy"
+    assert prompt =~ "page: Example.test Procedure"
+    assert prompt =~ "page: Example.test Reference"
+    refute prompt =~ "page: Example.test Incident"
   end
 
   # C2 (confidence calibration, the lynchpin): a judge that ABSTAINS (supported=false)

@@ -12,7 +12,7 @@ defmodule Swarm.Core do
   """
 
   alias Swarm.{Activity, AnswerRecords, Consilium, Conversations, Deliberation, Gate, Repo}
-  alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
+  alias Swarm.Graph.{Aggregation, DocumentKind, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
   alias Swarm.WorldMap.SemanticRouter
 
@@ -814,6 +814,7 @@ defmodule Swarm.Core do
   defp gate_grounding_hits(_query, []), do: []
 
   defp gate_grounding_hits(query, hits) do
+    hits = restrict_to_named_subject_hits(query, hits)
     {scored, unscored} = Enum.split_with(hits, &(hit_relevance(&1) != nil))
 
     scored_keep =
@@ -845,8 +846,41 @@ defmodule Swarm.Core do
     Enum.filter(hits, &(hit_identity(&1) in keep_ids))
   end
 
+  defp restrict_to_named_subject_hits(query, hits) do
+    case DocumentKind.named_subject_hits(query, hits) do
+      [] ->
+        hits
+
+      named_hits ->
+        named_ids = MapSet.new(named_hits, &hit_identity/1)
+        dropped = Enum.reject(hits, &(hit_identity(&1) in named_ids))
+        log_named_subject_gate(query, named_hits, dropped)
+        named_hits
+    end
+  end
+
   defp hit_relevance(hit), do: hit[:relevance]
   defp hit_identity(hit), do: {hit[:type], hit[:key], hit[:id]}
+
+  defp log_named_subject_gate(_query, _named_hits, []), do: :ok
+
+  defp log_named_subject_gate(query, named_hits, dropped) do
+    kept =
+      named_hits
+      |> Enum.map(fn hit -> "#{hit[:type]}:#{hit[:key]}" end)
+      |> Enum.join(", ")
+
+    dropped_summary =
+      dropped
+      |> Enum.map(fn hit -> "#{hit[:type]}:#{hit[:key]}" end)
+      |> Enum.join(", ")
+
+    Logger.info(
+      "grounding named-subject gate: dropped=#{length(dropped)} " <>
+        "query=#{inspect(String.slice(query, 0, 80))} kept=[#{kept}] " <>
+        "dropped_hits=[#{dropped_summary}]"
+    )
+  end
 
   defp log_grounding_gate(_query, [], _top, _threshold), do: :ok
 
