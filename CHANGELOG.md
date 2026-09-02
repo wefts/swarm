@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.4.0](https://github.com/wefts/swarm/compare/v0.3.0..v0.4.0) - 2026-09-02
+
+### Features
+
+- **(calibration)** add external calibration loop - ([03695d4](https://github.com/wefts/swarm/commit/03695d4c3b5583a128998451d0c2e56972b1921d)) - Serhii BOREMCHUK
+- **(graph)** add deterministic network address semantics - ([7886a16](https://github.com/wefts/swarm/commit/7886a168ad464d5916c49f67a596b8d25e8d9949)) - Serhii BOREMCHUK
+
+---
 ## [0.3.0](https://github.com/wefts/swarm/compare/v0.2.0..v0.3.0) - 2026-09-01
 
 ### Features
