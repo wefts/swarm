@@ -230,7 +230,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       """
       WITH host_addresses AS (
         SELECT e.id AS address_edge_id, h.id AS host_id, h.key AS host_key,
-               a.net_addr AS addr, e.visibility_scope AS scope
+               h.scope AS host_scope, a.net_addr AS addr, e.visibility_scope AS scope
           FROM edge e
           JOIN node h ON h.id = e.src
           JOIN node a ON a.id = e.dst
@@ -244,7 +244,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       ),
       cluster_hosts AS (
         SELECT e.id AS cluster_edge_id, c.id AS cluster_id, c.key AS cluster_key,
-               h.id AS host_id
+               c.scope AS cluster_scope, h.id AS host_id
           FROM edge e
           JOIN node c ON c.id = e.src
           JOIN node h ON h.id = e.dst
@@ -258,7 +258,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       ),
       site_ranges AS (
         SELECT e.id AS range_edge_id, s.id AS site_id, s.key AS site_key,
-               r.net_range AS range, e.visibility_scope AS scope
+               s.scope AS site_scope, r.net_range AS range, e.visibility_scope AS scope
           FROM edge e
           JOIN node s ON s.id = e.src
           JOIN node r ON r.id = e.dst
@@ -272,7 +272,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       ),
       direct_gateway_ranges AS (
         SELECT e.id AS range_edge_id, g.id AS gateway_id, g.key AS gateway_key,
-               r.net_range AS range, e.visibility_scope AS scope
+               g.scope AS gateway_scope, r.net_range AS range, e.visibility_scope AS scope
           FROM edge e
           JOIN node g ON g.id = e.src
           JOIN node r ON r.id = e.dst
@@ -303,7 +303,7 @@ defmodule Swarm.Enrichment.TopologyJoin do
       ),
       tunnel_gateway_ranges AS (
         SELECT te.id AS terminate_edge_id, tr.range_edge_id, g.id AS gateway_id,
-               g.key AS gateway_key, tr.range, te.visibility_scope AS scope
+               g.key AS gateway_key, g.scope AS gateway_scope, tr.range, te.visibility_scope AS scope
           FROM tunnel_ranges tr
           JOIN edge te ON te.src = tr.tunnel_id
           JOIN node g ON g.id = te.dst
@@ -314,27 +314,47 @@ defmodule Swarm.Enrichment.TopologyJoin do
            AND g.scope = ANY($1)
       ),
       gateway_ranges AS (
-        SELECT gateway_id, gateway_key, range, scope, ARRAY[range_edge_id]::bigint[] AS evidence_ids
+        SELECT gateway_id, gateway_key, gateway_scope, range, scope, ARRAY[range_edge_id]::bigint[] AS evidence_ids
           FROM direct_gateway_ranges
         UNION ALL
-        SELECT gateway_id, gateway_key, range, scope,
+        SELECT gateway_id, gateway_key, gateway_scope, range, scope,
                ARRAY[range_edge_id, terminate_edge_id]::bigint[] AS evidence_ids
           FROM tunnel_gateway_ranges
       ),
       site_joins AS (
         SELECT sr.site_id AS src_id, sr.site_key AS src_key, 'contains'::text AS relation,
-               ch.cluster_id AS dst_id, ch.cluster_key AS dst_key, sr.scope,
+               ch.cluster_id AS dst_id, ch.cluster_key AS dst_key,
+               CASE
+                 WHEN sr.site_scope = ch.cluster_scope THEN sr.site_scope
+                 WHEN sr.site_scope = 'private' OR ch.cluster_scope = 'private' THEN 'private'
+                 WHEN sr.site_scope = 'public' THEN ch.cluster_scope
+                 WHEN ch.cluster_scope = 'public' THEN sr.site_scope
+                 ELSE 'private'
+               END AS scope,
                ARRAY[sr.range_edge_id, ha.address_edge_id, ch.cluster_edge_id]::bigint[] AS evidence_ids
           FROM host_addresses ha
           JOIN cluster_hosts ch ON ch.host_id = ha.host_id
-          JOIN site_ranges sr ON ha.addr <<= sr.range AND ha.scope = sr.scope
+          JOIN site_ranges sr ON ha.addr <<= sr.range
       ),
       gateway_joins AS (
         SELECT ha.host_id AS src_id, ha.host_key AS src_key, 'routes_via'::text AS relation,
-               gr.gateway_id AS dst_id, gr.gateway_key AS dst_key, gr.scope,
+               gr.gateway_id AS dst_id, gr.gateway_key AS dst_key,
+               CASE
+                 WHEN ha.host_scope = gr.gateway_scope THEN ha.host_scope
+                 WHEN ha.host_scope = 'private' OR gr.gateway_scope = 'private' THEN 'private'
+                 WHEN ha.host_scope = 'public' THEN gr.gateway_scope
+                 WHEN gr.gateway_scope = 'public' THEN ha.host_scope
+                 ELSE 'private'
+               END AS scope,
                array_append(gr.evidence_ids, ha.address_edge_id) AS evidence_ids
           FROM host_addresses ha
-          JOIN gateway_ranges gr ON ha.addr <<= gr.range AND ha.scope = gr.scope
+          -- Evidence may come from different source scopes. Requiring equal
+          -- visibility scopes hides valid deterministic joins when the host
+          -- inventory and gateway ranges were ingested from separate sources;
+          -- the WHERE clauses above already require every supporting edge to
+          -- be visible to the requested scopes. The derived edge uses the
+          -- endpoint-scope GLB, so cross-source joins clamp to private.
+          JOIN gateway_ranges gr ON ha.addr <<= gr.range
       )
       SELECT src_id, src_key, relation, dst_id, dst_key, scope, evidence_ids FROM site_joins
       UNION ALL

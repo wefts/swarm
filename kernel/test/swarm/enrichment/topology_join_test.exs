@@ -14,8 +14,10 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
     do: %{id: Store.upsert_node("article", "topology-src", scope: scope), scope: scope}
 
   defp write(facts, opts \\ []) do
+    scope = Keyword.get(opts, :scope, @scope)
+
     NetworkMap.write(
-      src_node(@scope),
+      src_node(scope),
       facts,
       Keyword.get(opts, :provenance, "topology-prov-#{System.unique_integer([:positive])}"),
       Keyword.merge(
@@ -253,6 +255,51 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
            ] =
              Repo.query!("""
              SELECT s.key, d.key
+               FROM edge e
+               JOIN node s ON s.id = e.src
+               JOIN node d ON d.id = e.dst
+              WHERE e.type = 'routes_via'
+             """).rows
+  end
+
+  test "derives gateway joins from visible evidence split across source scopes" do
+    inventory_scope = @scope
+    network_scope = Swarm.GraphCase.test_src2()
+
+    write(
+      [
+        %{
+          subject: "app01.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.10",
+          object_kind: "address"
+        }
+      ],
+      scope: inventory_scope
+    )
+
+    write(
+      [
+        %{
+          subject: "gateway-a",
+          subject_kind: "gateway",
+          relation: "carries",
+          object: "10.20.30.0/24",
+          object_kind: "subnet"
+        }
+      ],
+      scope: network_scope
+    )
+
+    assert %{joins: 0} = TopologyJoin.derive([inventory_scope], apply: true)
+    assert %{joins: 1} = TopologyJoin.derive([inventory_scope, network_scope], apply: true)
+
+    assert [
+             ["net:host:app01.example.test", "net:gateway:gateway-a", "private"]
+           ] =
+             Repo.query!("""
+             SELECT s.key, d.key, e.visibility_scope
                FROM edge e
                JOIN node s ON s.id = e.src
                JOIN node d ON d.id = e.dst
