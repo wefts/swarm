@@ -602,7 +602,7 @@ defmodule Swarm.Core do
   end
 
   defp deliberate(query, hits, base_status, scopes, profile, opts) do
-    grounding_hits = gate_grounding_hits(query, hits)
+    grounding_hits = query |> gate_grounding_hits(hits) |> order_grounding_hits()
     grounding_profile = gate_grounding_profile(query, profile, grounding_hits)
     grounding = build_grounding(grounding_profile, grounding_hits) |> prepend_history(opts)
 
@@ -1003,6 +1003,14 @@ defmodule Swarm.Core do
 
   defp hit_relevance(hit), do: hit[:relevance]
   defp hit_identity(hit), do: {hit[:type], hit[:key], hit[:id]}
+
+  # Admission and ordering are separate. The gate decides which hits are safe to
+  # ground on; this pass decides what reaches the finite prompt budget first.
+  # Without it, a high-relevance answer page can be retained but clipped after
+  # lower-relevance broad context, which is worse than omitting the broad context.
+  defp order_grounding_hits(hits) do
+    Enum.sort_by(hits, &{hit_relevance(&1) || -1.0, Map.get(&1, :score, 0.0)}, :desc)
+  end
 
   defp log_named_subject_gate(_query, _named_hits, []), do: :ok
 

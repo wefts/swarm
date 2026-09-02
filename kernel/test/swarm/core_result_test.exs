@@ -325,6 +325,50 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "Public IP"
   end
 
+  test "escalation grounding orders admitted hits by relevance before applying the budget" do
+    test_pid = self()
+    filler = String.duplicate("broad context that mentions nebula but not the address\n", 220)
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Nebula overview",
+           score: 0.5,
+           relevance: 0.5,
+           spans: [%{ordinal: 1, text: filler}]
+         },
+         %{
+           id: 2,
+           type: "article",
+           key: "Public IP",
+           score: 0.9,
+           relevance: 0.9,
+           spans: [%{ordinal: 1, text: "Nebula public IP is 203.0.113.7."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"203.0.113.7","confidence":0.8,"supported":true})},
+        else: {:ok, "203.0.113.7"}
+    end
+
+    a = Core.ask("what is the nebula public ip", escalate_opts(gen, retriever: retr))
+    assert a.tier == "escalate"
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Nebula public IP is 203.0.113.7."
+
+    assert :binary.match(prompt, "## article: Public IP") <
+             :binary.match(prompt, "## article: Nebula overview")
+  end
+
   test "escalate follow-ups ground active citation keys as scoped passages" do
     test_pid = self()
     id = Store.upsert_node("article", "Runner Guidance", scope: "public")
