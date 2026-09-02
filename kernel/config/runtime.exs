@@ -105,7 +105,7 @@ end
 # consilium. OFF unless EXPLICITLY enabled — a false-serve breaks trust, so it ships off
 # until the go/no-go (`board/todo/tier-gate-gonogo.md`) shows false_serve_rate ~0 (measured
 # on `Swarm.WorldMap.Gate.Calibration`). `SWARM_TIER_GATE_ENTAIL_MODEL` overrides the Stage-2
-# entail model (default gemma4:31b — the resident judge; fsr 0.0 / recall 1.0 on the eval).
+# entail model (default qwen3:14b after the sidecar sends think:false; fsr 0.0 / recall 1.0).
 if System.get_env("SWARM_TIER_GATE_ENABLED") == "true" do
   config :swarm, :tier_gate, enabled: true
 end
