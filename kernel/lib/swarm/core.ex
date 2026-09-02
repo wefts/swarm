@@ -468,7 +468,9 @@ defmodule Swarm.Core do
   end
 
   defp deliberate(query, hits, base_status, scopes, profile, opts) do
-    grounding = build_grounding(profile, hits) |> prepend_history(opts)
+    grounding_hits = gate_grounding_hits(query, hits)
+    grounding_profile = gate_grounding_profile(query, profile, grounding_hits)
+    grounding = build_grounding(grounding_profile, grounding_hits) |> prepend_history(opts)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -477,7 +479,7 @@ defmodule Swarm.Core do
         # single insert AFTER the LLM returned. "" when not retained.
         viewer = Keyword.get(opts, :viewer, "")
         ask_ref = Deliberation.maybe_persist(verdict, viewer, scopes)
-        calibrated_answer(query, verdict, hits, profile, base_status, ask_ref)
+        calibrated_answer(query, verdict, grounding_hits, grounding_profile, base_status, ask_ref)
 
       {:error, reason} ->
         # Fail-loud: a synthesis failure is an ERROR (distinct from not-found),
@@ -691,6 +693,9 @@ defmodule Swarm.Core do
   # ≠ confidence-space); disagreement applies a gentle haircut.
   @relevance_floor 0.45
   @relevance_full 0.55
+  @grounding_relative_floor 0.4
+  @grounding_min_hits 3
+  @grounding_claim_stopwords MapSet.new(@stopwords ++ ~w(at про розкажи))
 
   @spec calibrated_answer(
           String.t(),
@@ -787,6 +792,130 @@ defmodule Swarm.Core do
 
   @spec clamp01(float()) :: float()
   defp clamp01(x), do: x |> max(0.0) |> min(1.0)
+
+  # The relevance floor used for confidence is a cap, not a source-selection rule.
+  # Grounding needs its own relative gate so lexical/title tails cannot hand
+  # zero-relevance documents to the consilium while broad questions still retain
+  # enough context to answer.
+  @spec gate_grounding_hits(String.t(), [hit()]) :: [hit()]
+  defp gate_grounding_hits(_query, []), do: []
+
+  defp gate_grounding_hits(query, hits) do
+    {scored, unscored} = Enum.split_with(hits, &(hit_relevance(&1) != nil))
+
+    scored_keep =
+      case scored do
+        [] ->
+          []
+
+        _ ->
+          top = scored |> Enum.map(&hit_relevance/1) |> Enum.max()
+          threshold = if top > 0.0, do: top * @grounding_relative_floor, else: 0.0
+          threshold_keep = Enum.filter(scored, &(hit_relevance(&1) >= threshold))
+
+          min_keep =
+            scored
+            |> Enum.sort_by(&hit_relevance/1, :desc)
+            |> Enum.take(@grounding_min_hits)
+
+          keep_ids =
+            (threshold_keep ++ min_keep)
+            |> Enum.map(&hit_identity/1)
+            |> MapSet.new()
+
+          keep = Enum.filter(scored, &(hit_identity(&1) in keep_ids))
+          log_grounding_gate(query, scored -- keep, top, threshold)
+          keep
+      end
+
+    keep_ids = Enum.map(scored_keep ++ unscored, &hit_identity/1) |> MapSet.new()
+    Enum.filter(hits, &(hit_identity(&1) in keep_ids))
+  end
+
+  defp hit_relevance(hit), do: hit[:relevance]
+  defp hit_identity(hit), do: {hit[:type], hit[:key], hit[:id]}
+
+  defp log_grounding_gate(_query, [], _top, _threshold), do: :ok
+
+  defp log_grounding_gate(query, dropped, top, threshold) do
+    summary =
+      dropped
+      |> Enum.map(fn hit ->
+        "#{hit[:type]}:#{hit[:key]}@#{Float.round(hit_relevance(hit), 4)}"
+      end)
+      |> Enum.join(", ")
+
+    Logger.info(
+      "grounding gate: dropped=#{length(dropped)} top=#{Float.round(top, 4)} " <>
+        "threshold=#{Float.round(threshold, 4)} query=#{inspect(String.slice(query, 0, 80))} " <>
+        "hits=[#{summary}]"
+    )
+  end
+
+  @spec gate_grounding_profile(String.t(), Aggregation.profile(), [hit()]) ::
+          Aggregation.profile()
+  defp gate_grounding_profile(_query, profile, []), do: profile
+
+  defp gate_grounding_profile(_query, %{facts: [], groups: []} = profile, _hits), do: profile
+
+  defp gate_grounding_profile(query, profile, hits) do
+    if Enum.any?(hits, &match?(%{spans: [_ | _]}, &1)) do
+      do_gate_grounding_profile(query, profile)
+    else
+      profile
+    end
+  end
+
+  defp do_gate_grounding_profile(query, profile) do
+    query_tokens = grounding_query_tokens(query)
+
+    groups =
+      profile.groups
+      |> Enum.filter(&grounding_subject_relevant?(&1.subject, query_tokens))
+
+    facts =
+      profile.facts
+      |> Enum.filter(&grounding_subject_relevant?(&1.subject, query_tokens))
+
+    log_profile_gate(query, length(profile.facts) - length(facts))
+
+    %{profile | groups: groups, facts: facts, claim_support: claim_support(facts)}
+  end
+
+  defp grounding_query_tokens(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.reject(&(String.length(&1) < 2 or MapSet.member?(@grounding_claim_stopwords, &1)))
+    |> MapSet.new()
+  end
+
+  defp grounding_subject_relevant?(_subject, query_tokens) when map_size(query_tokens) <= 1,
+    do: true
+
+  defp grounding_subject_relevant?(subject, query_tokens) do
+    subject_tokens =
+      subject
+      |> String.downcase()
+      |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+      |> Enum.reject(&MapSet.member?(@grounding_claim_stopwords, &1))
+      |> MapSet.new()
+
+    overlap = query_tokens |> MapSet.intersection(subject_tokens) |> MapSet.size()
+    overlap >= 2
+  end
+
+  defp claim_support([]), do: nil
+  defp claim_support(facts), do: facts |> Enum.map(& &1.reliability) |> Enum.max()
+
+  defp log_profile_gate(_query, dropped) when dropped <= 0, do: :ok
+
+  defp log_profile_gate(query, dropped) do
+    Logger.info(
+      "grounding profile gate: dropped_facts=#{dropped} " <>
+        "query=#{inspect(String.slice(query, 0, 80))}"
+    )
+  end
 
   # Grounding fed to the consilium: the answer-bearing PASSAGES of each hit (the
   # segmenter's section-prefixed chunk text), not the bare title. A content hit

@@ -215,6 +215,142 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "ticket: TCK-7"
   end
 
+  test "escalate gates zero-relevance grounding tail and citations" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "AI Solution at Smile",
+           score: 0.79,
+           relevance: 0.79,
+           spans: [%{ordinal: 1, text: "AI Solution at Smile provides agent services."}]
+         },
+         %{
+           id: 2,
+           type: "page",
+           key: "Agentic AI",
+           score: 0.59,
+           relevance: 0.59,
+           spans: [%{ordinal: 1, text: "Agentic AI gives adjacent architecture context."}]
+         },
+         %{
+           id: 3,
+           type: "page",
+           key: "Smile CA",
+           score: 0.58,
+           relevance: 0.58,
+           spans: [%{ordinal: 1, text: "Certificate authority material."}]
+         },
+         %{
+           id: 4,
+           type: "page",
+           key: "DevOps at Smile",
+           score: 0.0,
+           relevance: 0.0,
+           spans: [%{ordinal: 1, text: "Helpdesk, Docker and Podman installation notes."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"AI Solution summary","confidence":0.8,"supported":true})},
+        else: {:ok, "AI Solution summary"}
+    end
+
+    a = Core.ask("розкажи про AI Solution at Smile", escalate_opts(gen, retriever: retr))
+    assert a.status == :found
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "AI Solution at Smile"
+    assert prompt =~ "Agentic AI"
+    assert prompt =~ "Smile CA"
+    refute prompt =~ "Helpdesk"
+    refute prompt =~ "Docker"
+    refute prompt =~ "Podman"
+    refute Enum.any?(a.citations, &(&1.ref == "DevOps at Smile"))
+  end
+
+  test "escalate gates broad query-term claim facts when passage grounding is present" do
+    s = add_node!(%{type: "entity", key: "ee.helpdesk@smile.fr", scope: "public"})
+    o = add_node!(%{type: "entity", key: "ee helpdesk", scope: "public"})
+    {:ok, _} = Graph.add_edge(s, o, "part_of", "p1", evidence_kind: "claim", scope: "public")
+
+    s2 = add_node!(%{type: "entity", key: "Experts at Smile", scope: "public"})
+    o2 = add_node!(%{type: "entity", key: "training paths", scope: "public"})
+    {:ok, _} = Graph.add_edge(s2, o2, "created", "p1", evidence_kind: "claim", scope: "public")
+
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "AI Solution at Smile",
+           score: 0.79,
+           relevance: 0.79,
+           spans: [%{ordinal: 1, text: "AI Solution at Smile provides agent services."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"AI Solution summary","confidence":0.8,"supported":true})},
+        else: {:ok, "AI Solution summary"}
+    end
+
+    a = Core.ask("розкажи про AI Solution at Smile", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    refute prompt =~ "ee.helpdesk"
+    refute prompt =~ "ee helpdesk"
+    refute prompt =~ "Experts at Smile"
+    refute prompt =~ "training paths"
+    refute Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "ee.helpdesk"))
+    refute Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "Experts at Smile"))
+  end
+
+  test "escalate keeps a minimum grounding set when all relevance is weak" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{id: 1, type: "page", key: "A", score: 0.1, relevance: 0.1, spans: [%{text: "A"}]},
+         %{id: 2, type: "page", key: "B", score: 0.02, relevance: 0.02, spans: [%{text: "B"}]},
+         %{id: 3, type: "page", key: "C", score: 0.01, relevance: 0.01, spans: [%{text: "C"}]},
+         %{id: 4, type: "page", key: "D", score: 0.0, relevance: 0.0, spans: [%{text: "D"}]}
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"broad summary","confidence":0.8,"supported":true})},
+        else: {:ok, "broad summary"}
+    end
+
+    Core.ask("broad summary", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "page: A"
+    assert prompt =~ "page: B"
+    assert prompt =~ "page: C"
+    refute prompt =~ "page: D"
+  end
+
   # C2 (confidence calibration, the lynchpin): a judge that ABSTAINS (supported=false)
   # must yield a LOW-confidence :not_found, never a high-confidence answer — even when
   # the judge self-reports 0.9. Fail-closed: a missing `supported` is treated as false.
