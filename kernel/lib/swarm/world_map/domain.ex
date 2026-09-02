@@ -51,7 +51,7 @@ defmodule Swarm.WorldMap.Domain do
         }
 
   # --- the NETWORK domain (first contract instance; extracted from Coverage/Gate) ------------
-  @network_cue ~r/(?:\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|public\s+ip)\b|(?<![\p{L}\p{N}_])(публічн[\p{L}]*\s+(ip|айпі|адрес[\p{L}]*)|(ip|айпі)[-\s]?адрес[\p{L}]*|підмереж[\p{L}]*|тунел[\p{L}]*|шлюз[\p{L}]*|фаєрвол[\p{L}]*|кластер[\p{L}]*|маршрут[\p{L}]*|маршрутиз[\p{L}]*|тополог[\p{L}]*|підключен[\p{L}]*|з'єднан[\p{L}]*|хостить[\p{L}]*|хоститься|розміщен[\p{L}]*)(?![\p{L}\p{N}_]))/iu
+  @network_cue ~r/(?:\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|(public|private|internal|external|outbound|egress)\s+ips?)\b|(?<![\p{L}\p{N}_])(публічн[\p{L}]*\s+(ip|айпі|адрес[\p{L}]*)|(ip|айпі)[-\s]?адрес[\p{L}]*|підмереж[\p{L}]*|тунел[\p{L}]*|шлюз[\p{L}]*|фаєрвол[\p{L}]*|кластер[\p{L}]*|маршрут[\p{L}]*|маршрутиз[\p{L}]*|тополог[\p{L}]*|підключен[\p{L}]*|з'єднан[\p{L}]*|хостить[\p{L}]*|хоститься|розміщен[\p{L}]*)(?![\p{L}\p{N}_]))/iu
 
   @network_entail_system ~s|You decide if NETWORK TOPOLOGY FACTS answer the user QUESTION. Answer | <>
                            ~s|sufficient=true ONLY if the facts state the SPECIFIC relation the | <>
