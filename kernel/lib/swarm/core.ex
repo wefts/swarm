@@ -11,7 +11,17 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Activity, AnswerRecords, Consilium, Conversations, Deliberation, Gate, Repo}
+  alias Swarm.{
+    Activity,
+    AnswerRecords,
+    Consilium,
+    ConversationContradictions,
+    Conversations,
+    Deliberation,
+    Gate,
+    Repo
+  }
+
   alias Swarm.Graph.{Aggregation, DocumentKind, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
   alias Swarm.WorldMap.SemanticRouter
@@ -111,7 +121,9 @@ defmodule Swarm.Core do
         end
       end
 
-    record_answer(query, viewer, scopes, answer)
+    answer
+    |> maybe_annotate_contradiction(opts)
+    |> then(&record_answer(query, viewer, scopes, &1))
   end
 
   # tier0 is canned + zero-LLM — it NEVER escalates. Off-mission requests are
@@ -175,6 +187,7 @@ defmodule Swarm.Core do
     owner = Keyword.get(opts, :owner)
     limit = Keyword.get(opts, :limit, @search_limit)
     active_hits = active_source_hits(query, scopes, opts)
+    context_hits = active_context_hits(scopes, opts)
 
     cond do
       active_hits != [] ->
@@ -205,7 +218,7 @@ defmodule Swarm.Core do
             }
           )
 
-        merge_hits(content_hits, key_hits, limit)
+        merge_hits(context_hits ++ content_hits, key_hits, limit)
     end
   end
 
@@ -298,7 +311,7 @@ defmodule Swarm.Core do
   defp visible_active_content_hits(active_keys, scopes) do
     Repo.query!(
       """
-      SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref
+      SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref, c.body
       FROM node n
       JOIN content c ON c.node_id = n.id
       WHERE n.scope = ANY($1)
@@ -308,18 +321,26 @@ defmodule Swarm.Core do
       """,
       [scopes, active_keys]
     )
-    |> Map.get(:rows)
-    |> Enum.map(fn [id, type, key, reliability, source_ref] ->
+    |> Map.fetch!(:rows)
+    |> Enum.map(fn [id, type, key, reliability, source_ref, body] ->
       %{
         id: id,
         type: type,
         key: key,
+        score: reliability,
         confidence: reliability,
         source_ref: source_ref,
-        spans: [],
+        spans: [%{ordinal: 0, text: body || ""}],
         relevance: 1.0
       }
     end)
+  end
+
+  defp active_context_hits(scopes, opts) do
+    case active_keys(opts) do
+      [] -> []
+      keys -> visible_active_content_hits(keys, scopes)
+    end
   end
 
   # Union content hits (primary, ranked by relevance) with key hits, de-duped by
@@ -878,6 +899,14 @@ defmodule Swarm.Core do
       answer
   end
 
+  defp maybe_annotate_contradiction(answer, opts) do
+    ConversationContradictions.maybe_annotate(answer, authorized_messages(opts))
+  rescue
+    e ->
+      Logger.warning("conversation contradiction check failed (#{Exception.message(e)})")
+      answer
+  end
+
   # final = judge_confidence · agreement · evidence_cap, clamped to [0,1].
   @spec calibrate_confidence(float(), float(), [hit()], float() | nil) :: float()
   defp calibrate_confidence(judge_conf, disagreement, hits, claim_support) do
@@ -1129,6 +1158,18 @@ defmodule Swarm.Core do
 
   @spec history_block(keyword()) :: String.t()
   defp history_block(opts) do
+    case authorized_messages(opts) do
+      [] ->
+        ""
+
+      messages ->
+        text = Enum.map_join(messages, "\n", &"#{&1.role}: #{&1.body}")
+
+        if text == "", do: "", else: "## recent conversation\n" <> text
+    end
+  end
+
+  defp authorized_messages(opts) do
     conversation_id = Keyword.get(opts, :conversation_id)
     viewer = Keyword.get(opts, :viewer, "")
 
@@ -1140,14 +1181,9 @@ defmodule Swarm.Core do
          true <- Keyword.get(opts, :verified, false),
          true <- valid_actor_uuid?(viewer),
          {:ok, %{messages: messages}} <- Conversations.get(viewer, conversation_id) do
-      text =
-        messages
-        |> Enum.take(-@history_turns)
-        |> Enum.map_join("\n", &"#{&1.role}: #{&1.body}")
-
-      if text == "", do: "", else: "## recent conversation\n" <> text
+      Enum.take(messages, -@history_turns)
     else
-      _ -> ""
+      _ -> []
     end
   end
 

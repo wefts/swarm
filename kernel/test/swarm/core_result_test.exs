@@ -325,6 +325,32 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "Public IP"
   end
 
+  test "escalate follow-ups ground active citation keys as scoped passages" do
+    test_pid = self()
+    id = Store.upsert_node("article", "Runner Guidance", scope: "public")
+
+    :ok =
+      Content.put_body(
+        id,
+        "Runner guidance body: Alpha Runner should be avoided; Beta Runner is recommended.",
+        source_ref: "mediawiki:123"
+      )
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"Beta Runner is recommended.","confidence":0.8,"supported":true})},
+        else: {:ok, "panel take"}
+    end
+
+    a = Core.ask("why avoid Alpha?", escalate_opts(gen, active_keys: ["Runner Guidance"]))
+
+    assert a.tier == "escalate"
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Runner guidance body"
+  end
+
   # A title/identity key hit (no spans) still contributes its identity line — never
   # a fabricated passage — so identity/inventory grounding keeps working.
   test "escalate grounding falls back to the identity line for a span-less hit" do

@@ -65,6 +65,24 @@ defmodule Swarm.ConsiliumTest do
              )
   end
 
+  test "a judge that is also in the panel is rejected before any model call" do
+    parent = self()
+
+    generator = fn _model, _prompt, _opts ->
+      send(parent, :unexpected_model_call)
+      {:ok, "should not run"}
+    end
+
+    assert {:error, {:self_judging, "same-model"}} =
+             Consilium.deliberate("q",
+               fleet: %{panel: ["same-model", "other-model"], judge: "same-model"},
+               generator: generator,
+               embedder: emb_const()
+             )
+
+    refute_received :unexpected_model_call
+  end
+
   test "invalid judge output is retried, then accepted" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
