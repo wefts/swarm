@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.8.0](https://github.com/wefts/swarm/compare/v0.7.0..v0.8.0) - 2026-09-02
+
+### Features
+
+- **(citations)** resolve source refs to configured links - ([062b852](https://github.com/wefts/swarm/commit/062b852c99e586482b9101d91d4805784c1d35c3)) - Serhii BOREMCHUK
+- **(disposable-graph)** preserve page identity and skip ledgers - ([e44f79b](https://github.com/wefts/swarm/commit/e44f79b9efa51446e8bb6a1a7026ddb8ff881c12)) - Serhii BOREMCHUK
+- **(ontology)** enforce governed relation endpoints - ([a1d338b](https://github.com/wefts/swarm/commit/a1d338b096a2c2e6ea7ff0aee12a8fdd2492e8fc)) - Serhii BOREMCHUK
+
+---
 ## [0.7.0](https://github.com/wefts/swarm/compare/v0.6.0..v0.7.0) - 2026-09-02
 
 ### Features
