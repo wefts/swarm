@@ -10,12 +10,16 @@ defmodule Swarm.Graph.NetworkTest do
   alias Swarm.Graph.Store
 
   @net_scope Swarm.GraphCase.test_src()
+  @net_scope2 Swarm.GraphCase.test_src2()
   @dim Swarm.Config.embedding_dim()
 
   defp vecn(i), do: for(j <- 0..(@dim - 1), do: if(j == i, do: 1.0, else: 0.0))
 
   defp src_node(scope),
     do: %{id: Store.upsert_node("article", "net-read-src", scope: scope), scope: scope}
+
+  defp src_node(scope, key),
+    do: %{id: Store.upsert_node("article", key, scope: scope), scope: scope}
 
   test "empty scopes yield an empty map (no query)" do
     assert Network.map([]) == %{entities: [], relations: []}
@@ -247,6 +251,230 @@ defmodule Swarm.Graph.NetworkTest do
              %{relation: "routes_for", object: "host/app.example.test"}
            ] =
              Network.neighborhood("net:gateway:192.0.2.1", [@net_scope], min_corroboration: 1)
+  end
+
+  test "neighborhood/3 synthesizes routes_via only when host address and gateway range are both visible" do
+    source_a = src_node(@net_scope, "route-source-a")
+    source_b = src_node(@net_scope2, "route-source-b")
+
+    NetworkMap.write(
+      source_a,
+      [
+        %{
+          subject: "app01.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.10",
+          object_kind: "address"
+        }
+      ],
+      "prov-route-host",
+      origin: "wiki:hosts"
+    )
+
+    NetworkMap.write(
+      source_b,
+      [
+        %{
+          subject: "gateway-a",
+          subject_kind: "gateway",
+          relation: "carries",
+          object: "10.20.30.0/24",
+          object_kind: "subnet"
+        }
+      ],
+      "prov-route-gateway",
+      origin: "wiki:network"
+    )
+
+    host_key = "net:host:app01.example.test"
+
+    refute Enum.any?(
+             Network.neighborhood(host_key, [@net_scope], min_corroboration: 1),
+             &match?(%{relation: "routes_via"}, &1)
+           )
+
+    refute Enum.any?(
+             Network.neighborhood(host_key, [@net_scope2], min_corroboration: 1),
+             &match?(%{relation: "routes_via"}, &1)
+           )
+
+    assert [
+             %{relation: "routes_via", object: "gateway/gateway-a", object_kind: "gateway"}
+           ] =
+             Network.neighborhood(host_key, [@net_scope, @net_scope2], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_via"))
+  end
+
+  test "neighborhood/3 synthesizes reverse routes_for only when gateway range and host address are both visible" do
+    source_a = src_node(@net_scope, "reverse-route-source-a")
+    source_b = src_node(@net_scope2, "reverse-route-source-b")
+
+    NetworkMap.write(
+      source_a,
+      [
+        %{
+          subject: "app01.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.10",
+          object_kind: "address"
+        }
+      ],
+      "prov-reverse-route-host",
+      origin: "wiki:hosts"
+    )
+
+    NetworkMap.write(
+      source_b,
+      [
+        %{
+          subject: "gateway-a",
+          subject_kind: "gateway",
+          relation: "carries",
+          object: "10.20.30.0/24",
+          object_kind: "subnet"
+        }
+      ],
+      "prov-reverse-route-gateway",
+      origin: "wiki:network"
+    )
+
+    gateway_key = "net:gateway:gateway-a"
+
+    refute Enum.any?(
+             Network.neighborhood(gateway_key, [@net_scope], min_corroboration: 1),
+             &match?(%{relation: "routes_for"}, &1)
+           )
+
+    refute Enum.any?(
+             Network.neighborhood(gateway_key, [@net_scope2], min_corroboration: 1),
+             &match?(%{relation: "routes_for"}, &1)
+           )
+
+    assert [
+             %{relation: "routes_for", object: "host/app01.example.test", object_kind: "host"}
+           ] =
+             Network.neighborhood(gateway_key, [@net_scope, @net_scope2], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_for"))
+  end
+
+  test "neighborhood/3 synthesizes routes through tunnel-carried ranges terminated at a gateway" do
+    source_a = src_node(@net_scope, "tunnel-route-source-a")
+    source_b = src_node(@net_scope2, "tunnel-route-source-b")
+
+    NetworkMap.write(
+      source_a,
+      [
+        %{
+          subject: "app01.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.10",
+          object_kind: "address"
+        }
+      ],
+      "prov-tunnel-route-host",
+      origin: "wiki:hosts"
+    )
+
+    NetworkMap.write(
+      source_b,
+      [
+        %{
+          subject: "tunnel-a",
+          subject_kind: "tunnel",
+          relation: "carries",
+          object: "10.20.30.0/24",
+          object_kind: "subnet"
+        },
+        %{
+          subject: "tunnel-a",
+          subject_kind: "tunnel",
+          relation: "terminates_at",
+          object: "gateway-a",
+          object_kind: "gateway"
+        }
+      ],
+      "prov-tunnel-route-gateway",
+      origin: "wiki:network"
+    )
+
+    host_key = "net:host:app01.example.test"
+    gateway_key = "net:gateway:gateway-a"
+
+    assert [] =
+             Network.neighborhood(host_key, [@net_scope], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_via"))
+
+    assert [] =
+             Network.neighborhood(gateway_key, [@net_scope2], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_for"))
+
+    assert [
+             %{relation: "routes_via", object: "gateway/gateway-a", object_kind: "gateway"}
+           ] =
+             Network.neighborhood(host_key, [@net_scope, @net_scope2], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_via"))
+
+    assert [
+             %{relation: "routes_for", object: "host/app01.example.test", object_kind: "host"}
+           ] =
+             Network.neighborhood(gateway_key, [@net_scope, @net_scope2], min_corroboration: 1)
+             |> Enum.filter(&(&1.relation == "routes_for"))
+  end
+
+  test "neighborhood/3 relation filters exclude synthesized route facts" do
+    source_a = src_node(@net_scope, "filtered-route-source-a")
+    source_b = src_node(@net_scope2, "filtered-route-source-b")
+
+    NetworkMap.write(
+      source_a,
+      [
+        %{
+          subject: "app01.example.test",
+          subject_kind: "host",
+          relation: "has_address",
+          object: "10.20.30.10",
+          object_kind: "address"
+        }
+      ],
+      "prov-filtered-route-host",
+      origin: "wiki:hosts"
+    )
+
+    NetworkMap.write(
+      source_b,
+      [
+        %{
+          subject: "gateway-a",
+          subject_kind: "gateway",
+          relation: "carries",
+          object: "10.20.30.0/24",
+          object_kind: "subnet"
+        }
+      ],
+      "prov-filtered-route-gateway",
+      origin: "wiki:network"
+    )
+
+    scopes = [@net_scope, @net_scope2]
+
+    refute Enum.any?(
+             Network.neighborhood("net:host:app01.example.test", scopes,
+               min_corroboration: 1,
+               relations: ["has_address"]
+             ),
+             &match?(%{relation: "routes_via"}, &1)
+           )
+
+    refute Enum.any?(
+             Network.neighborhood("net:gateway:gateway-a", scopes,
+               min_corroboration: 1,
+               relations: ["carries"]
+             ),
+             &match?(%{relation: "routes_for"}, &1)
+           )
   end
 
   test "neighborhood/3 derives gateway reverse tunnel termination facts" do
