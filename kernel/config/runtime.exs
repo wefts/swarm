@@ -135,12 +135,26 @@ if System.get_env("SWARM_TIER_GATE_WHO_SERVE") == "true" do
   config :swarm, :tier_gate, who_serve: true
 end
 
+# The :technology serve path is a read-only structural projection over existing scoped corpus
+# evidence. It stays OFF unless explicitly enabled, like every neighborhood domain.
+if System.get_env("SWARM_TIER_GATE_TECHNOLOGY_SERVE") == "true" do
+  config :swarm, :tier_gate, technology_serve: true
+end
+
 # Corroboration floor for the network serve path (default 2 = only multi-source-confirmed;
 # 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
 # the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
 case System.get_env("SWARM_TIER_GATE_NETWORK_MIN_CORROB") do
   n when is_binary(n) and n != "" ->
     config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_TIER_GATE_TECHNOLOGY_MIN_CORROB") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, technology_min_corroboration: String.to_integer(n)
 
   _ ->
     :ok

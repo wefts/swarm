@@ -167,7 +167,14 @@ defmodule Swarm.WorldMap.GateTest do
         neighborhood_key: key || subject,
         neighborhood_facts:
           Enum.map(facts, fn {r, o} ->
-            %{relation: r, object: o, object_kind: "subnet", corroboration: 2}
+            %{
+              relation: r,
+              object: o,
+              object_kind: "subnet",
+              corroboration: 2,
+              effective_reliability: 0.82,
+              cardinality: Swarm.Graph.Network.cardinality(r)
+            }
           end),
         blockers: []
       }
@@ -197,6 +204,59 @@ defmodule Swarm.WorldMap.GateTest do
       # chat-thread epic 2: active_keys must echo the RAW key, never the display subject
       # (WhoMap/Network's subject_fun is a one-way display transform — not invertible).
       assert key == "net:tunnel:orbit"
+    end
+
+    test "renders deterministic network facts as answer prose and preserves citations" do
+      d =
+        net_desc(
+          "host lyon",
+          [
+            {"has_private_address", "address/192.0.2.10"},
+            {"has_public_address", "address/198.51.100.20"}
+          ],
+          "net:host:lyon"
+        )
+
+      assert {:serve,
+              %Answer{
+                text: text,
+                citations: ["corroboration:2"]
+              }, %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "host lyon:"
+      assert text =~ "Host lyon has private address 192.0.2.10."
+      assert text =~ "Host lyon has public address 198.51.100.20."
+      refute text =~ "has_private_address"
+      refute text =~ "address/"
+    end
+
+    test "structured confidence varies with reliability and corroboration" do
+      low =
+        net_desc("host low", [{"has_private_address", "address/192.0.2.30"}], "net:host:low")
+
+      high = %{
+        low
+        | neighborhood_facts: [
+            %{
+              relation: "has_private_address",
+              object: "address/192.0.2.30",
+              object_kind: "address",
+              corroboration: 4,
+              effective_reliability: 0.9,
+              cardinality: :many
+            }
+          ]
+      }
+
+      assert {:serve, %Answer{confidence: low_conf}, _} =
+               Gate.sufficient?(low, entail_fun: always(true))
+
+      assert {:serve, %Answer{confidence: high_conf}, _} =
+               Gate.sufficient?(high, entail_fun: always(true))
+
+      assert low_conf < high_conf
+      assert high_conf == 0.97
     end
 
     test "entail veto escalates (never serves the wrong-relation/entity)" do
@@ -247,7 +307,14 @@ defmodule Swarm.WorldMap.GateTest do
         neighborhood_key: key || subject,
         neighborhood_facts:
           Enum.map(facts, fn {r, o} ->
-            %{relation: r, object: o, object_kind: "person", corroboration: 1}
+            %{
+              relation: r,
+              object: o,
+              object_kind: "person",
+              corroboration: 1,
+              effective_reliability: 0.9,
+              cardinality: :many
+            }
           end),
         blockers: []
       }
@@ -267,7 +334,7 @@ defmodule Swarm.WorldMap.GateTest do
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "platform"
-      assert text =~ "works_in Jane Doe"
+      assert text =~ "Platform works in Jane Doe and Bob Smith."
       assert cits == ["corroboration:1"]
       # chat-thread epic 2: active_keys must echo the RAW key, never the display subject
       assert key == "who:team:platform"
@@ -304,6 +371,37 @@ defmodule Swarm.WorldMap.GateTest do
 
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
+
+  describe "technology intent" do
+    test "serves technology anchor facts as prose" do
+      d = %Descriptor{
+        query: "what is known about Magento?",
+        intent: :neighborhood,
+        domain: :technology,
+        neighborhood_subject: "magento",
+        neighborhood_key: "technology:magento",
+        neighborhood_facts: [
+          %{
+            relation: "mentioned_in",
+            object: "Magento operations",
+            object_kind: "article",
+            corroboration: 1,
+            effective_reliability: 0.72,
+            cardinality: :many
+          }
+        ],
+        blockers: []
+      }
+
+      assert {:serve, %Answer{intent: :neighborhood, domain: :technology, text: text, key: key},
+              %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "magento:"
+      assert text =~ "Magento mentioned in Magento operations."
+      assert key == "technology:magento"
     end
   end
 end

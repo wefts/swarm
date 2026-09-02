@@ -54,9 +54,23 @@ defmodule Swarm.WorldMap.DomainTest do
     test "registry lookup" do
       assert Domain.get(:network).key == :network
       assert Domain.get(:who).key == :who
+      assert Domain.get(:technology).key == :technology
       assert Domain.get(:nope) == nil
       assert Enum.any?(Domain.all(), &(&1.key == :network))
       assert Enum.any?(Domain.all(), &(&1.key == :who))
+      assert Enum.any?(Domain.all(), &(&1.key == :technology))
+    end
+
+    test "the technology anchor domain declares its serve knobs" do
+      d = Domain.technology()
+      assert d.key == :technology
+      assert d.min_corroboration == 1
+      assert d.entail_system =~ "TECHNOLOGY ANCHOR"
+      assert Regex.match?(d.cue, "which technologies does checkout use")
+      assert Regex.match?(d.cue, "what CMS is this")
+      assert Regex.match?(d.cue, "які технології використовує сервіс")
+      assert "mentioned_in" in d.relations
+      assert "used_by" in d.relations
     end
   end
 

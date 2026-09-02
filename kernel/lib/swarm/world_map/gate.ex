@@ -292,8 +292,8 @@ defmodule Swarm.WorldMap.Gate do
         key: key,
         domain: domain_key
       }) do
-    body = Enum.map_join(facts, "\n", &render_fact/1)
     head = if subject, do: "#{subject}:\n", else: "#{Domain.get(domain_key).display_label}:\n"
+    body = render_facts(subject || Domain.get(domain_key).display_label, facts)
 
     %Answer{
       text: head <> body,
@@ -305,12 +305,116 @@ defmodule Swarm.WorldMap.Gate do
     }
   end
 
-  defp render_fact(%{relation: "has_address", address_class: class, object: object})
-       when is_binary(class) do
-    "has_address #{class} #{object}"
+  defp render_facts(subject, facts) do
+    facts
+    |> Enum.group_by(& &1.relation)
+    |> Enum.map(fn {relation, grouped} -> render_relation(subject, relation, grouped) end)
+    |> Enum.join("\n")
   end
 
-  defp render_fact(f), do: "#{f.relation} #{f.object}"
+  defp render_relation(subject, relation, facts) do
+    objects = facts |> Enum.map(&display_object/1) |> Enum.uniq()
+    sentence(subject, relation, objects, fact_cardinality(facts))
+  end
+
+  defp fact_cardinality([%{cardinality: cardinality} | _]) when cardinality in [:single, :many],
+    do: cardinality
+
+  defp fact_cardinality(_), do: :many
+
+  defp sentence(subject, "has_private_address", objects, cardinality),
+    do: value_sentence(subject, "has private address", objects, cardinality)
+
+  defp sentence(subject, "has_public_address", objects, cardinality),
+    do: value_sentence(subject, "has public address", objects, cardinality)
+
+  defp sentence(subject, "has_outbound_ip_address", objects, cardinality),
+    do: value_sentence(subject, "uses outbound address", objects, cardinality)
+
+  defp sentence(subject, "has_address", objects, cardinality),
+    do: value_sentence(subject, "has address", objects, cardinality)
+
+  defp sentence(subject, "carries", objects, cardinality),
+    do: value_sentence(subject, "carries", objects, cardinality)
+
+  defp sentence(subject, "contains", objects, cardinality),
+    do: value_sentence(subject, "contains", objects, cardinality)
+
+  defp sentence(subject, "routes_via", objects, cardinality),
+    do: value_sentence(subject, "routes via", objects, cardinality)
+
+  defp sentence(subject, "routes_for", objects, cardinality),
+    do: value_sentence(subject, "routes traffic for", objects, cardinality)
+
+  defp sentence(subject, "terminates_at", objects, cardinality),
+    do: value_sentence(subject, "terminates at", objects, cardinality)
+
+  defp sentence(subject, "terminates_for", objects, cardinality),
+    do: value_sentence(subject, "terminates", objects, cardinality)
+
+  defp sentence(subject, "managed_by", objects, cardinality),
+    do: value_sentence(subject, "is managed by", objects, cardinality)
+
+  defp sentence(subject, "managed_by_team", objects, cardinality),
+    do: value_sentence(subject, "is managed by team", objects, cardinality)
+
+  defp sentence(subject, "works_in", objects, cardinality),
+    do: value_sentence(subject, "works in", objects, cardinality)
+
+  defp sentence(subject, "member_of", objects, cardinality),
+    do: value_sentence(subject, "is a member of", objects, cardinality)
+
+  defp sentence(subject, "has_title", objects, cardinality),
+    do: value_sentence(subject, "has title", objects, cardinality)
+
+  defp sentence(subject, "located_at", objects, cardinality),
+    do: value_sentence(subject, "is located at", objects, cardinality)
+
+  defp sentence(subject, relation, objects, cardinality),
+    do: value_sentence(subject, String.replace(relation, "_", " "), objects, cardinality)
+
+  defp value_sentence(subject, phrase, objects, :single) do
+    "#{capitalize(subject)} #{phrase} #{single_object(objects)}."
+  end
+
+  defp value_sentence(subject, phrase, objects, _many) do
+    "#{capitalize(subject)} #{phrase} #{object_list(objects)}."
+  end
+
+  defp single_object([object | _]), do: object
+  defp single_object([]), do: "unknown"
+
+  defp object_list([]), do: "unknown"
+  defp object_list([one]), do: one
+  defp object_list([one, two]), do: "#{one} and #{two}"
+
+  defp object_list(objects) do
+    {last, rest} = List.pop_at(objects, -1)
+    Enum.join(rest, ", ") <> ", and " <> last
+  end
+
+  defp display_object(%{object_kind: kind, object: object})
+       when kind in ["address", "subnet"] and is_binary(object) do
+    strip_display_prefix(object)
+  end
+
+  defp display_object(%{object: object}) when is_binary(object), do: strip_display_prefix(object)
+  defp display_object(%{object: object}), do: to_string(object)
+
+  defp strip_display_prefix(object) do
+    case String.split(object, "/", parts: 2) do
+      [kind, value] when kind in ["address", "subnet", "host", "gateway", "cluster", "site"] ->
+        value
+
+      _ ->
+        object
+    end
+  end
+
+  defp capitalize(<<first::utf8, rest::binary>>),
+    do: String.upcase(<<first::utf8>>) <> rest
+
+  defp capitalize(other), do: other
 
   defp confidence(atoms) when is_list(atoms) do
     atoms
@@ -330,8 +434,11 @@ defmodule Swarm.WorldMap.Gate do
   end
 
   defp confidence_inputs(%{effective_reliability: rel, corroboration: corr}) do
-    bump = min(max((corr || 1) - 1, 0), 2) * 0.05
-    [min((rel || 0.0) + bump, 0.97)]
+    [fact_confidence(rel, corr)]
+  end
+
+  defp confidence_inputs(%{reliability: rel, corroboration: corr}) do
+    [fact_confidence(rel, corr)]
   end
 
   defp confidence_inputs(%{objects: objects}) when is_list(objects) do
@@ -341,4 +448,12 @@ defmodule Swarm.WorldMap.Gate do
   end
 
   defp confidence_inputs(_), do: []
+
+  defp fact_confidence(rel, corr) do
+    rel = rel || 0.0
+    corr = corr || 1
+    bump = min(max(corr - 1, 0), 4) * 0.04
+
+    min(rel + bump, 0.97)
+  end
 end

@@ -28,7 +28,10 @@ defmodule Swarm.WorldMap.SemanticRouter do
     {{:neighborhood, :who}, "who runs this service"},
     {{:neighborhood, :who}, "who should I contact for a service"},
     {{:neighborhood, :who}, "who looks after a service"},
-    {{:neighborhood, :who}, "which people are in this group"}
+    {{:neighborhood, :who}, "which people are in this group"},
+    {{:neighborhood, :technology}, "what is known about this technology"},
+    {{:neighborhood, :technology}, "which documents mention this framework"},
+    {{:neighborhood, :technology}, "which services use this runtime"}
   ]
 
   @doc """
