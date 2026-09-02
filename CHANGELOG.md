@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.8.1](https://github.com/wefts/swarm/compare/v0.8.0..v0.8.1) - 2026-09-02
+
+### Bug Fixes
+
+- **(consilium)** prevent self-judged synthesis - ([e463c21](https://github.com/wefts/swarm/commit/e463c2197f218087c3b9438f4ccb585d0e950e67)) - Serhii BOREMCHUK
+
+---
 ## [0.8.0](https://github.com/wefts/swarm/compare/v0.7.0..v0.8.0) - 2026-09-02
 
 ### Features
