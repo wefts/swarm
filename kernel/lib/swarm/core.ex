@@ -40,7 +40,12 @@ defmodule Swarm.Core do
   failure — distinct from not-found, never silent, never a raw leak).
   """
   @type status :: :found | :not_found | :partial | :error
-  @type citation :: %{source: String.t(), ref: String.t(), confidence: float()}
+  @type citation :: %{
+          :source => String.t(),
+          :ref => String.t(),
+          :confidence => float(),
+          optional(:url) => String.t()
+        }
   @type answer :: %{
           :answer => String.t(),
           :confidence => float(),
@@ -62,7 +67,8 @@ defmodule Swarm.Core do
           :key => String.t(),
           :score => float(),
           optional(:spans) => [%{ordinal: integer(), text: String.t()}],
-          optional(:relevance) => float()
+          optional(:relevance) => float(),
+          optional(:source_ref) => String.t()
         }
   @typedoc "Typed retrieval outcome: ok / partial (some sources failed) / hard error."
   @type retrieval :: {:ok, [hit()]} | {:partial, [hit()], [term()]} | {:error, term()}
@@ -87,15 +93,21 @@ defmodule Swarm.Core do
       if first_person and viewer == "" do
         identity_required()
       else
-        # "my X" with an asker → narrow retrieval to that asker's items.
-        owner = if first_person, do: viewer, else: nil
+        case source_link_answer(query, scopes, opts) do
+          {:ok, answer} ->
+            answer
 
-        decision = Gate.route(query, opts)
+          :none ->
+            # "my X" with an asker → narrow retrieval to that asker's items.
+            owner = if first_person, do: viewer, else: nil
 
-        case decision.tier do
-          :tier0 -> tier0_answer(decision.intent)
-          :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
-          :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+            decision = Gate.route(query, opts)
+
+            case decision.tier do
+              :tier0 -> tier0_answer(decision.intent)
+              :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
+              :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+            end
         end
       end
 
@@ -162,30 +174,38 @@ defmodule Swarm.Core do
   defp hybrid_hits(query, scopes, opts) do
     owner = Keyword.get(opts, :owner)
     limit = Keyword.get(opts, :limit, @search_limit)
-    key_hits = query |> search(scopes, opts) |> gate_key_hits(query)
+    active_hits = active_source_hits(query, scopes, opts)
 
-    if owner do
-      key_hits
-    else
-      content_hits =
-        query
-        |> Retrieval.search(scopes, limit: limit, expand: false)
-        |> Map.fetch!(:memories)
-        |> Enum.map(
-          &%{
-            id: &1.node_id,
-            type: &1.type,
-            key: &1.key,
-            score: &1.relevance,
-            # Keep the cited passages + the calibrated relevance — the consilium is
-            # grounded on the answer-bearing text (not the title), and calibration
-            # anchors on `relevance` (was discarded here; the precise-lookup gap).
-            spans: &1.spans,
-            relevance: &1.relevance
-          }
-        )
+    cond do
+      active_hits != [] ->
+        active_hits
 
-      merge_hits(content_hits, key_hits, limit)
+      owner ->
+        query |> search(scopes, opts) |> gate_key_hits(query)
+
+      true ->
+        key_hits = query |> search(scopes, opts) |> gate_key_hits(query)
+
+        content_hits =
+          query
+          |> Retrieval.search(scopes, limit: limit, expand: false)
+          |> Map.fetch!(:memories)
+          |> Enum.map(
+            &%{
+              id: &1.node_id,
+              type: &1.type,
+              key: &1.key,
+              score: &1.relevance,
+              # Keep the cited passages + the calibrated relevance — the consilium is
+              # grounded on the answer-bearing text (not the title), and calibration
+              # anchors on `relevance` (was discarded here; the precise-lookup gap).
+              spans: &1.spans,
+              relevance: &1.relevance,
+              source_ref: &1.source_ref
+            }
+          )
+
+        merge_hits(content_hits, key_hits, limit)
     end
   end
 
@@ -219,6 +239,86 @@ defmodule Swarm.Core do
   @spec key_term_match?(String.t(), String.t()) :: boolean()
   defp key_term_match?(key_down, term) do
     Regex.match?(~r/(^|[^[:alnum:]])#{Regex.escape(term)}([^[:alnum:]]|$)/u, key_down)
+  end
+
+  defp active_source_hits(query, scopes, opts) do
+    active = active_keys(opts)
+
+    if source_link_query?(query) and active != [] do
+      active
+      |> visible_active_content_hits(scopes)
+      |> Enum.map(&Map.put(&1, :score, 1.0))
+    else
+      []
+    end
+  end
+
+  defp source_link_answer(query, scopes, opts) do
+    hits = active_source_hits(query, scopes, opts)
+
+    cond do
+      hits == [] ->
+        :none
+
+      true ->
+        citations = Enum.map(hits, &cite/1)
+        links = citations |> Enum.map(&Map.get(&1, :url)) |> Enum.reject(&(&1 in [nil, ""]))
+
+        text =
+          case links do
+            [] ->
+              "I have the cited source, but no link template is configured for it."
+
+            [one] ->
+              one
+
+            many ->
+              Enum.map_join(many, "\n", &"- #{&1}")
+          end
+
+        {:ok,
+         %{
+           answer: text,
+           confidence: 0.9,
+           tier: "tier_tools",
+           status: :found,
+           citations: citations
+         }}
+    end
+  end
+
+  defp source_link_query?(query) do
+    query
+    |> String.downcase()
+    |> String.match?(
+      ~r/(^|[^[:alnum:]])(link|url|source|citation|wiki|page|written|посилання|лінк|джерел|сторінк|вікі)([^[:alnum:]]|$)/u
+    )
+  end
+
+  defp visible_active_content_hits(active_keys, scopes) do
+    Repo.query!(
+      """
+      SELECT n.id, n.type, n.key, n.reliability, c.source_ref
+      FROM node n
+      JOIN content c ON c.node_id = n.id
+      WHERE n.scope = ANY($1) AND n.key = ANY($2)
+      ORDER BY array_position($2, n.key)
+      LIMIT 5
+      """,
+      [scopes, active_keys]
+    )
+    |> Map.get(:rows)
+    |> Enum.map(fn [id, type, key, reliability, source_ref] ->
+      %{
+        id: id,
+        type: type,
+        key: key,
+        confidence: reliability,
+        source_ref: source_ref,
+        spans: [],
+        relevance: 1.0
+      }
+    end)
   end
 
   # Union content hits (primary, ranked by relevance) with key hits, de-duped by
@@ -386,7 +486,7 @@ defmodule Swarm.Core do
   end
 
   defp tools_answer(query, scopes, retriever, owner, opts) do
-    case retriever.(query, scopes, limit: @search_limit, owner: owner) do
+    case retriever.(query, scopes, retrieval_opts(opts, owner)) do
       {:ok, []} ->
         case try_structured_from_tools(query, scopes, [], opts) do
           {:serve, answer} -> answer
@@ -435,7 +535,7 @@ defmodule Swarm.Core do
   end
 
   defp escalate_answer(query, scopes, retriever, owner, opts) do
-    case retriever.(query, scopes, limit: @search_limit, owner: owner) do
+    case retriever.(query, scopes, retrieval_opts(opts, owner)) do
       {:error, reason} ->
         error_result(reason, "escalate")
 
@@ -448,6 +548,12 @@ defmodule Swarm.Core do
 
         synthesize(query, hits, base_status, scopes, opts)
     end
+  end
+
+  defp retrieval_opts(opts, owner) do
+    opts
+    |> Keyword.put(:limit, @search_limit)
+    |> Keyword.put(:owner, owner)
   end
 
   defp synthesize(query, hits, base_status, scopes, opts) do
@@ -1081,7 +1187,48 @@ defmodule Swarm.Core do
 
   defp query_terms(query), do: query |> patterns() |> Enum.map(&String.trim(&1, "%"))
 
-  defp cite(hit), do: %{source: hit.type, ref: hit.key, confidence: hit.score}
+  defp cite(hit) do
+    %{source: hit.type, ref: hit.key, confidence: hit.score}
+    |> maybe_put_citation_url(Map.get(hit, :source_ref))
+  end
+
+  defp maybe_put_citation_url(citation, source_ref) when is_binary(source_ref) do
+    case citation_url(source_ref) do
+      nil -> citation
+      url -> Map.put(citation, :url, url)
+    end
+  end
+
+  defp maybe_put_citation_url(citation, _source_ref), do: citation
+
+  defp citation_url(source_ref) do
+    with [kind, id] <- String.split(source_ref, ":", parts: 2),
+         true <- String.trim(id) != "",
+         template when is_binary(template) <- citation_template(kind),
+         true <- String.contains?(template, "{id}"),
+         url <- String.replace(template, "{id}", URI.encode_www_form(id)),
+         true <- valid_citation_url?(url) do
+      url
+    else
+      _ -> nil
+    end
+  end
+
+  defp valid_citation_url?(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) ->
+        host != ""
+
+      _ ->
+        false
+    end
+  end
+
+  defp citation_template(kind) do
+    :swarm
+    |> Application.get_env(:citation_url_templates, %{})
+    |> Map.get(kind)
+  end
 
   # A claim-graph fact as a citation: source "claim", the S-P-O as the ref, the
   # edge reliability as confidence — so a fact-grounded answer is explainable.

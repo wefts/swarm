@@ -9,6 +9,8 @@ defmodule Swarm.CoreResultTest do
 
   alias Swarm.Core
   alias Swarm.Gate.Bands
+  alias Swarm.Graph.Store
+  alias Swarm.Ingest.Content
 
   # Force tier_tools (the gate is injected) + an optional retriever override.
   defp tools_opts(extra \\ []) do
@@ -45,6 +47,133 @@ defmodule Swarm.CoreResultTest do
 
     assert a.status == :found
     assert a.citations != []
+  end
+
+  test "content citations include configured source URL when source_ref is linkable" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "https://docs.example.test/pages/{id}"
+    })
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Example.test AI Solution",
+           score: 0.9,
+           source_ref: "confluence:12345"
+         }
+       ]}
+    end
+
+    a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+    assert [%{source: "article", ref: "Example.test AI Solution", url: url}] = a.citations
+    assert url == "https://docs.example.test/pages/12345"
+  end
+
+  test "content citations stay plaintext when no template exists" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.delete_env(:swarm, :citation_url_templates)
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Example.test AI Solution",
+           score: 0.9,
+           source_ref: "confluence:12345"
+         }
+       ]}
+    end
+
+    a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+    assert [%{source: "article", ref: "Example.test AI Solution"} = citation] = a.citations
+    refute Map.has_key?(citation, :url)
+  end
+
+  test "content citations stay plaintext when source ref or template is malformed" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "not-a-url/{id}",
+      "mediawiki" => "javascript:{id}",
+      "valid" => "https://docs.example.test/pages/{id}"
+    })
+
+    for source_ref <- ["confluence:12345", "mediawiki:12345", "valid:"] do
+      retr = fn _q, _s, _o ->
+        {:ok,
+         [
+           %{
+             id: 1,
+             type: "article",
+             key: "Example.test AI Solution",
+             score: 0.9,
+             source_ref: source_ref
+           }
+         ]}
+      end
+
+      a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+      assert [%{source: "article", ref: "Example.test AI Solution"} = citation] = a.citations
+      refute Map.has_key?(citation, :url)
+    end
+  end
+
+  test "source-link follow-up uses visible active citation keys" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "https://docs.example.test/pages/{id}"
+    })
+
+    id = Store.upsert_node("article", "Example.test AI Solution", scope: "public")
+    :ok = Content.put_body(id, "AI Solution source body.", source_ref: "confluence:12345")
+
+    a =
+      Core.ask(
+        "Could you share the wiki page link?",
+        tools_opts(active_keys: ["Example.test AI Solution"])
+      )
+
+    assert a.status == :found
+    assert a.tier == "tier_tools"
+    assert a.answer == "https://docs.example.test/pages/12345"
+    assert [%{source: "article", ref: "Example.test AI Solution", url: url}] = a.citations
+    assert url == "https://docs.example.test/pages/12345"
   end
 
   test "a transport failure → :error, DISTINCT from not_found, no raw leak, not silent" do

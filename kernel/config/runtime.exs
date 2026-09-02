@@ -81,6 +81,23 @@ if judge = System.get_env("SWARM_CONSILIUM_JUDGE") do
   config :swarm, :consilium, judge: judge
 end
 
+citation_url_templates =
+  [
+    {"confluence", "SWARM_CITATION_URL_TEMPLATE_CONFLUENCE"},
+    {"mediawiki", "SWARM_CITATION_URL_TEMPLATE_MEDIAWIKI"}
+  ]
+  |> Enum.flat_map(fn {kind, env} ->
+    case System.get_env(env) do
+      value when is_binary(value) and value != "" -> [{kind, value}]
+      _ -> []
+    end
+  end)
+  |> Map.new()
+
+if map_size(citation_url_templates) > 0 do
+  config :swarm, :citation_url_templates, citation_url_templates
+end
+
 # Enrichment reward-gate threshold — the ADR-8 tuning knob, calibrated PER CORPUS
 # (calibrate.exs). The config.exs default (0.35) gates little; a calibrated run sets
 # SWARM_ENRICH_THRESHOLD to its corpus p50 (prod ≈ 0.58, derived 2026-06-29) so

@@ -90,7 +90,12 @@ defmodule Swarm.Core.Server do
       citations:
         Enum.map(
           a.citations,
-          &%Citation{source: &1.source, ref: &1.ref, confidence: &1.confidence}
+          &%Citation{
+            source: &1.source,
+            ref: &1.ref,
+            confidence: &1.confidence,
+            url: Map.get(&1, :url, "")
+          }
         )
     }
   end

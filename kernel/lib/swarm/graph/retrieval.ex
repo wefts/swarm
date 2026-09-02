@@ -46,6 +46,7 @@ defmodule Swarm.Graph.Retrieval do
           confidence: float(),
           document_kind: DocumentKind.kind(),
           structural_evidence: [String.t()],
+          source_ref: String.t() | nil,
           spans: [%{ordinal: integer(), text: String.t()}]
         }
 
@@ -536,15 +537,23 @@ defmodule Swarm.Graph.Retrieval do
     ids = Enum.map(memories, & &1.node_id)
 
     meta =
-      Repo.query!("SELECT id, type, key, reliability FROM node WHERE id = ANY($1)", [ids])
+      Repo.query!(
+        """
+        SELECT n.id, n.type, n.key, n.reliability, c.source_ref
+        FROM node n
+        LEFT JOIN content c ON c.node_id = n.id
+        WHERE n.id = ANY($1)
+        """,
+        [ids]
+      )
       |> Map.get(:rows)
-      |> Map.new(fn [id, type, key, rel] -> {id, {type, key, rel}} end)
+      |> Map.new(fn [id, type, key, rel, source_ref] -> {id, {type, key, rel, source_ref}} end)
 
     corr = Corroboration.for_nodes(ids, scopes: scopes)
     evidence = structural_evidence(ids, scopes)
 
     Enum.map(memories, fn m ->
-      {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
+      {type, key, rel, source_ref} = Map.get(meta, m.node_id, {nil, nil, 0.0, nil})
       # Corroboration when the node carries independent typed evidence; otherwise
       # fall back to intrinsic reliability (an un-enriched node is not penalised).
       confidence = Map.get(corr, m.node_id, rel)
@@ -554,6 +563,7 @@ defmodule Swarm.Graph.Retrieval do
         key: key,
         confidence: confidence,
         structural_evidence: Map.get(evidence, m.node_id, []),
+        source_ref: source_ref,
         relevance: Float.round(m.relevance, 4)
       })
     end)
