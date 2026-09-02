@@ -16,12 +16,13 @@ require Logger
 defmodule LiveCoreAskBatch.Conditions do
   @moduledoc false
 
-  def build(repo, tier_gate) do
+  def build(repo, tier_gate, scopes) do
     %{
       database: repo.config()[:database],
       swarm_env: System.get_env("SWARM_ENV", ""),
       code_revision: code_revision(),
       code_dirty?: code_dirty?(),
+      scopes: scopes,
       consilium: normalize(Application.get_env(:swarm, :consilium, [])),
       tier_gate: normalize(tier_gate),
       retrieval: normalize(Application.get_env(:swarm, :retrieval, [])),
@@ -135,10 +136,6 @@ case Keyword.get(tier_gate, :network_min_corroboration) do
   other -> raise "live_core_ask_batch: network_min_corroboration unset/invalid: #{inspect(other)}"
 end
 
-conditions = LiveCoreAskBatch.Conditions.build(Repo, tier_gate)
-condition_hash = LiveCoreAskBatch.Conditions.condition_hash(conditions)
-LiveCoreAskBatch.Conditions.compare_conditions!(conditions, condition_hash)
-
 scopes =
   case System.get_env("QA_SCOPES") do
     nil ->
@@ -146,10 +143,16 @@ scopes =
         Ecto.Adapters.SQL.query!(
           Repo,
           """
-          SELECT DISTINCT scope
-          FROM node
-          WHERE scope IS NOT NULL AND scope <> ''
-          ORDER BY scope
+          WITH scopes AS (
+            SELECT scope
+            FROM node
+            WHERE scope IS NOT NULL AND scope <> ''
+            UNION
+            SELECT visibility_scope
+            FROM edge
+            WHERE visibility_scope IS NOT NULL AND visibility_scope <> ''
+          )
+          SELECT scope FROM scopes ORDER BY scope
           """,
           []
         )
@@ -159,6 +162,10 @@ scopes =
     value ->
       String.split(value, ",", trim: true)
   end
+
+conditions = LiveCoreAskBatch.Conditions.build(Repo, tier_gate, scopes)
+condition_hash = LiveCoreAskBatch.Conditions.condition_hash(conditions)
+LiveCoreAskBatch.Conditions.compare_conditions!(conditions, condition_hash)
 
 viewer = System.get_env("QA_VIEWER", "")
 
