@@ -118,7 +118,15 @@ defmodule Swarm.Enrichment.Procedures do
   end
 
   # Insert ONE fresh has_step edge (proc → step node), returning [edge_id] or [] on write error.
-  @spec write_step(integer(), String.t(), pos_integer(), map(), String.t(), String.t(), String.t() | nil) ::
+  @spec write_step(
+          integer(),
+          String.t(),
+          pos_integer(),
+          map(),
+          String.t(),
+          String.t(),
+          String.t() | nil
+        ) ::
           [integer()]
   defp write_step(proc, text, ordinal, node, origin, provenance, lineage) do
     step = Store.upsert_node(@step_type, text, scope: node.scope)
