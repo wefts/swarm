@@ -312,6 +312,35 @@ defmodule Swarm.Enrichment.TopologyJoinTest do
              "cluster_context=[cluster=net:cluster:platform-alpha routed_hosts=1/2]"
   end
 
+  test "mix task requires an explicit staging allow switch for staging writes" do
+    repo_config = Application.get_env(:swarm, Repo)
+    Application.put_env(:swarm, Repo, Keyword.put(repo_config, :database, "swarm_staging"))
+
+    on_exit(fn ->
+      Application.put_env(:swarm, Repo, repo_config)
+    end)
+
+    Mix.Task.reenable("swarm.topology_join")
+
+    assert_raise Mix.Error, ~r/refusing --apply against swarm_staging/, fn ->
+      Mix.Tasks.Swarm.TopologyJoin.run(["--scopes", @scope, "--apply"])
+    end
+
+    output =
+      capture_io(fn ->
+        Mix.Task.reenable("swarm.topology_join")
+
+        Mix.Tasks.Swarm.TopologyJoin.run([
+          "--scopes",
+          @scope,
+          "--apply",
+          "--allow-staging"
+        ])
+      end)
+
+    assert output =~ "TOPOLOGY_JOIN_STAGING_APPLY"
+  end
+
   test "bridges exact IP and FQDN cross-namespace duplicates with alias_of" do
     Store.upsert_node("entity", "192.0.2.10", scope: @scope)
     Store.upsert_node("entity", "app01.example.test", scope: @scope)

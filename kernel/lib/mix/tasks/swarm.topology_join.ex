@@ -4,12 +4,14 @@ defmodule Mix.Tasks.Swarm.TopologyJoin do
   @moduledoc """
   Derives WAN↔compute joins and exact identity bridges from existing graph facts.
   Writes must target a sandbox clone via `SWARM_DB_NAME`; `swarm_staging` is
-  refused for `--apply`.
+  refused for `--apply` unless a deliberate operator write includes
+  `--allow-staging`.
 
   Examples:
 
       mix swarm.topology_join --scopes src:...
       SWARM_DB_NAME=swarm_structural_spine_sandbox mix swarm.topology_join --scopes src:... --apply
+      SWARM_ENV=staging mix swarm.topology_join --scopes src:... --apply --allow-staging
       mix swarm.topology_join --scopes src:... --gateway net:gateway:gateway-a
   """
 
@@ -20,6 +22,7 @@ defmodule Mix.Tasks.Swarm.TopologyJoin do
 
   @switches [
     apply: :boolean,
+    allow_staging: :boolean,
     scopes: :string,
     gateway: :string
   ]
@@ -29,6 +32,7 @@ defmodule Mix.Tasks.Swarm.TopologyJoin do
     {opts, _argv, _invalid} = OptionParser.parse(args, switches: @switches)
     start_repo!()
     refuse_staging_apply!(opts)
+    warn_staging_apply!(opts)
 
     scopes = scopes!(opts)
     summary = TopologyJoin.derive(scopes, apply: Keyword.get(opts, :apply, false))
@@ -99,8 +103,26 @@ defmodule Mix.Tasks.Swarm.TopologyJoin do
   defp refuse_staging_apply!(opts) do
     db = Repo.config()[:database]
 
-    if Keyword.get(opts, :apply, false) and db == "swarm_staging" do
-      Mix.raise("refusing --apply against swarm_staging; set SWARM_DB_NAME to a sandbox clone")
+    if Keyword.get(opts, :apply, false) and db == "swarm_staging" and
+         not Keyword.get(opts, :allow_staging, false) do
+      Mix.raise(
+        "refusing --apply against swarm_staging; set SWARM_DB_NAME to a sandbox clone or pass --allow-staging after taking a rollback snapshot"
+      )
+    end
+  end
+
+  defp warn_staging_apply!(opts) do
+    db = Repo.config()[:database]
+
+    # The default refusal protects the reference DB from accidental sandbox
+    # commands. `--allow-staging` is the opposite: a deliberate, reversible
+    # operator write after a rollback snapshot exists. Make that intent visible
+    # in logs so an applied staging run is never mistaken for a dry run.
+    if Keyword.get(opts, :apply, false) and db == "swarm_staging" and
+         Keyword.get(opts, :allow_staging, false) do
+      Mix.shell().info(
+        "TOPOLOGY_JOIN_STAGING_APPLY: writing derived topology to swarm_staging; rollback snapshot must already exist"
+      )
     end
   end
 
