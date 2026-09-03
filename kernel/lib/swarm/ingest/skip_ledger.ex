@@ -14,7 +14,9 @@ defmodule Swarm.Ingest.SkipLedger do
 
   @connector_re ~r/^[A-Za-z0-9_.]+$/
   @source_re ~r/^[a-z][a-z0-9_-]*$/
-  @source_ref_re ~r/^[a-z][a-z0-9_-]*:[A-Za-z0-9_.-]+$/
+  # `<source>:<segment>` with one or more colon-separated segments, so a site-qualified
+  # reference (`proxmox:casa:vm:101`) is as valid as a flat one (`confluence:101`).
+  @source_ref_re ~r/^[a-z][a-z0-9_-]*(:[A-Za-z0-9_.-]+)+$/
   @reason_re ~r/^[a-z][a-z0-9_]*$/
 
   @doc "Record one connector-side skip. Replays update the existing reason row."
