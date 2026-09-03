@@ -144,7 +144,7 @@ tasks:
       - >-
         mise exec -- bash -c
         'export PATH="$(mise where elixir)/.mix/escripts:$PATH";
-        protoc -I proto --elixir_out=plugins=grpc:kernel/lib/swarm/proto proto/embed.proto proto/core.proto'
+        protoc -I proto --elixir_out=plugins=grpc:kernel/lib/swarm/proto proto/embed.proto proto/core.proto proto/connector.proto'
       # protoc-gen-elixir output isn't `mix format`-clean; format it so the gate passes.
       - cd kernel && mise exec -- mix format "lib/swarm/proto/**/*.{ex,exs}"
 

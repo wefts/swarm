@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// Connector port (ADR-21): a connector image exposes this service on localhost
+// inside a scheduled co-executed ingest job. The kernel ingest runner drives the
+// pagination loop and owns completeness; the connector returns one page at a
+// time with the same semantics as Swarm.Ports.Connector.fetch/2.
+package swarm.connector.v1;
+
+service Connector {
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+}
+
+message FetchRequest {
+  Cursor cursor = 1;
+  FetchOptions options = 2;
+}
+
+message FetchOptions {
+  string scope = 1;
+  uint32 limit = 2;
+  uint32 max_pages = 3;
+  string since = 4; // ISO-8601 UTC timestamp; empty means full sync.
+  map<string, string> source_options = 5;
+}
+
+message Cursor {
+  bool start = 1;
+  bool done = 2;
+  // Opaque connector-owned cursor encoded as a JSON object. Empty with start=true
+  // begins the run; done=true is only used in responses.
+  string json = 3;
+}
+
+message FetchResponse {
+  FetchStatus status = 1;
+  Page page = 2;
+  string error = 3;
+}
+
+enum FetchStatus {
+  FETCH_STATUS_UNSPECIFIED = 0;
+  FETCH_OK = 1;
+  FETCH_ERROR = 2;
+}
+
+message Page {
+  repeated Event events = 1;
+  Cursor cursor = 2;
+  bool truncated = 3;
+  repeated Skip skips = 4;
+  uint32 total = 5;
+}
+
+message Event {
+  string provenance = 1;
+  string origin = 2;
+  string source = 3;
+  string source_ref = 4;
+  string occurred_at = 5; // ISO-8601 timestamp with offset.
+  repeated Entity entities = 6;
+  repeated Relation relations = 7;
+}
+
+message Entity {
+  string type = 1;
+  string key = 2;
+  string identity = 3;
+  string source_ref = 4;
+  string scope = 5;
+  string content = 6;
+}
+
+message Relation {
+  string from = 1;
+  string to = 2;
+  string from_ref = 3;
+  string to_ref = 4;
+  string type = 5;
+}
+
+message Skip {
+  string connector = 1;
+  string source = 2;
+  string source_ref = 3;
+  string reason = 4;
+  string occurred_at = 5; // ISO-8601 timestamp with offset; empty lets kernel stamp now.
+}
