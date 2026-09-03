@@ -18,7 +18,11 @@ hits="$tmp/hits.txt"
 git grep -nI -E '.' -- ':!CHANGELOG.md' > "$tracked" || true
 
 if git rev-parse --verify origin/main >/dev/null 2>&1; then
-  git diff --no-ext-diff --find-renames --find-copies origin/main...HEAD -- . > "$diff" || true
+  # Added lines only. A removed line is a leak being FIXED, and failing the
+  # gate on a fix teaches people to ignore the gate. `+++` headers are file
+  # paths, not content, so they are dropped too.
+  git diff --no-ext-diff --find-renames --find-copies origin/main...HEAD -- . \
+    | grep '^+' | grep -v '^+++' > "$diff" || true
 else
   : > "$diff"
 fi
