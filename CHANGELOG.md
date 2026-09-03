@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.9.0](https://github.com/wefts/swarm/compare/v0.8.3..v0.9.0) - 2026-09-03
+
+### Bug Fixes
+
+- **(connector)** start repo before resolving source scope - ([1819d2e](https://github.com/wefts/swarm/commit/1819d2e092f3d6ffb7a6d229f1ede71f087fe805)) - Serhii BOREMCHUK
+- **(connector)** accept decoded grpc enum atoms - ([9d580a6](https://github.com/wefts/swarm/commit/9d580a65770b253ce6e9fadbd15c6e07f3917766)) - Serhii BOREMCHUK
+- **(gate)** leak scan should read added lines, not the whole diff - ([c4f886b](https://github.com/wefts/swarm/commit/c4f886b80103c75c14a3729f2e19892f122a9cf1)) - Serhii BOREMCHUK
+- **(graph)** rank dated over undated per object for many-valued state relations - ([d815368](https://github.com/wefts/swarm/commit/d815368ccc4b590e27b0c5765bfcfd3a3808a1a7)) - Serhii BOREMCHUK
+- **(ingest)** clamp edge scope to stored endpoint scopes - ([3a6e305](https://github.com/wefts/swarm/commit/3a6e305d84615272463f942ee255b1c6d9bcf10d)) - Serhii BOREMCHUK
+- **(ingest)** accept site-qualified source refs in the skip ledger - ([dae2f64](https://github.com/wefts/swarm/commit/dae2f64b9d95ce6f38d521ffaba445b61f3e417a)) - Serhii BOREMCHUK
+
+### Documentation
+
+- **(graph)** record the temporal storage decision as built - ([4b2490d](https://github.com/wefts/swarm/commit/4b2490dbb459971313afd8da7090b3bfe12dad5f)) - Serhii BOREMCHUK
+- **(network)** use a documentation-safe host in the FQDN example - ([b5b1955](https://github.com/wefts/swarm/commit/b5b19555a2a9d0752b4c7a7876b7ba701c1dacc4)) - Serhii BOREMCHUK
+
+### Features
+
+- **(connector)** define fetch rpc contract - ([4d9eb6f](https://github.com/wefts/swarm/commit/4d9eb6fec1cf1733faeb325e6bd0479eeffeabba)) - Serhii BOREMCHUK
+- **(connector)** add grpc ingest runner - ([0a62c25](https://github.com/wefts/swarm/commit/0a62c255d9abc6a0f936ea782ec9fbdcd61e981d)) - Serhii BOREMCHUK
+- **(connector)** carry valid_time on the fetch contract - ([29a0187](https://github.com/wefts/swarm/commit/29a018716a2b975fccfc252466acf0c64cf5cc49)) - Serhii BOREMCHUK
+- **(graph)** add bitemporal validity intervals - ([56beea2](https://github.com/wefts/swarm/commit/56beea22c6675ff1ff4e70dccb2841ba88d08c61)) - Serhii BOREMCHUK
+- **(graph)** resolve temporal reads through alias_of; keep intervals across merges - ([3cc7d65](https://github.com/wefts/swarm/commit/3cc7d6518b4947b4cbb209c74977a9618124e651)) - Serhii BOREMCHUK
+
+### Miscellaneous Chores
+
+- **(gate)** add public-repo leak scan - ([c706cff](https://github.com/wefts/swarm/commit/c706cfffabcc711f4390251aaa78b0c61a500700)) - Serhii BOREMCHUK
+
+### Other
+
+- Merge pull request #1 from wefts/research/structural-spine
+
+Structural spine: ontology, gate routing, and network semantics (v0.8.0–v0.8.3) - ([bb8a33f](https://github.com/wefts/swarm/commit/bb8a33f160450d3ad2040905eca3f7eb2c00565f)) - Sergij Boremchuk
+
+### Refactoring
+
+- **(graph)** alias Temporal and Repo at module top - ([f913cb7](https://github.com/wefts/swarm/commit/f913cb74a2b7c8884fff31955d87e5259882df82)) - Serhii BOREMCHUK
+
+---
 ## [0.8.3](https://github.com/wefts/swarm/compare/v0.8.2..v0.8.3) - 2026-09-03
 
 ### Bug Fixes
