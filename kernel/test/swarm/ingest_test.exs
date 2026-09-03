@@ -61,6 +61,37 @@ defmodule Swarm.IngestTest do
     assert count("dead_letter") == 3
   end
 
+  test "an edge to an entity another source already owns lands private instead of quarantining" do
+    register_test_sources!()
+
+    # source B named the shared entity first; it keeps B's scope on A's upsert
+    assert {:ok, :written} =
+             Ingest.ingest(
+               event("b-first",
+                 file_key: "/b/shared",
+                 file_scope: test_src2(),
+                 dir_scope: test_src2()
+               )
+             )
+
+    assert {:ok, :written} =
+             Ingest.ingest(
+               event("a-then",
+                 file_key: "/b/shared",
+                 file_scope: test_src(),
+                 dir_scope: test_src()
+               )
+             )
+
+    assert count("dead_letter") == 0
+    # both entities keep B's scope on A's upsert…
+    assert Repo.query!("SELECT DISTINCT scope FROM node").rows == [[test_src2()]]
+    # …so A's relation is clamped to GLB(A declared, B stored) = private — a second, narrower
+    # edge beside B's own, instead of a quarantined event
+    assert Repo.query!("SELECT visibility_scope FROM edge ORDER BY 1").rows ==
+             [["private"], [test_src2()]]
+  end
+
   test "writes nodes and a typed edge" do
     assert {:ok, :written} = Ingest.ingest(event("p1"))
     assert count("node") == 2

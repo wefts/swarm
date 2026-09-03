@@ -237,7 +237,7 @@ defmodule Swarm.Ingest do
       Swarm.Repo.transaction(fn ->
         ids = upsert_entities(norm.entities)
         persist_content(norm.entities, ids, norm.provenance)
-        scopes = refs_to_scopes(norm.entities)
+        scopes = refs_to_scopes(norm.entities, ids)
         write_relations(norm.relations, ids, scopes, norm)
       end)
 
@@ -272,13 +272,32 @@ defmodule Swarm.Ingest do
     end)
   end
 
-  @spec refs_to_scopes([map()]) :: %{optional(String.t()) => String.t()}
-  defp refs_to_scopes(entities) do
+  # The scope an edge may take is bounded by its endpoints AS STORED, not only as declared: an
+  # entity that already exists under another source's scope (a cluster the IaC source named
+  # first, a shared marker) keeps that scope on upsert, and the contract checks the stored
+  # value. Clamping to GLB(declared, stored) lands the cross-source edge as `private` (the
+  # ADR-18 F3 cost) instead of quarantining the whole event as scope_wider_than_endpoints.
+  @spec refs_to_scopes([map()], map()) :: %{optional(String.t()) => String.t()}
+  defp refs_to_scopes(entities, ids) do
+    stored = stored_scopes(Map.values(ids))
+
     Enum.reduce(entities, %{}, fn e, acc ->
+      scope = Contract.glb(e.scope, Map.get(stored, Map.get(ids, e.identity), e.scope))
+
       acc
-      |> Map.put(e.identity, e.scope)
-      |> Map.put(e.key, e.scope)
+      |> Map.put(e.identity, scope)
+      |> Map.put(e.key, scope)
     end)
+  end
+
+  @spec stored_scopes([integer()]) :: %{optional(integer()) => String.t()}
+  defp stored_scopes([]), do: %{}
+
+  defp stored_scopes(node_ids) do
+    %{rows: rows} =
+      Swarm.Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1)", [Enum.uniq(node_ids)])
+
+    Map.new(rows, fn [id, scope] -> {id, scope} end)
   end
 
   # Persist each content-bearing entity's raw body (swarm ADR-14 §2, Phase A):
