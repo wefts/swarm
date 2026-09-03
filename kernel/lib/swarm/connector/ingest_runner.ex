@@ -26,6 +26,8 @@ defmodule Swarm.Connector.IngestRunner do
 
   @spec run_from_env() :: {:ok, Sync.report()} | {:error, term()}
   def run_from_env do
+    :ok = start_runtime()
+
     run(
       address: env!("SWARM_CONNECTOR_ADDRESS"),
       scope: scope(),
