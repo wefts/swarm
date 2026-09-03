@@ -291,6 +291,9 @@ defmodule Swarm.Graph.Store do
           # key (consilium/codex). Same TOCTOU class ADR-4 documents.
           Repo.query!("SELECT id FROM node WHERE id = ANY($1) FOR UPDATE", [[alias_id, into_id]])
           n = repoint_edges(alias_id, into_id)
+          # schema v13: validity intervals key supersession by endpoint ids — repointed edges
+          # must be re-keyed or later supersession misses them.
+          Swarm.Graph.Temporal.rekey_node(into_id)
           union_chunks(alias_id, into_id)
           survive_content(alias_id, into_id)
           purge_source_edges(alias_id)
@@ -573,6 +576,9 @@ defmodule Swarm.Graph.Store do
           [target]
         )
 
+        # schema v13: the alias edge's validity intervals are history, not provenance — carry
+        # them onto the survivor (CASCADE would silently delete them with the edge).
+        Swarm.Graph.Temporal.move_intervals(eid, target)
         Repo.query!("DELETE FROM edge WHERE id = $1", [eid])
         :ok
 

@@ -45,8 +45,10 @@ defmodule Swarm.Graph.Temporal do
   @type fact :: %{
           edge_id: integer(),
           subject: String.t(),
+          subject_id: integer(),
           relation: String.t(),
           object: String.t(),
+          object_id: integer(),
           scope: String.t(),
           interval_id: integer() | nil,
           valid_from: DateTime.t() | nil,
@@ -120,6 +122,83 @@ defmodule Swarm.Graph.Temporal do
     {:ok, n}
   end
 
+  @doc """
+  Recompute the supersession keys of every interval on an edge touching `node_id`. The key is
+  denormalised (it embeds endpoint ids), so a merge that repoints edges onto a survivor must
+  call this or later supersession would miss the repointed facts. Returns the rows updated.
+  """
+  @spec rekey_node(integer()) :: non_neg_integer()
+  def rekey_node(node_id) when is_integer(node_id) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT DISTINCT e.id, e.src, e.dst, e.type, e.visibility_scope
+          FROM edge e
+          JOIN edge_validity v ON v.edge_id = e.id
+         WHERE e.src = $1 OR e.dst = $1
+        """,
+        [node_id]
+      )
+
+    Enum.reduce(rows, 0, fn [id, src, dst, type, scope], acc ->
+      case Domain.temporal(type) do
+        %{kind: :state, supersession: supersession} ->
+          key = supersession_key(%{src: src, dst: dst, type: type, scope: scope}, supersession)
+
+          %{num_rows: n} =
+            Repo.query!(
+              "UPDATE edge_validity SET supersession_key = $2 WHERE edge_id = $1 AND supersession_key <> $2",
+              [id, key]
+            )
+
+          acc + n
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  @doc """
+  Carry the validity intervals of `from_edge` onto `to_edge` (a natural-key collision during a
+  node merge — the two edges were one fact under two spellings). An alias interval that overlaps
+  a survivor interval from the SAME source is the same observation twice and is dropped; the rest
+  move, keyed for the survivor. Returns `{moved, dropped}`.
+  """
+  @spec move_intervals(integer(), integer()) :: {non_neg_integer(), non_neg_integer()}
+  def move_intervals(from_edge, to_edge) when is_integer(from_edge) and is_integer(to_edge) do
+    %{num_rows: dropped} =
+      Repo.query!(
+        """
+        DELETE FROM edge_validity a
+         WHERE a.edge_id = $1
+           AND EXISTS (
+             SELECT 1 FROM edge_validity s
+              WHERE s.edge_id = $2 AND s.source = a.source
+                AND tstzrange(coalesce(s.valid_from, '-infinity'), coalesce(s.valid_to, 'infinity'), '[)')
+                    && tstzrange(coalesce(a.valid_from, '-infinity'), coalesce(a.valid_to, 'infinity'), '[)')
+           )
+        """,
+        [from_edge, to_edge]
+      )
+
+    key =
+      case Repo.query!("SELECT supersession_key FROM edge_validity WHERE edge_id = $1 LIMIT 1", [
+             to_edge
+           ]).rows do
+        [[k]] -> k
+        [] -> nil
+      end
+
+    %{num_rows: moved} =
+      Repo.query!(
+        "UPDATE edge_validity SET edge_id = $2, supersession_key = coalesce($3, supersession_key), updated_at = now() WHERE edge_id = $1",
+        [from_edge, to_edge, key]
+      )
+
+    {moved, dropped}
+  end
+
   # --- read side -------------------------------------------------------------------------------
 
   @doc """
@@ -127,6 +206,10 @@ defmodule Swarm.Graph.Temporal do
   covers the instant only dated facts are returned; otherwise undated ones (explicit unknown-start
   intervals and legacy interval-less edges) are returned flagged `dated?: false` — they may answer,
   with lower temporal confidence. `:scopes` filters edge and endpoint scopes.
+
+  The subject is resolved through `alias_of` identity edges (one hop, either direction), so a
+  claim about a host named one way by a document and another way by a live source is one
+  subject once the alias is asserted.
   """
   @spec current(String.t(), String.t(), keyword()) :: [fact()]
   def current(subject_key, relation, opts \\ []) do
@@ -144,7 +227,7 @@ defmodule Swarm.Graph.Temporal do
           """ <> scope_sql,
           "ORDER BY v.observed_at DESC NULLS LAST, d.key"
         ),
-        [subject_key, relation, at | params]
+        [alias_ids(subject_key), relation, at | params]
       ).rows
 
     facts = Enum.map(rows, &row_to_fact/1)
@@ -169,9 +252,30 @@ defmodule Swarm.Graph.Temporal do
         scope_sql,
         "ORDER BY v.valid_from ASC NULLS FIRST, v.valid_to ASC NULLS LAST, d.key"
       ),
-      [subject_key, relation | params]
+      [alias_ids(subject_key), relation | params]
     ).rows
     |> Enum.map(&row_to_fact/1)
+  end
+
+  @doc """
+  The node ids a key resolves to: the node itself plus every node joined to it by an
+  `alias_of` identity edge (one hop, either direction, not refuted). Empty if the key is unknown.
+  """
+  @spec alias_ids(String.t()) :: [integer()]
+  def alias_ids(key) when is_binary(key) do
+    Repo.query!(
+      """
+      SELECT n.id FROM node n WHERE n.key = $1
+      UNION
+      SELECT e.dst FROM edge e JOIN node s ON s.id = e.src
+       WHERE s.key = $1 AND e.type = 'alias_of' AND e.reward >= 0
+      UNION
+      SELECT e.src FROM edge e JOIN node d ON d.id = e.dst
+       WHERE d.key = $1 AND e.type = 'alias_of' AND e.reward >= 0
+      """,
+      [key]
+    ).rows
+    |> Enum.map(fn [id] -> id end)
   end
 
   @doc """
@@ -192,8 +296,10 @@ defmodule Swarm.Graph.Temporal do
   def check(subject_key, relation, object_key, opts \\ []) do
     now = current(subject_key, relation, opts)
     past = history(subject_key, relation, opts)
-    mine_now = Enum.filter(now, &(&1.object == object_key))
-    mine_past = Enum.filter(past, &(&1.object == object_key))
+    # the object, too, is one identity across its aliases
+    objects = alias_ids(object_key)
+    mine_now = Enum.filter(now, &(&1.object_id in objects))
+    mine_past = Enum.filter(past, &(&1.object_id in objects))
 
     cond do
       match?([%{dated?: true} | _], mine_now) ->
@@ -388,13 +494,13 @@ defmodule Swarm.Graph.Temporal do
 
   defp facts_sql(extra_where, order) do
     """
-    SELECT e.id, s.key, e.type, d.key, e.visibility_scope,
+    SELECT e.id, s.key, s.id, e.type, d.key, d.id, e.visibility_scope,
            v.id, v.valid_from, v.valid_to, v.observed_at, v.source, v.closed_reason, v.absent_at
       FROM edge e
       JOIN node s ON s.id = e.src
       JOIN node d ON d.id = e.dst
       LEFT JOIN edge_validity v ON v.edge_id = e.id
-     WHERE s.key = $1 AND e.type = $2 AND e.reward >= 0
+     WHERE s.id = ANY($1) AND e.type = $2 AND e.reward >= 0
     #{extra_where}
     #{order}
     """
@@ -410,8 +516,10 @@ defmodule Swarm.Graph.Temporal do
   defp row_to_fact([
          edge_id,
          subject,
+         subject_id,
          relation,
          object,
+         object_id,
          scope,
          interval_id,
          valid_from,
@@ -424,8 +532,10 @@ defmodule Swarm.Graph.Temporal do
     %{
       edge_id: edge_id,
       subject: subject,
+      subject_id: subject_id,
       relation: relation,
       object: object,
+      object_id: object_id,
       scope: scope,
       interval_id: interval_id,
       valid_from: valid_from,

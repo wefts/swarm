@@ -266,6 +266,98 @@ defmodule Swarm.Graph.TemporalTest do
     end
   end
 
+  describe "identity across sources (proof 5 mechanics)" do
+    test "a claim about a host named one way by a document and another by a live source is one subject via alias_of",
+         %{vm: vm, a: a} do
+      # the document's undated claim: web-01 (documented name) hosted_on pve-a
+      doc_vm = entity("net:host:web-01.casa.example.test")
+      doc_edge = edge!(doc_vm, a, "hosted_on", "wiki:page:7")
+      {:ok, :undated} = Temporal.assert(doc_edge, valid_time: nil, source: "wiki:page:7")
+
+      # before the identity link the documented claim is only its own undated evidence
+      assert %{status: :undated} =
+               Temporal.check(
+                 "net:host:web-01.casa.example.test",
+                 "hosted_on",
+                 "net:host:casa/pve-a"
+               )
+
+      # the identity assertion (operator curation / ER): alias_of, an invariant identity edge
+      {:ok, _} =
+        Store.add_edge(vm, doc_vm, "alias_of", "curation-1", scope: "private", origin: "curation")
+
+      # the live source says web-01 is on pve-a, dated → the documented claim is CURRENT
+      {:ok, :opened} =
+        Temporal.assert(edge!(vm, a, "hosted_on", "obs-a"), valid_time: @t1, source: @site)
+
+      assert %{status: :current, fact: %{dated?: true, observed_at: @t1}} =
+               Temporal.check(
+                 "net:host:web-01.casa.example.test",
+                 "hosted_on",
+                 "net:host:casa/pve-a"
+               )
+
+      # the live source later sees it on pve-b → the documented claim is SUPERSEDED
+      bb = edge!(vm, entity("net:host:casa/pve-b"), "hosted_on", "obs-b")
+      {:ok, :opened} = Temporal.assert(bb, valid_time: @t2, source: @site)
+
+      assert %{status: :superseded, current: [%{object: "net:host:casa/pve-b"}]} =
+               Temporal.check(
+                 "net:host:web-01.casa.example.test",
+                 "hosted_on",
+                 "net:host:casa/pve-a"
+               )
+    end
+
+    test "a node merge re-keys the intervals of repointed edges so later supersession still finds them" do
+      alias_vm = entity("net:host:casa/web-01-old")
+      canonical = entity("net:host:casa/web-01")
+      node_c = entity("net:host:casa/pve-c")
+      node_b = entity("net:host:casa/pve-b")
+
+      # no collision: the survivor has no edge to pve-c yet
+      e_alias = edge!(alias_vm, node_c, "hosted_on", "obs-alias")
+      {:ok, :opened} = Temporal.assert(e_alias, valid_time: @t1, source: @site)
+
+      assert {:ok, %{result: :merged}} =
+               Store.merge_nodes("entity", "net:host:casa/web-01-old", "net:host:casa/web-01")
+
+      # the interval now keys on the survivor…
+      %{rows: [[key]]} =
+        Repo.query!("SELECT supersession_key FROM edge_validity WHERE edge_id = $1", [e_alias])
+
+      assert String.starts_with?(key, "#{canonical}|hosted_on|")
+
+      # …so a newer fact on the survivor supersedes it
+      e_b = edge!(canonical, node_b, "hosted_on", "obs-b")
+      {:ok, :opened} = Temporal.assert(e_b, valid_time: @t2, source: @site)
+      assert [[@t1, @t2, @t1, "superseded", nil, _]] = intervals(e_alias)
+    end
+
+    test "a merge that collides on the natural key carries the alias edge's history onto the survivor",
+         %{ab: ab} do
+      alias_vm = entity("net:host:casa/web-01-old")
+      node_a = entity("net:host:casa/pve-a")
+
+      # survivor edge (setup's `ab`) has a dated interval from the live source; the alias edge has
+      # an older wiki interval and a duplicate live observation
+      {:ok, :opened} = Temporal.assert(ab, valid_time: @t2, source: @site)
+      e_alias = edge!(alias_vm, node_a, "hosted_on", "obs-alias")
+      {:ok, :undated} = Temporal.assert(e_alias, valid_time: nil, source: "wiki:page:3")
+      {:ok, :opened} = Temporal.assert(e_alias, valid_time: @t3, source: @site)
+
+      assert {:ok, %{result: :merged}} =
+               Store.merge_nodes("entity", "net:host:casa/web-01-old", "net:host:casa/web-01")
+
+      # the alias edge is gone, its wiki history lives on the survivor, the duplicate live
+      # observation was dropped (same source, overlapping)
+      assert Repo.query!("SELECT count(*) FROM edge WHERE id = $1", [e_alias]).rows == [[0]]
+
+      assert [[nil, nil, nil, nil, nil, "wiki:page:3"], [@t2, nil, @t2, nil, nil, @site]] =
+               intervals(ab)
+    end
+  end
+
   describe "many-valued state relations" do
     test "each object is its own state: a second member does not supersede the first" do
       cluster = entity("net:cluster:casa")
