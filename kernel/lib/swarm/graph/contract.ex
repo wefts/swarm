@@ -270,8 +270,8 @@ defmodule Swarm.Graph.Contract do
            {:relation_endpoint_kinds_mismatch,
             %{
               relation: relation.key,
-              subject_kinds: MapSet.to_list(src_kinds),
-              object_kinds: MapSet.to_list(dst_kinds),
+              subject_kinds: src_kinds,
+              object_kinds: dst_kinds,
               expected_subject_kinds: relation.subject_kinds,
               expected_object_kinds: relation.object_kinds
             }}}
@@ -361,8 +361,7 @@ defmodule Swarm.Graph.Contract do
       else: {:error, :scope_wider_than_endpoints}
   end
 
-  @spec inferred_kinds(endpoint_meta() | nil) :: MapSet.t(String.t())
-  defp inferred_kinds(nil), do: MapSet.new()
+  defp inferred_kinds(nil), do: []
 
   defp inferred_kinds(endpoint) when is_map(endpoint) do
     endpoint
@@ -371,11 +370,9 @@ defmodule Swarm.Graph.Contract do
     |> add_entity_namespace_kind(endpoint)
     |> add_entity_key_shape_kind(endpoint)
     |> add_concept_kinds(endpoint)
-    |> MapSet.new()
+    |> Enum.uniq()
   end
 
-  @spec inferred_kinds(endpoint_meta() | nil, map(), MapSet.t(String.t())) ::
-          MapSet.t(String.t())
   defp inferred_kinds(endpoint, relation, peer_kinds) do
     endpoint
     |> inferred_kinds()
@@ -419,20 +416,13 @@ defmodule Swarm.Graph.Contract do
 
   defp add_entity_key_shape_kind(kinds, _), do: kinds
 
-  @spec add_relation_context_kind(
-          MapSet.t(String.t()),
-          endpoint_meta() | nil,
-          map(),
-          MapSet.t(String.t())
-        ) ::
-          MapSet.t(String.t())
   defp add_relation_context_kind(
          kinds,
          %{type: "entity"},
          %{key: "has_step"},
          peer_kinds
        ) do
-    if MapSet.member?(peer_kinds, "step"), do: MapSet.put(kinds, "procedure"), else: kinds
+    if "step" in peer_kinds, do: Enum.uniq(["procedure" | kinds]), else: kinds
   end
 
   defp add_relation_context_kind(kinds, _endpoint, _relation, _peer_kinds), do: kinds
@@ -452,8 +442,6 @@ defmodule Swarm.Graph.Contract do
 
   defp add_concept_kinds(kinds, _), do: kinds
 
-  @spec admissible_inferred_kinds?(map(), MapSet.t(String.t()), MapSet.t(String.t())) ::
-          boolean()
   defp admissible_inferred_kinds?(
          %{subject_kinds: [:same_kind], object_kinds: [:same_kind]},
          src_kinds,
@@ -462,21 +450,21 @@ defmodule Swarm.Graph.Contract do
     src_comparable = same_kind_comparable_kinds(src_kinds)
     dst_comparable = same_kind_comparable_kinds(dst_kinds)
 
-    not MapSet.disjoint?(src_comparable, dst_comparable)
+    overlaps?(src_comparable, dst_comparable)
   end
 
   defp admissible_inferred_kinds?(relation, src_kinds, dst_kinds) do
-    subject_allowed = MapSet.new(relation.subject_kinds)
-    object_allowed = MapSet.new(relation.object_kinds)
-
-    not MapSet.disjoint?(src_kinds, subject_allowed) and
-      not MapSet.disjoint?(dst_kinds, object_allowed)
+    overlaps?(src_kinds, relation.subject_kinds) and
+      overlaps?(dst_kinds, relation.object_kinds)
   end
 
-  @spec same_kind_comparable_kinds(MapSet.t(String.t())) :: MapSet.t(String.t())
   defp same_kind_comparable_kinds(kinds) do
-    specific = MapSet.delete(kinds, "entity")
-    if MapSet.size(specific) > 0, do: specific, else: kinds
+    specific = Enum.reject(kinds, &(&1 == "entity"))
+    if specific == [], do: kinds, else: specific
+  end
+
+  defp overlaps?(left, right) do
+    Enum.any?(left, &(&1 in right))
   end
 
   @spec bare_ip?(String.t()) :: boolean()
