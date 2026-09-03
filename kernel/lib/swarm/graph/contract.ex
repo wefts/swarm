@@ -39,6 +39,9 @@ defmodule Swarm.Graph.Contract do
           optional(:key) => String.t() | nil
         }
 
+  # v13 — bitemporal validity intervals (`edge_validity`, temporal-fact-model spec): an edge stays
+  # the timeless fact identity; when it was TRUE (valid time, from the source) is recorded apart
+  # from when Swarm learned it (transaction time). Legacy edges without intervals read as undated.
   # v12 — network address semantics: `net:address:*` / `net:subnet:*` nodes gain typed
   # PostgreSQL `inet` / `cidr` columns plus deterministic address-class labels so containment and
   # public/private address asks are data operations, not prose/model guesses.
@@ -59,7 +62,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 12
+  @schema_version 13
   @scopes ~w(private public)
   # A source scope is `src:` + the source's lowercase hyphenated UUID — never a label.
   @uuid_re "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"

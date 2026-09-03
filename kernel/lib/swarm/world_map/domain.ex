@@ -74,7 +74,51 @@ defmodule Swarm.WorldMap.Domain do
 
   @network_relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address has_private_address has_public_address has_outbound_ip_address contained_by routes_for terminates_for)
 
-  @structural_relation_contracts [
+  # Temporal contract per governed relation (temporal-fact-model spec): the relation registry — not
+  # an extractor — decides whether a fact is a `:state` (true for a validity interval, superseded by
+  # a newer valid-time fact on the same supersession key), an `:event` (happened, stays true as
+  # history) or an `:invariant` (no useful time axis). The supersession key of a `:state` relation
+  # is explicit: `:subject_relation` (single-valued — a new object closes the old one) or
+  # `:subject_relation_object` (many-valued — each object is its own state, closed only by absence).
+  # Every governed relation MUST appear here; a missing entry fails compilation, never defaults.
+  @temporal_contracts %{
+    "part_of" => {:state, :subject_relation_object},
+    "contains" => {:state, :subject_relation_object},
+    "hosted_on" => {:state, :subject_relation},
+    "operated_by" => {:state, :subject_relation_object},
+    "depends_on" => {:state, :subject_relation_object},
+    "instance_of" => {:invariant, nil},
+    "has_known_issue" => {:event, nil},
+    "routes_via" => {:state, :subject_relation_object},
+    "egresses_via" => {:state, :subject_relation_object},
+    "connects_site" => {:state, :subject_relation_object},
+    "terminates_at" => {:state, :subject_relation_object},
+    "protected_by" => {:state, :subject_relation_object},
+    "alias_of" => {:invariant, nil},
+    "carries" => {:state, :subject_relation_object},
+    "has_address" => {:state, :subject_relation_object},
+    "has_private_address" => {:state, :subject_relation_object},
+    "has_public_address" => {:state, :subject_relation_object},
+    "has_outbound_ip_address" => {:state, :subject_relation_object},
+    "contained_by" => {:state, :subject_relation_object},
+    "routes_for" => {:state, :subject_relation_object},
+    "terminates_for" => {:state, :subject_relation_object},
+    "has_status" => {:state, :subject_relation},
+    "managed_by" => {:state, :subject_relation},
+    "works_in" => {:state, :subject_relation},
+    "member_of" => {:state, :subject_relation_object},
+    "has_title" => {:state, :subject_relation},
+    "located_at" => {:state, :subject_relation},
+    "has_employment" => {:state, :subject_relation},
+    "has_role_family" => {:state, :subject_relation},
+    "in_group" => {:state, :subject_relation_object},
+    "managed_by_team" => {:state, :subject_relation_object},
+    "mentioned_in" => {:invariant, nil},
+    "used_by" => {:state, :subject_relation_object},
+    "has_step" => {:invariant, nil}
+  }
+
+  @structural_relation_base [
     %{
       key: "part_of",
       inverse: "contains",
@@ -245,6 +289,14 @@ defmodule Swarm.WorldMap.Domain do
       description: "An endpoint terminates a tunnel."
     },
     %{
+      key: "has_status",
+      inverse: nil,
+      subject_kinds: ~w(host cluster service),
+      object_kinds: ~w(status),
+      serve_domains: [:network],
+      description: "A host, cluster, or service is in an operational status (live-source state)."
+    },
+    %{
       key: "managed_by",
       inverse: "manages",
       subject_kinds: ~w(person),
@@ -342,7 +394,38 @@ defmodule Swarm.WorldMap.Domain do
     }
   ]
 
+  # Fold the temporal contract into every governed relation at compile time; an undeclared
+  # relation is a compile error (the registry is explicit, never a hidden default).
+  @structural_relation_contracts Enum.map(@structural_relation_base, fn contract ->
+                                   case Map.fetch(@temporal_contracts, contract.key) do
+                                     {:ok, {kind, supersession}} ->
+                                       Map.merge(contract, %{
+                                         temporal: kind,
+                                         supersession: supersession
+                                       })
+
+                                     :error ->
+                                       raise CompileError,
+                                         description:
+                                           "governed relation #{contract.key} has no temporal contract"
+                                   end
+                                 end)
+
   @structural_relation_index Map.new(@structural_relation_contracts, &{&1.key, &1})
+
+  @doc """
+  The temporal contract of a governed relation: `%{kind: :state | :event | :invariant,
+  supersession: :subject_relation | :subject_relation_object | nil}`, or `nil` for an
+  ungoverned (connector-defined) relation — which therefore never gets a validity interval.
+  """
+  @spec temporal(String.t() | atom()) ::
+          %{kind: :state | :event | :invariant, supersession: atom() | nil} | nil
+  def temporal(key) do
+    case structural_relation(key) do
+      nil -> nil
+      %{temporal: kind, supersession: supersession} -> %{kind: kind, supersession: supersession}
+    end
+  end
 
   # --- the WHO (org-directory) domain (master-plan E1; decorrelated review 2026-07-07) ----------
   # Cue: "who is/manages/leads/reports-to/works-in", team membership. Also fires on service-

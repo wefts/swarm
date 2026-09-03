@@ -32,6 +32,7 @@ defmodule Swarm.Ingest do
 
   alias Swarm.Graph.Contract
   alias Swarm.Graph.Store
+  alias Swarm.Graph.Temporal
   alias Swarm.Ingest.Content
   alias Swarm.Ingest.DeadLetter
   alias Swarm.Ingest.Dedup
@@ -81,6 +82,7 @@ defmodule Swarm.Ingest do
   defp normalize(event) do
     with {:ok, provenance} <- fetch_string(event, :provenance),
          {:ok, occurred_at} <- to_utc(Map.get(event, :occurred_at)),
+         {:ok, valid_time} <- optional_utc(Map.get(event, :valid_time)),
          :ok <- check_registered_sources(event) do
       {:ok,
        %{
@@ -94,11 +96,27 @@ defmodule Swarm.Ingest do
          # derivative-capable connector SHOULD supply it (see `ports.md`).
          origin: origin(event, provenance),
          occurred_at: occurred_at,
+         # Temporal model (schema v13): `valid_time` is the SOURCE truth time of the event's state
+         # relations (a live API's observation instant, a commit time…), distinct from
+         # `occurred_at`/ingest time. Absent ⇒ the relations are asserted UNDATED — never stamped
+         # with ingest time. `source` names the asserting run (site-qualified, e.g.
+         # `proxmox:casa`) so a live source can later close what it stopped returning.
+         valid_time: valid_time,
+         source: optional_string(Map.get(event, :source)),
          entities: Enum.map(Map.get(event, :entities, []), &normalize_entity/1),
          relations: Enum.map(Map.get(event, :relations, []), &normalize_relation/1)
        }}
     end
   end
+
+  @spec optional_utc(term()) :: {:ok, DateTime.t() | nil} | {:error, term()}
+  defp optional_utc(nil), do: {:ok, nil}
+  defp optional_utc(""), do: {:ok, nil}
+  defp optional_utc(value), do: to_utc(value)
+
+  @spec optional_string(term()) :: String.t() | nil
+  defp optional_string(s) when is_binary(s) and s != "", do: nfc(s)
+  defp optional_string(_), do: nil
 
   # ADR-20 §3: a `src:*` scope must name a REGISTERED Source (`Swarm.Projects`) — a connector
   # cannot invent a scope, and no row is ever written under a coordinate nobody can derive
@@ -220,7 +238,7 @@ defmodule Swarm.Ingest do
         ids = upsert_entities(norm.entities)
         persist_content(norm.entities, ids, norm.provenance)
         scopes = refs_to_scopes(norm.entities)
-        write_relations(norm.relations, ids, scopes, norm.provenance, norm.origin)
+        write_relations(norm.relations, ids, scopes, norm)
       end)
 
     case result do
@@ -284,10 +302,10 @@ defmodule Swarm.Ingest do
   # one rolls the whole event back (so it quarantines, not half-writes). All
   # relations in one event share the event's evidential `origin` (the source that
   # asserts them).
-  @spec write_relations([map()], map(), map(), String.t(), String.t()) :: :ok
-  defp write_relations(relations, ids, scopes, provenance, origin) do
+  @spec write_relations([map()], map(), map(), map()) :: :ok
+  defp write_relations(relations, ids, scopes, norm) do
     Enum.each(relations, fn rel ->
-      case write_relation(rel, ids, scopes, provenance, origin) do
+      case write_relation(rel, ids, scopes, norm) do
         :ok -> :ok
         {:error, reason} -> Swarm.Repo.rollback(reason)
       end
@@ -296,15 +314,25 @@ defmodule Swarm.Ingest do
     :ok
   end
 
-  @spec write_relation(map(), map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
-  defp write_relation(rel, ids, scopes, provenance, origin) do
+  @spec write_relation(map(), map(), map(), map()) :: :ok | {:error, term()}
+  defp write_relation(rel, ids, scopes, norm) do
+    %{provenance: provenance, origin: origin} = norm
+
     case {Map.get(ids, rel.from_ref), Map.get(ids, rel.to_ref)} do
       {src, dst} when is_integer(src) and is_integer(dst) ->
         scope = narrowest(Map.get(scopes, rel.from_ref), Map.get(scopes, rel.to_ref))
 
-        case Store.add_edge(src, dst, rel.type, provenance, scope: scope, origin: origin) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, reason}
+        with {:ok, %{id: edge_id}} <-
+               Store.add_edge(src, dst, rel.type, provenance, scope: scope, origin: origin),
+             # Validity interval (schema v13) — a no-op unless the registry declares the relation
+             # a `:state`. The asserting `source` defaults to the origin when the event names none.
+             {:ok, _} <-
+               Temporal.assert(edge_id,
+                 valid_time: norm.valid_time,
+                 source: norm.source || origin,
+                 origin: origin
+               ) do
+          :ok
         end
 
       _ ->
