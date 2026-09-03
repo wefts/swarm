@@ -48,4 +48,13 @@ defmodule Swarm.Connector.GrpcCodecTest do
     assert [%{origin: "mediawiki:11", occurred_at: "2024-03-02T10:15:30Z"}] = page.events
     assert [%{reason: "namespace_filtered", source_ref: "mediawiki:99"}] = page.skips
   end
+
+  test "accepts protobuf enum atoms from decoded grpc responses" do
+    response = %FetchResponse{
+      status: :FETCH_OK,
+      page: GrpcCodec.encode_page(%{events: [], cursor: :done})
+    }
+
+    assert {:ok, %{cursor: :done}} = GrpcCodec.page(response)
+  end
 end

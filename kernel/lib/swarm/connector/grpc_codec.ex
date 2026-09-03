@@ -26,11 +26,12 @@ defmodule Swarm.Connector.GrpcCodec do
   end
 
   @spec page(FetchResponse.t()) :: {:ok, map()} | {:error, term()}
-  def page(%FetchResponse{status: @fetch_ok, page: %Page{} = page}) do
+  def page(%FetchResponse{status: status, page: %Page{} = page}) when status in [@fetch_ok, :FETCH_OK] do
     {:ok, decode_page(page)}
   end
 
-  def page(%FetchResponse{status: @fetch_error, error: error}) when is_binary(error) do
+  def page(%FetchResponse{status: status, error: error})
+      when status in [@fetch_error, :FETCH_ERROR] and is_binary(error) do
     {:error, {:connector_rpc_error, error}}
   end
 
