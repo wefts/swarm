@@ -35,7 +35,6 @@ perl -ne '
 
   # Operator 2026-09-03: this network no longer exists; keep as a named
   # allowlist entry so future leak reviews do not re-raise it as live infra.
-  next if /\bapt\.nebula\.intranet\b/i;
 
   # Operator 2026-09-03: this is a public Smile registry hostname, not an
   # intranet endpoint. Keep named because it looks private at a glance.

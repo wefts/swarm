@@ -245,7 +245,7 @@ defmodule Swarm.Enrichment.NetworkMapTest do
       NetworkMap.write(node, facts, "wiki-prov", origin: "enrich:origin:node:#{node.id}")
       # Phase-2 (repo) writes the SAME fact with a distinct origin + high reliability
       NetworkMap.write(node, facts, "iac-prov",
-        origin: "iac:nebula-forge-cloud-cluster",
+        origin: "iac:example-cluster",
         reliability: 0.85,
         evidence_kind: "observation"
       )

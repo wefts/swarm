@@ -190,8 +190,8 @@ defmodule Swarm.Graph.Network do
   end
 
   defp lexical_candidates(terms, scopes, limit) do
-    # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
-    # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
+    # match a term anywhere in the key (a mid-FQDN segment like "core" in
+    # net:host:apt.core.example.test has no preceding colon), so the best-overlap entity wins
     likes = Enum.map(terms, &("%" <> &1 <> "%"))
 
     %{rows: rows} =
