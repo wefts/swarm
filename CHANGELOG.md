@@ -3,11 +3,34 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.8.3](https://github.com/wefts/swarm/compare/v0.8.2..v0.8.3) - 2026-09-03
+
+### Bug Fixes
+
+- **(graph)** avoid opaque mapset kinds in contract checks - ([a731d0d](https://github.com/wefts/swarm/commit/a731d0df6b7d3a3a8a993b4eb01076d68fab7e02)) - Serhii BOREMCHUK
+
+### Tests
+
+- **(core)** use a synthetic address in the grounding-gate fixture - ([ba31579](https://github.com/wefts/swarm/commit/ba31579bc94799385b3d8599a8cc488859c29063)) - Searge
+
+---
 ## [0.8.2](https://github.com/wefts/swarm/compare/v0.8.1..v0.8.2) - 2026-09-03
 
 ### Bug Fixes
 
-- **(core)** prioritize relevant grounding before budget - ([0e3c6b8](https://github.com/wefts/swarm/commit/0e3c6b810ba2363d2bb790f4086076da636b4d57)) - Serhii BOREMCHUK
+- **(core)** prioritize relevant grounding before budget - ([0e3c6b8](https://github.com/wefts/swarm/commit/0e3c6b8f2f05d1d1d209109684a62f50c83f525f)) - Serhii BOREMCHUK
+
+### Documentation
+
+- **(graph)** specify temporal fact model - ([eeafd20](https://github.com/wefts/swarm/commit/eeafd206544c68790075b786ed95a232d266ee29)) - Serhii BOREMCHUK
+
+### Miscellaneous Chores
+
+- **(kernel)** apply elixir formatting - ([ef45cf9](https://github.com/wefts/swarm/commit/ef45cf9466b388d9ca17805653081d3fd6e66178)) - Serhii BOREMCHUK
+
+### Style
+
+- **(docs)** clear markdownlint findings in ADR-16 and pre-answering design - ([1f9c550](https://github.com/wefts/swarm/commit/1f9c550dea11834322321c6a56aa5f3878c44841)) - Serhii BOREMCHUK
 
 ---
 ## [0.8.1](https://github.com/wefts/swarm/compare/v0.8.0..v0.8.1) - 2026-09-02
@@ -105,7 +128,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(core)** cover broad entity profile asks - ([8a30689](https://github.com/wefts/swarm/commit/8a306898636ed1298e3897fc551590666330654e)) - Serhii BOREMCHUK
 
 ---
-## [0.1.0] - 2026-08-28
+## [0.1.0](https://github.com/wefts/swarm/compare/pre-squash-swarm-20260709..v0.1.0) - 2026-08-28
 
 ### Bug Fixes
 
