@@ -140,13 +140,19 @@ defmodule Swarm.Enrichment.Worker do
             # it never aborts the claim path. Its fresh has_step edge ids join the reconcile
             # kept-set so the same-source reconcile does not re-delete them.
             procedures = Procedures.extract(body, gen_fun: gen, model: model)
-            step_ids = Procedures.write(node, procedures, provenance(node.id), page_lineage(node.id))
+
+            step_ids =
+              Procedures.write(node, procedures, provenance(node.id), page_lineage(node.id))
 
             # Network-map skeleton (ADR-17 world-map): a THIRD gated additive pass — like the
             # procedure pass it never aborts the claim path, and its fresh edge ids join the
             # reconcile kept-set so the same-source reconcile does not re-delete them.
             net_facts = NetworkMap.extract(body, gen_fun: gen, model: model)
-            net_ids = NetworkMap.write(node, net_facts, provenance(node.id), lineage: page_lineage(node.id))
+
+            net_ids =
+              NetworkMap.write(node, net_facts, provenance(node.id),
+                lineage: page_lineage(node.id)
+              )
 
             reconcile(node.id, edge_ids ++ step_ids ++ net_ids)
             Watermark.record(node.id, stamp.("fresh"))

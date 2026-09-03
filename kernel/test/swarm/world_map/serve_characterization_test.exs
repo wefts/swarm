@@ -257,7 +257,7 @@ defmodule Swarm.WorldMap.ServeCharacterizationTest do
               %Audit{decision: :serve}} =
                Gate.sufficient?(d, entail_fun: always(true))
 
-      assert text =~ "managed_by_team Platform Team"
+      assert text =~ "Keycloak is managed by team Platform Team."
       assert cits == ["corroboration:1"]
     end
   end

@@ -11,9 +11,20 @@ defmodule Swarm.Core do
   no citations, never raw unsynthesized text.
   """
 
-  alias Swarm.{Activity, Consilium, Conversations, Deliberation, Gate, Repo}
-  alias Swarm.Graph.{Aggregation, Neighborhood, Procedure, Retrieval}
+  alias Swarm.{
+    Activity,
+    AnswerRecords,
+    Consilium,
+    ConversationContradictions,
+    Conversations,
+    Deliberation,
+    Gate,
+    Repo
+  }
+
+  alias Swarm.Graph.{Aggregation, DocumentKind, Neighborhood, Procedure, Retrieval}
   alias Swarm.WorldMap
+  alias Swarm.WorldMap.SemanticRouter
 
   require Logger
 
@@ -39,7 +50,12 @@ defmodule Swarm.Core do
   failure — distinct from not-found, never silent, never a raw leak).
   """
   @type status :: :found | :not_found | :partial | :error
-  @type citation :: %{source: String.t(), ref: String.t(), confidence: float()}
+  @type citation :: %{
+          :source => String.t(),
+          :ref => String.t(),
+          :confidence => float(),
+          optional(:url) => String.t()
+        }
   @type answer :: %{
           :answer => String.t(),
           :confidence => float(),
@@ -61,7 +77,8 @@ defmodule Swarm.Core do
           :key => String.t(),
           :score => float(),
           optional(:spans) => [%{ordinal: integer(), text: String.t()}],
-          optional(:relevance) => float()
+          optional(:relevance) => float(),
+          optional(:source_ref) => String.t()
         }
   @typedoc "Typed retrieval outcome: ok / partial (some sources failed) / hard error."
   @type retrieval :: {:ok, [hit()]} | {:partial, [hit()], [term()]} | {:error, term()}
@@ -82,20 +99,31 @@ defmodule Swarm.Core do
 
     # "my X" without a known asker: can't resolve identity — limit, don't guess
     # (the asker-identity contract, T8 / P11). Identity mapping is the channel's.
-    if first_person and viewer == "" do
-      identity_required()
-    else
-      # "my X" with an asker → narrow retrieval to that asker's items.
-      owner = if first_person, do: viewer, else: nil
+    answer =
+      if first_person and viewer == "" do
+        identity_required()
+      else
+        case source_link_answer(query, scopes, opts) do
+          {:ok, answer} ->
+            answer
 
-      decision = Gate.route(query, opts)
+          :none ->
+            # "my X" with an asker → narrow retrieval to that asker's items.
+            owner = if first_person, do: viewer, else: nil
 
-      case decision.tier do
-        :tier0 -> tier0_answer(decision.intent)
-        :tier_tools -> tools_answer(query, scopes, retriever, owner)
-        :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+            decision = Gate.route(query, opts)
+
+            case decision.tier do
+              :tier0 -> tier0_answer(decision.intent)
+              :tier_tools -> tools_answer(query, scopes, retriever, owner, opts)
+              :escalate -> escalate_answer(query, scopes, retriever, owner, opts)
+            end
+        end
       end
-    end
+
+    answer
+    |> maybe_annotate_contradiction(opts)
+    |> then(&record_answer(query, viewer, scopes, &1))
   end
 
   # tier0 is canned + zero-LLM — it NEVER escalates. Off-mission requests are
@@ -158,30 +186,39 @@ defmodule Swarm.Core do
   defp hybrid_hits(query, scopes, opts) do
     owner = Keyword.get(opts, :owner)
     limit = Keyword.get(opts, :limit, @search_limit)
-    key_hits = query |> search(scopes, opts) |> gate_key_hits(query)
+    active_hits = active_source_hits(query, scopes, opts)
+    context_hits = active_context_hits(scopes, opts)
 
-    if owner do
-      key_hits
-    else
-      content_hits =
-        query
-        |> Retrieval.search(scopes, limit: limit, expand: false)
-        |> Map.fetch!(:memories)
-        |> Enum.map(
-          &%{
-            id: &1.node_id,
-            type: &1.type,
-            key: &1.key,
-            score: &1.relevance,
-            # Keep the cited passages + the calibrated relevance — the consilium is
-            # grounded on the answer-bearing text (not the title), and calibration
-            # anchors on `relevance` (was discarded here; the precise-lookup gap).
-            spans: &1.spans,
-            relevance: &1.relevance
-          }
-        )
+    cond do
+      active_hits != [] ->
+        active_hits
 
-      merge_hits(content_hits, key_hits, limit)
+      owner ->
+        query |> search(scopes, opts) |> gate_key_hits(query)
+
+      true ->
+        key_hits = query |> search(scopes, opts) |> gate_key_hits(query)
+
+        content_hits =
+          query
+          |> Retrieval.search(scopes, limit: limit, expand: false)
+          |> Map.fetch!(:memories)
+          |> Enum.map(
+            &%{
+              id: &1.node_id,
+              type: &1.type,
+              key: &1.key,
+              score: &1.relevance,
+              # Keep the cited passages + the calibrated relevance — the consilium is
+              # grounded on the answer-bearing text (not the title), and calibration
+              # anchors on `relevance` (was discarded here; the precise-lookup gap).
+              spans: &1.spans,
+              relevance: &1.relevance,
+              source_ref: &1.source_ref
+            }
+          )
+
+        merge_hits(context_hits ++ content_hits, key_hits, limit)
     end
   end
 
@@ -215,6 +252,95 @@ defmodule Swarm.Core do
   @spec key_term_match?(String.t(), String.t()) :: boolean()
   defp key_term_match?(key_down, term) do
     Regex.match?(~r/(^|[^[:alnum:]])#{Regex.escape(term)}([^[:alnum:]]|$)/u, key_down)
+  end
+
+  defp active_source_hits(query, scopes, opts) do
+    active = active_keys(opts)
+
+    if source_link_query?(query) and active != [] do
+      active
+      |> visible_active_content_hits(scopes)
+      |> Enum.map(&Map.put(&1, :score, 1.0))
+    else
+      []
+    end
+  end
+
+  defp source_link_answer(query, scopes, opts) do
+    hits = active_source_hits(query, scopes, opts)
+
+    cond do
+      hits == [] ->
+        :none
+
+      true ->
+        citations = Enum.map(hits, &cite/1)
+        links = citations |> Enum.map(&Map.get(&1, :url)) |> Enum.reject(&(&1 in [nil, ""]))
+
+        text =
+          case links do
+            [] ->
+              "I have the cited source, but no link template is configured for it."
+
+            [one] ->
+              one
+
+            many ->
+              Enum.map_join(many, "\n", &"- #{&1}")
+          end
+
+        {:ok,
+         %{
+           answer: text,
+           confidence: 0.9,
+           tier: "tier_tools",
+           status: :found,
+           citations: citations
+         }}
+    end
+  end
+
+  defp source_link_query?(query) do
+    query
+    |> String.downcase()
+    |> String.match?(
+      ~r/(^|[^[:alnum:]])(link|url|source|citation|wiki|page|written|посилання|лінк|джерел|сторінк|вікі)([^[:alnum:]]|$)/u
+    )
+  end
+
+  defp visible_active_content_hits(active_keys, scopes) do
+    Repo.query!(
+      """
+      SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref, c.body
+      FROM node n
+      JOIN content c ON c.node_id = n.id
+      WHERE n.scope = ANY($1)
+        AND (coalesce(nullif(n.provenance->>'display_key', ''), n.key) = ANY($2) OR n.key = ANY($2))
+      ORDER BY array_position($2, coalesce(nullif(n.provenance->>'display_key', ''), n.key))
+      LIMIT 5
+      """,
+      [scopes, active_keys]
+    )
+    |> Map.fetch!(:rows)
+    |> Enum.map(fn [id, type, key, reliability, source_ref, body] ->
+      %{
+        id: id,
+        type: type,
+        key: key,
+        score: reliability,
+        confidence: reliability,
+        source_ref: source_ref,
+        spans: [%{ordinal: 0, text: body || ""}],
+        relevance: 1.0
+      }
+    end)
+  end
+
+  defp active_context_hits(scopes, opts) do
+    case active_keys(opts) do
+      [] -> []
+      keys -> visible_active_content_hits(keys, scopes)
+    end
   end
 
   # Union content hits (primary, ranked by relevance) with key hits, de-duped by
@@ -253,14 +379,20 @@ defmodule Swarm.Core do
   # With an `owner` (a resolved asker, T8), AND a `key ILIKE %owner%` filter so
   # "my X" returns only the asker's items — still scope-filtered (default-deny).
   defp search_sql(scopes, pats, limit, nil) do
-    {"SELECT id, type, key FROM node WHERE scope = ANY($1) AND key ILIKE ANY($2) ORDER BY key LIMIT $3",
+    display_key = display_key_sql()
+
+    {"SELECT id, type, #{display_key} AS key FROM node WHERE scope = ANY($1) AND (#{display_key} ILIKE ANY($2) OR key ILIKE ANY($2)) ORDER BY key LIMIT $3",
      [scopes, pats, limit]}
   end
 
   defp search_sql(scopes, pats, limit, owner) do
-    {"SELECT id, type, key FROM node WHERE scope = ANY($1) AND key ILIKE ANY($2) AND key ~* $4 ORDER BY key LIMIT $3",
+    display_key = display_key_sql()
+
+    {"SELECT id, type, #{display_key} AS key FROM node WHERE scope = ANY($1) AND (#{display_key} ILIKE ANY($2) OR key ILIKE ANY($2)) AND (#{display_key} ~* $4 OR key ~* $4) ORDER BY key LIMIT $3",
      [scopes, pats, limit, owner_boundary(owner)]}
   end
+
+  defp display_key_sql, do: "coalesce(nullif(provenance->>'display_key', ''), key)"
 
   # Match the owner as a DELIMITED token, not a bare substring, so a short id
   # ("al") can't match another asker ("alice-…"). A convenience to reduce
@@ -289,6 +421,16 @@ defmodule Swarm.Core do
   @spec deliberation(String.t(), String.t(), [String.t()]) ::
           {:ok, Deliberation.record()} | :not_found
   defdelegate deliberation(ask_ref, viewer, scopes), to: Deliberation, as: :fetch
+
+  @doc """
+  Record an external answer rating by the viewer who received the answer.
+
+  ADR-11: this stores user feedback only; it does not let the system grade itself
+  and does not mutate graph reward.
+  """
+  @spec rate_answer(String.t(), String.t(), [String.t()], AnswerRecords.rating() | String.t()) ::
+          {:ok, AnswerRecords.rating()} | :not_found | :bad_request
+  defdelegate rate_answer(ask_ref, viewer, scopes, rating), to: AnswerRecords, as: :rate
 
   @doc """
   One poll of the scope-safe worker/job ActivityFeed (ADR-15). `opts`: `:scopes`,
@@ -371,37 +513,57 @@ defmodule Swarm.Core do
     }
   end
 
-  defp tools_answer(query, scopes, retriever, owner) do
-    case retriever.(query, scopes, limit: @search_limit, owner: owner) do
+  defp tools_answer(query, scopes, retriever, owner, opts) do
+    case retriever.(query, scopes, retrieval_opts(opts, owner)) do
       {:ok, []} ->
-        not_found(query, "tier_tools")
+        case try_structured_from_tools(query, scopes, [], opts) do
+          {:serve, answer} -> answer
+          :escalate -> not_found(query, "tier_tools")
+        end
 
       {:ok, hits} ->
-        %{
-          answer: "Found #{length(hits)} matching item(s) in the knowledge base.",
-          confidence: 0.7,
-          tier: "tier_tools",
-          status: :found,
-          citations: Enum.map(hits, &cite/1)
-        }
+        case try_structured_from_tools(query, scopes, hits, opts) do
+          {:serve, answer} ->
+            answer
+
+          :escalate ->
+            %{
+              answer: "Found #{length(hits)} matching item(s) in the knowledge base.",
+              confidence: 0.7,
+              tier: "tier_tools",
+              status: :found,
+              citations: Enum.map(hits, &cite/1)
+            }
+        end
 
       {:partial, hits, failed} ->
-        %{
-          answer:
-            "Partial results — #{length(hits)} item(s); #{length(failed)} source(s) unavailable.",
-          confidence: 0.5,
-          tier: "tier_tools",
-          status: :partial,
-          citations: Enum.map(hits, &cite/1)
-        }
+        case try_structured_from_tools(query, scopes, hits, opts) do
+          {:serve, answer} ->
+            answer
+
+          :escalate ->
+            %{
+              answer:
+                "Partial results — #{length(hits)} item(s); #{length(failed)} source(s) unavailable.",
+              confidence: 0.5,
+              tier: "tier_tools",
+              status: :partial,
+              citations: Enum.map(hits, &cite/1)
+            }
+        end
 
       {:error, reason} ->
         error_result(reason, "tier_tools")
     end
   end
 
+  defp try_structured_from_tools(query, scopes, hits, opts) do
+    profile = Aggregation.entity_profile(query, scopes)
+    try_structured_gate(query, scopes, hits, profile, opts)
+  end
+
   defp escalate_answer(query, scopes, retriever, owner, opts) do
-    case retriever.(query, scopes, limit: @search_limit, owner: owner) do
+    case retriever.(query, scopes, retrieval_opts(opts, owner)) do
       {:error, reason} ->
         error_result(reason, "escalate")
 
@@ -414,6 +576,12 @@ defmodule Swarm.Core do
 
         synthesize(query, hits, base_status, scopes, opts)
     end
+  end
+
+  defp retrieval_opts(opts, owner) do
+    opts
+    |> Keyword.put(:limit, @search_limit)
+    |> Keyword.put(:owner, owner)
   end
 
   defp synthesize(query, hits, base_status, scopes, opts) do
@@ -434,7 +602,9 @@ defmodule Swarm.Core do
   end
 
   defp deliberate(query, hits, base_status, scopes, profile, opts) do
-    grounding = build_grounding(profile, hits) |> prepend_history(opts)
+    grounding_hits = query |> gate_grounding_hits(hits) |> order_grounding_hits()
+    grounding_profile = gate_grounding_profile(query, profile, grounding_hits)
+    grounding = build_grounding(grounding_profile, grounding_hits) |> prepend_history(opts)
 
     case Consilium.deliberate(query, Keyword.put(opts, :grounding, grounding)) do
       {:ok, verdict} ->
@@ -443,7 +613,7 @@ defmodule Swarm.Core do
         # single insert AFTER the LLM returned. "" when not retained.
         viewer = Keyword.get(opts, :viewer, "")
         ask_ref = Deliberation.maybe_persist(verdict, viewer, scopes)
-        calibrated_answer(query, verdict, hits, profile, base_status, ask_ref)
+        calibrated_answer(query, verdict, grounding_hits, grounding_profile, base_status, ask_ref)
 
       {:error, reason} ->
         # Fail-loud: a synthesis failure is an ERROR (distinct from not-found),
@@ -455,9 +625,17 @@ defmodule Swarm.Core do
   # --- ADR-17 tier-routing gate (Fork B) wiring ------------------------------
 
   # Never let the gate make an ask SLOWER than pure escalation (spec §3, gemini's
-  # sink-risk): the gate runs under a hard time budget; a timeout or crash escalates,
-  # so the worst case is (budget + consilium), capped — never an unbounded double-pay.
-  @gate_breaker_ms 3000
+  # sink-risk): the Stage-2 entail check runs under a hard time budget; a timeout
+  # or crash escalates, so the worst case is (semantic routing + breaker + consilium),
+  # capped — never an unbounded double-pay.
+  #
+  # Budget note (2026-09-02): after semantic routing entered the gate path, live
+  # Core.ask warm structured probes measured up to ~3.8s end-to-end, and the first
+  # cold post-deploy probe tripped the old 3s breaker before the qwen entail model
+  # finished loading. The breaker bounds the LLM-bearing Stage-2 check only; semantic
+  # embedding happens before it. Keep this ceiling explicit so any new gate stage must
+  # be paid for deliberately.
+  @gate_breaker_default_ms 7_000
 
   @spec try_structured_gate(String.t(), [String.t()], [hit()], Aggregation.profile(), keyword()) ::
           {:serve, answer()} | :escalate
@@ -473,41 +651,15 @@ defmodule Swarm.Core do
       # keys still lead — active_keys only fill in what the query text alone can't.
       # No new no-leak surface: a bogus/foreign-scoped key here simply fails the
       # gate's existing scope+evidence checks below, same as a wrong guess would.
-      candidate_keys =
-        Enum.uniq(Procedure.candidates(query, scopes) ++ hit_keys(hits) ++ active_keys(opts))
+      descriptor = coverage_descriptor(query, scopes, hits, profile, opts, :cheap)
 
-      # Neighborhood serve paths (network, who, …) are registry-driven (E2b): for each domain in
-      # `Domain.neighborhood_domains/0`, probe its OWN candidate source (net:<kind>:<name> via
-      # Network.candidates; who:<kind>:<name> — persons by profile content, teams/roles/sites by key
-      # — via WhoMap.candidates), and read its serve flag + corroboration floor from config. A new
-      # neighborhood domain = one Domain registry entry, no wiring here. Flat `<key>_*` opts are what
-      # Coverage.describe/3 expects.
-      #
-      # `active_keys(opts)` is unioned into EVERY domain's own candidates here too (chat-thread
-      # epic 2, live-verify finding): the generic `candidate_keys` above feeds Procedure/hit_keys
-      # only — a neighborhood domain reads its candidates from THIS opt, a wholly separate pool,
-      # so without this union a pronoun follow-up ("who manages it?") that matches a domain's cue
-      # but carries no key of its own would never see the previous turn's key at all. A
-      # wrong-domain/foreign key here is harmless: Stage 1 (`Coverage.validate/1`) only mints a
-      # `Validated` when the key actually resolves to real neighborhood facts IN that domain.
-      neighborhood_opts =
-        Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
-          [
-            {:"#{dom.key}_keys",
-             Enum.uniq(dom.candidates_fun.(query, scopes) ++ active_keys(opts))},
-            {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
-            {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
-          ]
-        end)
-
-      descriptor =
-        WorldMap.Coverage.describe(
-          query,
-          scopes,
-          [candidate_keys: candidate_keys, profile: profile] ++ neighborhood_opts
-        )
-
-      run_gate(descriptor, opts)
+      if semantic_fallback?(descriptor) do
+        semantic = SemanticRouter.route(query, opts)
+        descriptor = coverage_descriptor(query, scopes, hits, profile, opts, semantic)
+        run_gate(descriptor, opts, scopes)
+      else
+        run_gate(descriptor, opts, scopes)
+      end
     else
       :escalate
     end
@@ -520,19 +672,62 @@ defmodule Swarm.Core do
       :escalate
   end
 
+  defp coverage_descriptor(query, scopes, hits, profile, opts, semantic) do
+    {semantic_route, candidate_opts} =
+      case semantic do
+        %{route: route, query_vec: vec} -> {route, [query_vec: vec]}
+        _ -> {:none, []}
+      end
+
+    candidate_keys =
+      Enum.uniq(
+        Procedure.candidates(query, scopes, candidate_opts) ++ hit_keys(hits) ++ active_keys(opts)
+      )
+
+    neighborhood_opts =
+      Enum.flat_map(WorldMap.Domain.neighborhood_domains(), fn dom ->
+        [
+          {:"#{dom.key}_keys",
+           Enum.uniq(dom.candidates_fun.(query, scopes, candidate_opts) ++ active_keys(opts))},
+          {:"#{dom.key}_serve", neighborhood_serve?(dom, opts)},
+          {:"#{dom.key}_min_corroboration", neighborhood_min_corroboration(dom)}
+        ]
+      end)
+
+    WorldMap.Coverage.describe(
+      query,
+      scopes,
+      [
+        candidate_keys: candidate_keys,
+        profile: profile,
+        entity_serve: entity_serve?(opts),
+        semantic_route: semantic_route
+      ] ++ neighborhood_opts
+    )
+  end
+
+  defp semantic_fallback?(%WorldMap.Coverage.Descriptor{intent: :unknown}), do: true
+
+  defp semantic_fallback?(%WorldMap.Coverage.Descriptor{blockers: blockers}) do
+    Enum.any?(blockers, &(&1 in [:no_candidate, :no_corroboration]))
+  end
+
   # Run the (LLM-bearing) sufficiency check under a NOLINK task bounded to the breaker:
   # a timeout OR a crash surfaces as `{:exit, _}`/`nil` here and degrades to escalate — so
   # a slow/crashing gate never takes the ask process down (async_nolink, not async) and
   # never double-pays gate + consilium unbounded (codex review + gemini's sink-risk).
-  defp run_gate(descriptor, opts) do
+  defp run_gate(descriptor, opts, scopes) do
     gate_opts = Keyword.take(opts, [:entail_fun])
+    gate_opts = Keyword.put(gate_opts, :scopes, scopes)
 
     task =
       Task.Supervisor.async_nolink(WorldMap.GateTaskSupervisor, fn ->
         WorldMap.Gate.sufficient?(descriptor, gate_opts)
       end)
 
-    case Task.yield(task, @gate_breaker_ms) || Task.shutdown(task, :brutal_kill) do
+    breaker_ms = gate_breaker_ms()
+
+    case Task.yield(task, breaker_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:serve, %WorldMap.Gate.Answer{} = answer, audit}} ->
         log_gate(audit)
         {:serve, structured_answer(answer)}
@@ -542,12 +737,15 @@ defmodule Swarm.Core do
         :escalate
 
       _timeout_or_crash ->
-        Logger.info(
-          "world-map gate: circuit-break (>#{@gate_breaker_ms}ms or crash) — escalating"
-        )
+        Logger.info("world-map gate: circuit-break (>#{breaker_ms}ms or crash) — escalating")
 
         :escalate
     end
+  end
+
+  defp gate_breaker_ms do
+    Application.get_env(:swarm, :tier_gate, [])
+    |> Keyword.get(:breaker_ms, @gate_breaker_default_ms)
   end
 
   # Map the gate's evidence-closed answer onto the Core `answer()` shape. The gate's own
@@ -562,7 +760,7 @@ defmodule Swarm.Core do
 
     %{
       answer: a.text,
-      confidence: 0.85,
+      confidence: a.confidence,
       tier: "structured",
       status: :found,
       citations:
@@ -593,6 +791,17 @@ defmodule Swarm.Core do
   @spec tier_gate_enabled?(keyword()) :: boolean()
   defp tier_gate_enabled?(opts) do
     Keyword.get(opts, :tier_gate, Application.get_env(:swarm, :tier_gate, [])[:enabled] == true)
+  end
+
+  # H1 entity-profile serve path: still OFF by default after the 2026-07-06 false-serves.
+  # This opt-in is for branch-only calibration/shadow measurement until H1's go/no-go numbers pass.
+  @spec entity_serve?(keyword()) :: boolean()
+  defp entity_serve?(opts) do
+    Keyword.get(
+      opts,
+      :entity_serve,
+      Application.get_env(:swarm, :tier_gate, [])[:entity_serve] == true
+    )
   end
 
   # A neighborhood domain's serve flag. Each path is OFF by default (like entity_serve) until it is
@@ -631,6 +840,9 @@ defmodule Swarm.Core do
   # ≠ confidence-space); disagreement applies a gentle haircut.
   @relevance_floor 0.45
   @relevance_full 0.55
+  @grounding_relative_floor 0.4
+  @grounding_min_hits 3
+  @grounding_claim_stopwords MapSet.new(@stopwords ++ ~w(at про розкажи))
 
   @spec calibrated_answer(
           String.t(),
@@ -656,7 +868,8 @@ defmodule Swarm.Core do
         # Cite both the retrieved passages AND the claim facts that grounded the
         # answer — so a claim-only answer (no retrieval hits) is still explainable.
         citations: Enum.map(hits, &cite/1) ++ Enum.map(profile.facts, &fact_cite/1),
-        ask_ref: ask_ref
+        ask_ref: ask_ref,
+        agreement: agreement(verdict.disagreement)
       }
     else
       # The judge marked the answer NOT grounded (an abstention) — honest `:not_found`,
@@ -665,8 +878,33 @@ defmodule Swarm.Core do
       # deliberation is still retained, so the dashboard can show that it deliberated.
       query
       |> not_found("escalate")
-      |> Map.merge(%{confidence: 0.0, ask_ref: ask_ref})
+      |> Map.merge(%{
+        confidence: 0.0,
+        ask_ref: ask_ref,
+        agreement: agreement(verdict.disagreement)
+      })
     end
+  end
+
+  defp agreement(disagreement), do: max(0.0, min(1.0, 1.0 - disagreement))
+
+  defp record_answer(query, viewer, scopes, answer) do
+    case AnswerRecords.maybe_persist(viewer, scopes, query, answer) do
+      "" -> answer
+      ask_ref -> Map.put(answer, :ask_ref, ask_ref)
+    end
+  rescue
+    e ->
+      Logger.warning("answer record persist failed (#{Exception.message(e)})")
+      answer
+  end
+
+  defp maybe_annotate_contradiction(answer, opts) do
+    ConversationContradictions.maybe_annotate(answer, authorized_messages(opts))
+  rescue
+    e ->
+      Logger.warning("conversation contradiction check failed (#{Exception.message(e)})")
+      answer
   end
 
   # final = judge_confidence · agreement · evidence_cap, clamped to [0,1].
@@ -709,6 +947,172 @@ defmodule Swarm.Core do
 
   @spec clamp01(float()) :: float()
   defp clamp01(x), do: x |> max(0.0) |> min(1.0)
+
+  # The relevance floor used for confidence is a cap, not a source-selection rule.
+  # Grounding needs its own relative gate so lexical/title tails cannot hand
+  # zero-relevance documents to the consilium while broad questions still retain
+  # enough context to answer.
+  @spec gate_grounding_hits(String.t(), [hit()]) :: [hit()]
+  defp gate_grounding_hits(_query, []), do: []
+
+  defp gate_grounding_hits(query, hits) do
+    hits = restrict_to_named_subject_hits(query, hits)
+    {scored, unscored} = Enum.split_with(hits, &(hit_relevance(&1) != nil))
+
+    scored_keep =
+      case scored do
+        [] ->
+          []
+
+        _ ->
+          top = scored |> Enum.map(&hit_relevance/1) |> Enum.max()
+          threshold = if top > 0.0, do: top * @grounding_relative_floor, else: 0.0
+          threshold_keep = Enum.filter(scored, &(hit_relevance(&1) >= threshold))
+
+          min_keep =
+            scored
+            |> Enum.sort_by(&hit_relevance/1, :desc)
+            |> Enum.take(@grounding_min_hits)
+
+          keep_ids =
+            (threshold_keep ++ min_keep)
+            |> Enum.map(&hit_identity/1)
+            |> MapSet.new()
+
+          keep = Enum.filter(scored, &(hit_identity(&1) in keep_ids))
+          log_grounding_gate(query, scored -- keep, top, threshold)
+          keep
+      end
+
+    keep_ids = Enum.map(scored_keep ++ unscored, &hit_identity/1) |> MapSet.new()
+    Enum.filter(hits, &(hit_identity(&1) in keep_ids))
+  end
+
+  defp restrict_to_named_subject_hits(query, hits) do
+    case DocumentKind.named_subject_hits(query, hits) do
+      [] ->
+        hits
+
+      named_hits ->
+        named_ids = MapSet.new(named_hits, &hit_identity/1)
+        dropped = Enum.reject(hits, &(hit_identity(&1) in named_ids))
+        log_named_subject_gate(query, named_hits, dropped)
+        named_hits
+    end
+  end
+
+  defp hit_relevance(hit), do: hit[:relevance]
+  defp hit_identity(hit), do: {hit[:type], hit[:key], hit[:id]}
+
+  # Admission and ordering are separate. The gate decides which hits are safe to
+  # ground on; this pass decides what reaches the finite prompt budget first.
+  # Without it, a high-relevance answer page can be retained but clipped after
+  # lower-relevance broad context, which is worse than omitting the broad context.
+  defp order_grounding_hits(hits) do
+    Enum.sort_by(hits, &{hit_relevance(&1) || -1.0, Map.get(&1, :score, 0.0)}, :desc)
+  end
+
+  defp log_named_subject_gate(_query, _named_hits, []), do: :ok
+
+  defp log_named_subject_gate(query, named_hits, dropped) do
+    kept =
+      named_hits
+      |> Enum.map(fn hit -> "#{hit[:type]}:#{hit[:key]}" end)
+      |> Enum.join(", ")
+
+    dropped_summary =
+      dropped
+      |> Enum.map(fn hit -> "#{hit[:type]}:#{hit[:key]}" end)
+      |> Enum.join(", ")
+
+    Logger.info(
+      "grounding named-subject gate: dropped=#{length(dropped)} " <>
+        "query=#{inspect(String.slice(query, 0, 80))} kept=[#{kept}] " <>
+        "dropped_hits=[#{dropped_summary}]"
+    )
+  end
+
+  defp log_grounding_gate(_query, [], _top, _threshold), do: :ok
+
+  defp log_grounding_gate(query, dropped, top, threshold) do
+    summary =
+      dropped
+      |> Enum.map(fn hit ->
+        "#{hit[:type]}:#{hit[:key]}@#{Float.round(hit_relevance(hit), 4)}"
+      end)
+      |> Enum.join(", ")
+
+    Logger.info(
+      "grounding gate: dropped=#{length(dropped)} top=#{Float.round(top, 4)} " <>
+        "threshold=#{Float.round(threshold, 4)} query=#{inspect(String.slice(query, 0, 80))} " <>
+        "hits=[#{summary}]"
+    )
+  end
+
+  @spec gate_grounding_profile(String.t(), Aggregation.profile(), [hit()]) ::
+          Aggregation.profile()
+  defp gate_grounding_profile(_query, profile, []), do: profile
+
+  defp gate_grounding_profile(_query, %{facts: [], groups: []} = profile, _hits), do: profile
+
+  defp gate_grounding_profile(query, profile, hits) do
+    if Enum.any?(hits, &match?(%{spans: [_ | _]}, &1)) do
+      do_gate_grounding_profile(query, profile)
+    else
+      profile
+    end
+  end
+
+  defp do_gate_grounding_profile(query, profile) do
+    query_tokens = grounding_query_tokens(query)
+
+    groups =
+      profile.groups
+      |> Enum.filter(&grounding_subject_relevant?(&1.subject, query_tokens))
+
+    facts =
+      profile.facts
+      |> Enum.filter(&grounding_subject_relevant?(&1.subject, query_tokens))
+
+    log_profile_gate(query, length(profile.facts) - length(facts))
+
+    %{profile | groups: groups, facts: facts, claim_support: claim_support(facts)}
+  end
+
+  defp grounding_query_tokens(query) do
+    query
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.reject(&(String.length(&1) < 2 or MapSet.member?(@grounding_claim_stopwords, &1)))
+    |> MapSet.new()
+  end
+
+  defp grounding_subject_relevant?(_subject, query_tokens) when map_size(query_tokens) <= 1,
+    do: true
+
+  defp grounding_subject_relevant?(subject, query_tokens) do
+    subject_tokens =
+      subject
+      |> String.downcase()
+      |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+      |> Enum.reject(&MapSet.member?(@grounding_claim_stopwords, &1))
+      |> MapSet.new()
+
+    overlap = query_tokens |> MapSet.intersection(subject_tokens) |> MapSet.size()
+    overlap >= 2
+  end
+
+  defp claim_support([]), do: nil
+  defp claim_support(facts), do: facts |> Enum.map(& &1.reliability) |> Enum.max()
+
+  defp log_profile_gate(_query, dropped) when dropped <= 0, do: :ok
+
+  defp log_profile_gate(query, dropped) do
+    Logger.info(
+      "grounding profile gate: dropped_facts=#{dropped} " <>
+        "query=#{inspect(String.slice(query, 0, 80))}"
+    )
+  end
 
   # Grounding fed to the consilium: the answer-bearing PASSAGES of each hit (the
   # segmenter's section-prefixed chunk text), not the bare title. A content hit
@@ -762,6 +1166,18 @@ defmodule Swarm.Core do
 
   @spec history_block(keyword()) :: String.t()
   defp history_block(opts) do
+    case authorized_messages(opts) do
+      [] ->
+        ""
+
+      messages ->
+        text = Enum.map_join(messages, "\n", &"#{&1.role}: #{&1.body}")
+
+        if text == "", do: "", else: "## recent conversation\n" <> text
+    end
+  end
+
+  defp authorized_messages(opts) do
     conversation_id = Keyword.get(opts, :conversation_id)
     viewer = Keyword.get(opts, :viewer, "")
 
@@ -773,14 +1189,9 @@ defmodule Swarm.Core do
          true <- Keyword.get(opts, :verified, false),
          true <- valid_actor_uuid?(viewer),
          {:ok, %{messages: messages}} <- Conversations.get(viewer, conversation_id) do
-      text =
-        messages
-        |> Enum.take(-@history_turns)
-        |> Enum.map_join("\n", &"#{&1.role}: #{&1.body}")
-
-      if text == "", do: "", else: "## recent conversation\n" <> text
+      Enum.take(messages, -@history_turns)
     else
-      _ -> ""
+      _ -> []
     end
   end
 
@@ -827,7 +1238,48 @@ defmodule Swarm.Core do
 
   defp query_terms(query), do: query |> patterns() |> Enum.map(&String.trim(&1, "%"))
 
-  defp cite(hit), do: %{source: hit.type, ref: hit.key, confidence: hit.score}
+  defp cite(hit) do
+    %{source: hit.type, ref: hit.key, confidence: hit.score}
+    |> maybe_put_citation_url(Map.get(hit, :source_ref))
+  end
+
+  defp maybe_put_citation_url(citation, source_ref) when is_binary(source_ref) do
+    case citation_url(source_ref) do
+      nil -> citation
+      url -> Map.put(citation, :url, url)
+    end
+  end
+
+  defp maybe_put_citation_url(citation, _source_ref), do: citation
+
+  defp citation_url(source_ref) do
+    with [kind, id] <- String.split(source_ref, ":", parts: 2),
+         true <- String.trim(id) != "",
+         template when is_binary(template) <- citation_template(kind),
+         true <- String.contains?(template, "{id}"),
+         url <- String.replace(template, "{id}", URI.encode_www_form(id)),
+         true <- valid_citation_url?(url) do
+      url
+    else
+      _ -> nil
+    end
+  end
+
+  defp valid_citation_url?(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) ->
+        host != ""
+
+      _ ->
+        false
+    end
+  end
+
+  defp citation_template(kind) do
+    :swarm
+    |> Application.get_env(:citation_url_templates, %{})
+    |> Map.get(kind)
+  end
 
   # A claim-graph fact as a citation: source "claim", the S-P-O as the ref, the
   # edge reliability as confidence — so a fact-grounded answer is explainable.

@@ -10,8 +10,11 @@ defmodule Swarm.Graph.ProcedureTest do
   alias Swarm.Graph.Procedure
   alias Swarm.Graph.Store
 
+  @dim Swarm.Config.embedding_dim()
+
+  defp vecn(i), do: for(j <- 0..(@dim - 1), do: if(j == i, do: 1.0, else: 0.0))
   defp ent(key, scope), do: Store.upsert_node("entity", key, scope: scope)
-  defp step_node(key, scope), do: Store.upsert_node("concept", key, scope: scope)
+  defp step_node(key, scope), do: Store.upsert_node("step", key, scope: scope)
 
   defp has_step(proc, step, ordinal, origin, scope) do
     {:ok, _} =
@@ -147,6 +150,23 @@ defmodule Swarm.Graph.ProcedureTest do
       assert Procedure.candidates("procedure thing", []) == []
 
       refute "group procedure thing" in Procedure.candidates("nothing relevant here", [test_src()])
+    end
+
+    test "vector fallback finds a held-out paraphrase and stays scope-enforced" do
+      p = ent("credential rotation runbook", test_src())
+      s = step_node("open the credential console", test_src())
+      has_step(p, s, 1, "wiki:rotate", test_src())
+
+      Swarm.Repo.query!("UPDATE node SET vec = $2 WHERE id = $1", [p, Pgvector.new(vecn(7))])
+
+      assert ["credential rotation runbook"] =
+               Procedure.candidates("walk me through changing a secret", [test_src()],
+                 query_vec: vecn(7)
+               )
+
+      assert Procedure.candidates("walk me through changing a secret", ["public"],
+               query_vec: vecn(7)
+             ) == []
     end
   end
 

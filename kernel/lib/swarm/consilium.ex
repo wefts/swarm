@@ -6,11 +6,11 @@ defmodule Swarm.Consilium do
   judge synthesizes one grounded verdict.
 
   Fail-loud (ADR-7 / Domain 4): a judge failure returns a typed
-  `{:error, {:judge_failed, _}}` — never raw, unsynthesized panel text. The judge
-  is `llama3.3:70b`, a different family from the qwen/gemma/glm panel, to
-  decorrelate blind spots (confident-wrong mitigation). Judge-accuracy on the
-  handle-confidently band is measured by an eval harness (the `Swarm.Gate.Eval`
-  pattern) — deferred, hooked via the disagreement signal here.
+  `{:error, {:judge_failed, _}}` — never raw, unsynthesized panel text. The
+  configured judge must not also be a panel model: ADR-11's external-reward rule
+  applies at the model-fleet level too, because a model cannot reliably catch the
+  same contrastive inversion it just produced. Judge accuracy on synthesized
+  answers is measured separately from the easier structured entailment gate.
 
   Economics: the caller passes already-compressed `:grounding` (the whole graph
   is never sent); panel runs concurrently so latency is the slowest single model,
@@ -56,7 +56,8 @@ defmodule Swarm.Consilium do
     ceiling = Keyword.get(opts, :token_ceiling, Map.get(fleet, :token_ceiling, 32_000))
     panel_prompt = panel_prompt(query, grounding)
 
-    with :ok <- budget(panel_prompt, ceiling),
+    with :ok <- validate_fleet(fleet),
+         :ok <- budget(panel_prompt, ceiling),
          [_ | _] = takes <- run_panel(fleet.panel, panel_prompt, generator) do
       # Disagreement depends ONLY on the panel answers, not the judge — so embed it
       # CONCURRENTLY with the judge instead of serially after (ADR-17 #1, consilium-latency
@@ -76,6 +77,7 @@ defmodule Swarm.Consilium do
         dis_task
       )
     else
+      {:error, {:self_judging, _}} = err -> err
       {:error, {:over_budget, est, ceil}} -> over_budget(est, ceil)
       [] -> {:error, :panel_empty}
     end
@@ -164,8 +166,23 @@ defmodule Swarm.Consilium do
     ceiling = Keyword.get(opts, :token_ceiling, Map.get(fleet, :token_ceiling, 32_000))
     judge_prompt = judge_prompt(query, grounding, takes)
 
-    with :ok <- budget(judge_prompt, ceiling) do
+    with :ok <- validate_fleet(fleet),
+         :ok <- budget(judge_prompt, ceiling) do
       judge(fleet.judge, judge_prompt, generator)
+    end
+  end
+
+  @spec validate_fleet(map()) :: :ok | {:error, {:self_judging, String.t()}}
+  defp validate_fleet(%{panel: panel, judge: judge}) when is_list(panel) and is_binary(judge) do
+    if judge in panel do
+      Logger.error(
+        "consilium fleet rejected: judge #{inspect(judge)} is also a panel model " <>
+          "(ADR-11 forbids self-judging synthesized answers)"
+      )
+
+      {:error, {:self_judging, judge}}
+    else
+      :ok
     end
   end
 

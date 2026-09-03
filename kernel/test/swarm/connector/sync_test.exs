@@ -40,6 +40,62 @@ defmodule Swarm.Connector.SyncTest do
     end
   end
 
+  defmodule SkippingConnector do
+    @moduledoc false
+    @behaviour Swarm.Ports.Connector
+    @impl true
+    def describe, do: %{name: "skipper", source: "fixture"}
+    @impl true
+    def fetch(:start, _opts),
+      do:
+        {:ok,
+         %{
+           events: [ev("a")],
+           skips: [
+             %{
+               source_ref: "fixture:b",
+               reason: :short_or_stub,
+               occurred_at: ~U[2026-01-01 00:00:00Z]
+             }
+           ],
+           total: 2,
+           cursor: :done,
+           truncated?: false
+         }}
+
+    defp ev(k) do
+      %{
+        provenance: "fixture:#{k}",
+        occurred_at: ~U[2026-01-01 00:00:00Z],
+        entities: [%{type: "file", key: "fixture-#{k}", scope: "private", content: k}],
+        relations: []
+      }
+    end
+  end
+
+  defmodule MalformedSkippingConnector do
+    @moduledoc false
+    @behaviour Swarm.Ports.Connector
+    @impl true
+    def describe, do: %{name: "bad-skipper", source: "fixture"}
+    @impl true
+    def fetch(:start, _opts),
+      do:
+        {:ok,
+         %{
+           events: [],
+           skips: [
+             %{
+               source_ref: "https://docs.example.test/pages/secret-title",
+               reason: "short_or_stub",
+               occurred_at: ~U[2026-01-01 00:00:00Z]
+             }
+           ],
+           cursor: :done,
+           truncated?: false
+         }}
+  end
+
   defp file_count do
     %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM node WHERE type = 'file'")
     n
@@ -107,7 +163,17 @@ defmodule Swarm.Connector.SyncTest do
     {:ok, r} = Sync.run(HostileConnector, count: 10, page_size: 5)
 
     assert Enum.sort(Map.keys(r)) ==
-             [:ceilings, :complete?, :duplicates, :errors, :ingested, :mode, :pages, :watermark]
+             [
+               :ceilings,
+               :complete?,
+               :duplicates,
+               :errors,
+               :ingested,
+               :mode,
+               :pages,
+               :skipped,
+               :watermark
+             ]
 
     refute Map.has_key?(r, :events)
   end
@@ -124,6 +190,32 @@ defmodule Swarm.Connector.SyncTest do
     refute r.complete?
     assert r.ingested == 2
     assert log =~ "coverage shortfall"
+  end
+
+  test "connector-declared skips are persisted and count toward coverage" do
+    {:ok, r} = Sync.run(SkippingConnector)
+
+    assert r.complete?
+    assert r.ingested == 1
+    assert r.skipped == 1
+
+    assert [
+             %{
+               connector: "Swarm.Connector.SyncTest.SkippingConnector",
+               source: "fixture",
+               reason: "short_or_stub",
+               count: 1
+             }
+           ] = Swarm.Ingest.SkipLedger.summary()
+  end
+
+  test "malformed skip records are rejected instead of persisted" do
+    {:ok, r} = Sync.run(MalformedSkippingConnector)
+
+    refute r.complete?
+    assert r.skipped == 0
+    assert r.errors == 1
+    assert Swarm.Ingest.SkipLedger.count() == 0
   end
 
   test "without a declared total, an early :done is undetectable (documented ADR-5 limit)" do

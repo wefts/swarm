@@ -102,6 +102,11 @@ def _call_ollama_generate(
         "prompt": prompt,
         "stream": False,
         "keep_alive": _keep_alive(keep_alive),
+        # This service is for intermediate processors: consilium panel/judge,
+        # extraction and confirmation. Their output is consumed by code, not by
+        # a human chat surface, so model "thinking" is pure latency and can hide
+        # the final JSON behind an empty `{}` response under `format: json`.
+        "think": False,
     }
     if system:
         body["system"] = system

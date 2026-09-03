@@ -97,6 +97,57 @@ defmodule Swarm.WorldMap.GateTest do
       assert Enum.all?(ans.citations, &String.starts_with?(&1, "corroboration:"))
     end
 
+    test "default procedure entail still uses the procedure system prompt" do
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :procedure}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(clean_procedure(), generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      refute system == Gate.entity_entail_system()
+      assert system =~ "PROCEDURE"
+      assert system =~ "SAME operation"
+    end
+
+    test "default entity-profile entail uses the entity system prompt" do
+      d =
+        Coverage.describe("what is the ingress", [Swarm.GraphCase.test_src()],
+          profile: profile([group("is_a", [{"a load balancer", 2}])]),
+          entity_serve: true
+        )
+
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :entity_profile}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(d, generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      assert system == Gate.entity_entail_system()
+      assert system =~ "ENTITY PROFILE FACTS"
+      assert system =~ "DIRECT FACT"
+      assert system =~ "broad profile request"
+      assert system =~ "tell me about X"
+      assert system =~ "розкажи про X"
+      assert system =~ "що відомо про X"
+      assert system =~ "direct profile facts"
+      assert system =~ "specific missing"
+      assert system =~ "Do not inherit or transfer attributes"
+      assert system =~ "routes_to"
+      assert system =~ "wrong entity"
+      assert system =~ "wrong relation"
+      assert system =~ "absent fact"
+    end
+
     test "a Stage-1 rejection is NEVER recovered by a YES entailment (asymmetry)" do
       # empty scopes ⇒ blocker; even a YES entailment cannot serve it
       d = Coverage.describe("anything", [], candidate_keys: ["x"])
@@ -116,7 +167,14 @@ defmodule Swarm.WorldMap.GateTest do
         neighborhood_key: key || subject,
         neighborhood_facts:
           Enum.map(facts, fn {r, o} ->
-            %{relation: r, object: o, object_kind: "subnet", corroboration: 2}
+            %{
+              relation: r,
+              object: o,
+              object_kind: "subnet",
+              corroboration: 2,
+              effective_reliability: 0.82,
+              cardinality: Swarm.Graph.Network.cardinality(r)
+            }
           end),
         blockers: []
       }
@@ -148,11 +206,81 @@ defmodule Swarm.WorldMap.GateTest do
       assert key == "net:tunnel:orbit"
     end
 
+    test "renders deterministic network facts as answer prose and preserves citations" do
+      d =
+        net_desc(
+          "host lyon",
+          [
+            {"has_private_address", "address/192.0.2.10"},
+            {"has_public_address", "address/198.51.100.20"}
+          ],
+          "net:host:lyon"
+        )
+
+      assert {:serve,
+              %Answer{
+                text: text,
+                citations: ["corroboration:2"]
+              }, %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "host lyon:"
+      assert text =~ "Host lyon has private address 192.0.2.10."
+      assert text =~ "Host lyon has public address 198.51.100.20."
+      refute text =~ "has_private_address"
+      refute text =~ "address/"
+    end
+
+    test "structured confidence varies with reliability and corroboration" do
+      low =
+        net_desc("host low", [{"has_private_address", "address/192.0.2.30"}], "net:host:low")
+
+      high = %{
+        low
+        | neighborhood_facts: [
+            %{
+              relation: "has_private_address",
+              object: "address/192.0.2.30",
+              object_kind: "address",
+              corroboration: 4,
+              effective_reliability: 0.9,
+              cardinality: :many
+            }
+          ]
+      }
+
+      assert {:serve, %Answer{confidence: low_conf}, _} =
+               Gate.sufficient?(low, entail_fun: always(true))
+
+      assert {:serve, %Answer{confidence: high_conf}, _} =
+               Gate.sufficient?(high, entail_fun: always(true))
+
+      assert low_conf < high_conf
+      assert high_conf == 0.97
+    end
+
     test "entail veto escalates (never serves the wrong-relation/entity)" do
       d = net_desc("tunnel conduit", [{"terminates_at", "gateway peer"}])
 
       assert {:escalate, %Audit{decision: :escalate, stage2: :veto}} =
                Gate.sufficient?(d, entail_fun: always(false))
+    end
+
+    test "default network entail still uses the domain system prompt" do
+      d = net_desc("tunnel orbit", [{"carries", "10.128.0.0/16"}])
+      parent = self()
+
+      generation_fun = fn _model, _prompt, opts ->
+        send(parent, {:system, Keyword.fetch!(opts, :system)})
+        {:ok, ~s({"sufficient": true})}
+      end
+
+      assert {:serve, %Answer{intent: :neighborhood, domain: :network}, %Audit{stage2: :yes}} =
+               Gate.sufficient?(d, generation_fun: generation_fun)
+
+      assert_receive {:system, system}
+      assert system == Swarm.WorldMap.Domain.network().entail_system
+      refute system == Gate.entity_entail_system()
     end
 
     test "an empty network neighborhood cannot mint a Validated (fail-closed)" do
@@ -179,7 +307,14 @@ defmodule Swarm.WorldMap.GateTest do
         neighborhood_key: key || subject,
         neighborhood_facts:
           Enum.map(facts, fn {r, o} ->
-            %{relation: r, object: o, object_kind: "person", corroboration: 1}
+            %{
+              relation: r,
+              object: o,
+              object_kind: "person",
+              corroboration: 1,
+              effective_reliability: 0.9,
+              cardinality: :many
+            }
           end),
         blockers: []
       }
@@ -199,7 +334,7 @@ defmodule Swarm.WorldMap.GateTest do
                Gate.sufficient?(d, entail_fun: always(true))
 
       assert text =~ "platform"
-      assert text =~ "works_in Jane Doe"
+      assert text =~ "Platform works in Jane Doe and Bob Smith."
       assert cits == ["corroboration:1"]
       # chat-thread epic 2: active_keys must echo the RAW key, never the display subject
       assert key == "who:team:platform"
@@ -236,6 +371,37 @@ defmodule Swarm.WorldMap.GateTest do
 
       assert {:escalate, %Audit{blockers: [:no_corroboration]}} =
                Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
+
+  describe "technology intent" do
+    test "serves technology anchor facts as prose" do
+      d = %Descriptor{
+        query: "what is known about Magento?",
+        intent: :neighborhood,
+        domain: :technology,
+        neighborhood_subject: "magento",
+        neighborhood_key: "technology:magento",
+        neighborhood_facts: [
+          %{
+            relation: "mentioned_in",
+            object: "Magento operations",
+            object_kind: "article",
+            corroboration: 1,
+            effective_reliability: 0.72,
+            cardinality: :many
+          }
+        ],
+        blockers: []
+      }
+
+      assert {:serve, %Answer{intent: :neighborhood, domain: :technology, text: text, key: key},
+              %Audit{decision: :serve}} =
+               Gate.sufficient?(d, entail_fun: always(true))
+
+      assert text =~ "magento:"
+      assert text =~ "Magento mentioned in Magento operations."
+      assert key == "technology:magento"
     end
   end
 end

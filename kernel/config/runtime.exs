@@ -81,6 +81,23 @@ if judge = System.get_env("SWARM_CONSILIUM_JUDGE") do
   config :swarm, :consilium, judge: judge
 end
 
+citation_url_templates =
+  [
+    {"confluence", "SWARM_CITATION_URL_TEMPLATE_CONFLUENCE"},
+    {"mediawiki", "SWARM_CITATION_URL_TEMPLATE_MEDIAWIKI"}
+  ]
+  |> Enum.flat_map(fn {kind, env} ->
+    case System.get_env(env) do
+      value when is_binary(value) and value != "" -> [{kind, value}]
+      _ -> []
+    end
+  end)
+  |> Map.new()
+
+if map_size(citation_url_templates) > 0 do
+  config :swarm, :citation_url_templates, citation_url_templates
+end
+
 # Enrichment reward-gate threshold — the ADR-8 tuning knob, calibrated PER CORPUS
 # (calibrate.exs). The config.exs default (0.35) gates little; a calibrated run sets
 # SWARM_ENRICH_THRESHOLD to its corpus p50 (prod ≈ 0.58, derived 2026-06-29) so
@@ -105,7 +122,7 @@ end
 # consilium. OFF unless EXPLICITLY enabled — a false-serve breaks trust, so it ships off
 # until the go/no-go (`board/todo/tier-gate-gonogo.md`) shows false_serve_rate ~0 (measured
 # on `Swarm.WorldMap.Gate.Calibration`). `SWARM_TIER_GATE_ENTAIL_MODEL` overrides the Stage-2
-# entail model (default gemma4:31b — the resident judge; fsr 0.0 / recall 1.0 on the eval).
+# entail model (default qwen3:14b after the sidecar sends think:false; fsr 0.0 / recall 1.0).
 if System.get_env("SWARM_TIER_GATE_ENABLED") == "true" do
   config :swarm, :tier_gate, enabled: true
 end
@@ -135,12 +152,34 @@ if System.get_env("SWARM_TIER_GATE_WHO_SERVE") == "true" do
   config :swarm, :tier_gate, who_serve: true
 end
 
+# The :technology serve path is a read-only structural projection over existing scoped corpus
+# evidence. It stays OFF unless explicitly enabled, like every neighborhood domain.
+if System.get_env("SWARM_TIER_GATE_TECHNOLOGY_SERVE") == "true" do
+  config :swarm, :tier_gate, technology_serve: true
+end
+
 # Corroboration floor for the network serve path (default 2 = only multi-source-confirmed;
 # 1 = any ground-truth fact, wider coverage leaning on the Stage-2 entail veto). Empty/unset ⇒
 # the code default (2). Widen to 1 only after floor-2 proves safe live (network-serve-path-gonogo).
 case System.get_env("SWARM_TIER_GATE_NETWORK_MIN_CORROB") do
   n when is_binary(n) and n != "" ->
     config :swarm, :tier_gate, network_min_corroboration: String.to_integer(n)
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_TIER_GATE_TECHNOLOGY_MIN_CORROB") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, technology_min_corroboration: String.to_integer(n)
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_TIER_GATE_BREAKER_MS") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :tier_gate, breaker_ms: String.to_integer(n)
 
   _ ->
     :ok
@@ -196,6 +235,31 @@ end
 case System.get_env("SWARM_DEFAULT_COHORT_GROUP") do
   nil -> :ok
   v -> config :swarm, :identity, default_cohort: String.trim(v)
+end
+
+case System.get_env("SWARM_CORE_API_START_SERVER") do
+  "false" -> config :swarm, :core_api, start_server: false
+  "true" -> config :swarm, :core_api, start_server: true
+  _ -> :ok
+end
+
+case System.get_env("SWARM_ML_PREWARM") do
+  "true" ->
+    config :swarm, :ml_prewarm, enabled: true
+
+  "false" ->
+    config :swarm, :ml_prewarm, enabled: false
+
+  _ ->
+    :ok
+end
+
+case System.get_env("SWARM_ML_PREWARM_TIMEOUT_MS") do
+  n when is_binary(n) and n != "" ->
+    config :swarm, :ml_prewarm, timeout_ms: String.to_integer(n)
+
+  _ ->
+    :ok
 end
 
 if config_env() == :test do

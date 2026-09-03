@@ -109,9 +109,9 @@ layer, folded into residual #2.
 `board/research/tier-gate-blackboard.md`). The council CORRECTED the initial lean on three
 load-bearing points — those corrections are canon here.**
 
-Placement: intercept the current `:escalate` path in `Swarm.Core.ask/2` **after** retrieval
-+ structure building (`Aggregation.entity_profile` / `Procedure.steps`), **before**
-`Consilium.deliberate`. The consilium path is behaviourally unchanged — it just also receives
+Placement: intercept the current `:escalate` path in `Swarm.Core.ask/2` **after**
+retrieval + structure building (`Aggregation.entity_profile` / `Procedure.steps`),
+**before** `Consilium.deliberate`. The consilium path is behaviourally unchanged — it just also receives
 the descriptor/audit as context. No hidden shortcut inside the consilium.
 
 **Contract (CORRECTION 2 — the gate returns a STRUCT, never a rendered string):**

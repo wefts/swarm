@@ -44,7 +44,7 @@ defmodule Swarm.Enrichment.NetworkMap do
   shortest-path/blast-radius affordances) until Phase-2 evidence exists.
   """
 
-  alias Swarm.Graph.Store
+  alias Swarm.Graph.{NetworkAddress, Store}
   alias Swarm.ML.Generation
 
   require Logger
@@ -63,7 +63,7 @@ defmodule Swarm.Enrichment.NetworkMap do
   # The governed Phase-1 relation vocabulary (macro-topology only). `is_a` is generated from a
   # fact's endpoint kinds, never asked of the model. `contains` subsumes in_subnet at macro
   # level; exact-address relations (has_address/resolves_to/CIDR identity) are DEFERRED to Phase-2.
-  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address)
+  @relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address has_private_address has_public_address)
   # Symmetric relations: emit both directions with shared provenance (evidential, both families).
   @symmetric ~w(connects_site alias_of)
 
@@ -105,6 +105,8 @@ defmodule Swarm.Enrichment.NetworkMap do
     "carries" => {~w(tunnel gateway cluster), ~w(subnet)},
     # an entity HAS an IP address (wiki inventory tables — public/private IP columns)
     "has_address" => {~w(host service gateway firewall cluster site), ~w(address)},
+    "has_private_address" => {~w(host service gateway firewall cluster site), ~w(address)},
+    "has_public_address" => {~w(host service gateway firewall cluster site), ~w(address)},
     # something is protected by a firewall
     "protected_by" => {~w(host subnet site service cluster), ~w(firewall)},
     # identity: alias_of is between same-kind endpoints
@@ -274,6 +276,8 @@ defmodule Swarm.Enrichment.NetworkMap do
        ) do
     key = entity_key(kind, name)
     ent = Store.upsert_node(@entity_type, key, scope: scope)
+    NetworkAddress.annotate_node(ent, kind, name)
+
     # Kind markers are generic type labels shared across source scopes. Pin them public so a
     # src-scoped is_a edge satisfies edge <= glb(entity, marker).
     marker = Store.upsert_node(@marker_type, "net:kind:" <> kind, scope: "public")
@@ -313,9 +317,15 @@ defmodule Swarm.Enrichment.NetworkMap do
          provenance,
          {reliability, evidence_kind, lineage}
        ) do
-    directed = [{src, dst} | if(relation in @symmetric, do: [{dst, src}], else: [])]
+    relations = address_relations(relation, dst)
 
-    Enum.flat_map(directed, fn {s, d} ->
+    directed =
+      for relation <- relations,
+          {s, d} <- [{src, dst} | if(relation in @symmetric, do: [{dst, src}], else: [])] do
+        {relation, s, d}
+      end
+
+    Enum.flat_map(directed, fn {relation, s, d} ->
       case Store.add_edge(s, d, relation, provenance,
              scope: scope,
              origin: origin,
@@ -329,6 +339,13 @@ defmodule Swarm.Enrichment.NetworkMap do
       end
     end)
   end
+
+  defp address_relations("has_address", dst) do
+    class_rel = dst |> NetworkAddress.node_class() |> NetworkAddress.class_relation()
+    ["has_address", class_rel] |> Enum.reject(&is_nil/1)
+  end
+
+  defp address_relations(relation, _dst), do: [relation]
 
   # --- parse + validate ------------------------------------------------------
 

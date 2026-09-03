@@ -21,15 +21,27 @@ defmodule Swarm.Graph.Contract do
     the identity/entity-kind axis (swarm ADR-14 §3.1). Connectors *map into* it;
     an out-of-vocabulary node type fails the write fail-loud, exactly as an
     unknown scope/kind does. This is the seam ADR-13 left open — within-type
-    entity resolution is only meaningful once types are canonical. (Edge/relation
-    types are a *different* axis: validated for well-formedness only, not
-    membership — the relation vocabulary is connector-defined.) Tightening the
-    node vocabulary is a schema-version bump, never silent drift.
+    entity resolution is only meaningful once types are canonical. Edge/relation
+    names remain an open connector-defined vocabulary, but governed structural
+    relations from `Swarm.WorldMap.Domain` also enforce subject/object endpoint
+    kinds at write time. Tightening the node vocabulary is a schema-version bump,
+    never silent drift.
   - **Reliability** stays in `[0, 1]`.
   """
 
   alias Swarm.Repo
+  alias Swarm.WorldMap.Domain
 
+  @type endpoint_meta :: %{
+          optional(:id) => integer(),
+          optional(:scope) => String.t() | nil,
+          optional(:type) => String.t() | nil,
+          optional(:key) => String.t() | nil
+        }
+
+  # v12 — network address semantics: `net:address:*` / `net:subnet:*` nodes gain typed
+  # PostgreSQL `inet` / `cidr` columns plus deterministic address-class labels so containment and
+  # public/private address asks are data operations, not prose/model guesses.
   # v11 — project access (workspace ADR-20): the source scope key becomes the STABLE source id
   # `src:<source_uuid>` (a `source` row owned by a `project`); `src:<name>` labels and the
   # transitional `group` scope are migrated away and the CHECK constraints tightened to
@@ -47,7 +59,7 @@ defmodule Swarm.Graph.Contract do
   # corroboration calculus no longer mis-reads an entity source node's kind.
   # v4 added the `origin` axis + distinct-origin `seen_count`. Mirrored in
   # `graph_schema_meta` by each migration.
-  @schema_version 11
+  @schema_version 12
   @scopes ~w(private public)
   # A source scope is `src:` + the source's lowercase hyphenated UUID — never a label.
   @uuid_re "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -233,10 +245,44 @@ defmodule Swarm.Graph.Contract do
     end
   end
 
+  @doc """
+  Validate governed relation endpoint kinds against `Swarm.WorldMap.Domain`.
+
+  Unknown relation names remain connector-defined and are not closed by this
+  check. For governed relations, endpoint kinds are inferred from existing node
+  metadata without relabeling or mutating the graph.
+  """
+  @spec validate_relation_endpoints(term(), endpoint_meta() | nil, endpoint_meta() | nil) ::
+          :ok | {:error, term()}
+  def validate_relation_endpoints(type, src_endpoint, dst_endpoint) do
+    case Domain.structural_relation(type) do
+      nil ->
+        :ok
+
+      relation ->
+        dst_kinds = inferred_kinds(dst_endpoint)
+        src_kinds = inferred_kinds(src_endpoint, relation, dst_kinds)
+
+        if admissible_inferred_kinds?(relation, src_kinds, dst_kinds) do
+          :ok
+        else
+          {:error,
+           {:relation_endpoint_kinds_mismatch,
+            %{
+              relation: relation.key,
+              subject_kinds: src_kinds,
+              object_kinds: dst_kinds,
+              expected_subject_kinds: relation.subject_kinds,
+              expected_object_kinds: relation.object_kinds
+            }}}
+        end
+    end
+  end
+
   # --- field checks ----------------------------------------------------------
 
-  # Edge/relation type: well-formedness only (the relation vocabulary is
-  # connector-defined, not a closed kernel set).
+  # Relation names stay connector-defined and open. Governed structural names get
+  # endpoint-kind validation separately in validate_relation_endpoints/3.
   defp check_type(type) when is_binary(type) do
     if Regex.match?(@type_format, type), do: :ok, else: {:error, :invalid_type_format}
   end
@@ -313,6 +359,128 @@ defmodule Swarm.Graph.Contract do
     if lattice_leq(scope, glb(src_scope, dst_scope)),
       do: :ok,
       else: {:error, :scope_wider_than_endpoints}
+  end
+
+  defp inferred_kinds(nil), do: []
+
+  defp inferred_kinds(endpoint) when is_map(endpoint) do
+    endpoint
+    |> base_kinds()
+    |> add_article_page_alias(endpoint)
+    |> add_entity_namespace_kind(endpoint)
+    |> add_entity_key_shape_kind(endpoint)
+    |> add_concept_kinds(endpoint)
+    |> Enum.uniq()
+  end
+
+  defp inferred_kinds(endpoint, relation, peer_kinds) do
+    endpoint
+    |> inferred_kinds()
+    |> add_relation_context_kind(endpoint, relation, peer_kinds)
+  end
+
+  @spec base_kinds(endpoint_meta()) :: [String.t()]
+  defp base_kinds(%{type: type}) when is_binary(type), do: [type]
+  defp base_kinds(_), do: []
+
+  @spec add_article_page_alias([String.t()], endpoint_meta()) :: [String.t()]
+  defp add_article_page_alias(kinds, %{type: "article"}), do: ["page" | kinds]
+  defp add_article_page_alias(kinds, _), do: kinds
+
+  @spec add_entity_namespace_kind([String.t()], endpoint_meta()) :: [String.t()]
+  defp add_entity_namespace_kind(kinds, %{type: "entity", key: key}) when is_binary(key) do
+    case String.split(key, ":", parts: 3) do
+      [namespace, kind, _] when namespace in ["net", "who"] and kind != "" ->
+        [kind, "entity" | kinds]
+
+      _ ->
+        kinds
+    end
+  end
+
+  defp add_entity_namespace_kind(kinds, _), do: kinds
+
+  @spec add_entity_key_shape_kind([String.t()], endpoint_meta()) :: [String.t()]
+  defp add_entity_key_shape_kind(kinds, %{type: "entity", key: key}) when is_binary(key) do
+    cond do
+      bare_ip?(key) ->
+        ["address" | kinds]
+
+      bare_fqdn?(key) ->
+        ["host" | kinds]
+
+      true ->
+        kinds
+    end
+  end
+
+  defp add_entity_key_shape_kind(kinds, _), do: kinds
+
+  defp add_relation_context_kind(
+         kinds,
+         %{type: "entity"},
+         %{key: "has_step"},
+         peer_kinds
+       ) do
+    if "step" in peer_kinds, do: Enum.uniq(["procedure" | kinds]), else: kinds
+  end
+
+  defp add_relation_context_kind(kinds, _endpoint, _relation, _peer_kinds), do: kinds
+
+  @spec add_concept_kinds([String.t()], endpoint_meta()) :: [String.t()]
+  defp add_concept_kinds(kinds, %{type: "concept", key: key}) when is_binary(key) do
+    case String.split(key, ":", parts: 2) do
+      ["concept", kind] when kind != "" -> [kind, "kind", "concept" | kinds]
+      _ -> ["kind", "concept" | kinds]
+    end
+  end
+
+  defp add_concept_kinds(kinds, %{type: "concept"}), do: ["kind", "concept" | kinds]
+
+  defp add_concept_kinds(kinds, %{key: "concept:" <> kind}) when kind != "",
+    do: [kind, "concept" | kinds]
+
+  defp add_concept_kinds(kinds, _), do: kinds
+
+  defp admissible_inferred_kinds?(
+         %{subject_kinds: [:same_kind], object_kinds: [:same_kind]},
+         src_kinds,
+         dst_kinds
+       ) do
+    src_comparable = same_kind_comparable_kinds(src_kinds)
+    dst_comparable = same_kind_comparable_kinds(dst_kinds)
+
+    overlaps?(src_comparable, dst_comparable)
+  end
+
+  defp admissible_inferred_kinds?(relation, src_kinds, dst_kinds) do
+    overlaps?(src_kinds, relation.subject_kinds) and
+      overlaps?(dst_kinds, relation.object_kinds)
+  end
+
+  defp same_kind_comparable_kinds(kinds) do
+    specific = Enum.reject(kinds, &(&1 == "entity"))
+    if specific == [], do: kinds, else: specific
+  end
+
+  defp overlaps?(left, right) do
+    Enum.any?(left, &(&1 in right))
+  end
+
+  @spec bare_ip?(String.t()) :: boolean()
+  defp bare_ip?(key) do
+    case :inet.parse_address(String.to_charlist(key)) do
+      {:ok, _addr} -> true
+      {:error, _} -> false
+    end
+  end
+
+  @spec bare_fqdn?(String.t()) :: boolean()
+  defp bare_fqdn?(key) do
+    Regex.match?(
+      ~r/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i,
+      key
+    )
   end
 
   defp get(attrs, key) do

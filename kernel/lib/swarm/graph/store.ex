@@ -51,6 +51,7 @@ defmodule Swarm.Graph.Store do
   @spec upsert_node(String.t(), String.t(), keyword()) :: integer()
   def upsert_node(type, key, opts \\ []) when is_binary(type) and is_binary(key) do
     scope = Keyword.get(opts, :scope, "private")
+    metadata = display_metadata(Keyword.get(opts, :display_key), key)
 
     # swarm ADR-4: validate at the boundary, fail-loud (raw-SQL path has no
     # changeset). A malformed type/scope must never reach the shared substrate.
@@ -65,15 +66,25 @@ defmodule Swarm.Graph.Store do
     canonical = resolve_alias(type, key)
 
     sql = """
-    INSERT INTO node (type, key, scope)
-    VALUES ($1, $2, $3)
-    ON CONFLICT (type, key) DO UPDATE SET updated_at = now()
+    INSERT INTO node (type, key, scope, provenance)
+    VALUES ($1, $2, $3, $4::jsonb)
+    ON CONFLICT (type, key) DO UPDATE
+      SET updated_at = now(),
+          provenance = node.provenance || $4::jsonb
     RETURNING id
     """
 
-    %{rows: [[id]]} = Repo.query!(sql, [type, canonical, scope])
+    %{rows: [[id]]} = Repo.query!(sql, [type, canonical, scope, metadata])
     id
   end
+
+  @spec display_metadata(term(), String.t()) :: map()
+  defp display_metadata(display_key, identity_key)
+       when is_binary(display_key) and display_key != "" and display_key != identity_key do
+    %{"display_key" => display_key}
+  end
+
+  defp display_metadata(_display_key, _identity_key), do: %{}
 
   # Consult the standing alias table (swarm ADR-14 §3.2): an aliased key resolves
   # to its canonical form before minting; an unknown key passes through unchanged.
@@ -135,11 +146,11 @@ defmodule Swarm.Graph.Store do
       # vocabulary, reliability range, and the ADR-5 visibility invariant (edge
       # scope no wider than the narrowest endpoint). Reject fail-loud; do NOT
       # silently store a leaking or malformed edge.
-      {src_scope, dst_scope} = endpoint_scopes(src, dst)
+      {src_endpoint, dst_endpoint} = endpoint_metadata(src, dst)
 
       case Contract.validate_edge(
-             src_scope,
-             dst_scope,
+             endpoint_scope(src_endpoint),
+             endpoint_scope(dst_endpoint),
              type,
              scope,
              reliability,
@@ -147,6 +158,11 @@ defmodule Swarm.Graph.Store do
              origin,
              evidence_kind
            ) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback({:contract, reason})
+      end
+
+      case Contract.validate_relation_endpoints(type, src_endpoint, dst_endpoint) do
         :ok -> :ok
         {:error, reason} -> Repo.rollback({:contract, reason})
       end
@@ -241,8 +257,13 @@ defmodule Swarm.Graph.Store do
           %{into_id: into_id, edges: 0, result: :refused_do_not_merge}
 
         is_nil(into_id) ->
-          # Canonical not yet present: rename the alias to the canonical key. Safe —
-          # (type, into_key) is free, and the unique index would reject any race.
+          # Canonical not yet present: rename the alias to the canonical key. This
+          # still changes inferred endpoint kind (`net:host:*` vs `net:address:*`),
+          # so existing governed edges must validate against the proposed key before
+          # the UPDATE. A merge operation that cannot be expressed safely should fail
+          # loudly, not strand illegal structure behind a convenient rename.
+          validate_rename_endpoints!(alias_id, into_key)
+
           Repo.query!("UPDATE node SET key = $2, updated_at = now() WHERE id = $1", [
             alias_id,
             into_key
@@ -532,6 +553,8 @@ defmodule Swarm.Graph.Store do
   end
 
   defp repoint_one(eid, new_src, new_dst, etype, scope) do
+    validate_repoint_endpoints!(new_src, new_dst, etype)
+
     case existing_edge(new_src, etype, new_dst, scope) do
       target when is_integer(target) and target != eid ->
         # Natural-key collision: union the alias edge's (provenance, origin) rows
@@ -564,6 +587,63 @@ defmodule Swarm.Graph.Store do
     end
   end
 
+  @spec validate_repoint_endpoints!(integer(), integer(), String.t()) :: :ok | no_return()
+  defp validate_repoint_endpoints!(src, dst, type) do
+    {src_endpoint, dst_endpoint} = endpoint_metadata(src, dst)
+
+    case Contract.validate_relation_endpoints(type, src_endpoint, dst_endpoint) do
+      :ok -> :ok
+      {:error, reason} -> Repo.rollback({:contract, reason})
+    end
+  end
+
+  @spec validate_rename_endpoints!(integer(), String.t()) :: :ok | no_return()
+  defp validate_rename_endpoints!(node_id, new_key) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT e.type,
+               src.id, src.scope, src.type, src.key,
+               dst.id, dst.scope, dst.type, dst.key
+        FROM edge e
+        JOIN node src ON src.id = e.src
+        JOIN node dst ON dst.id = e.dst
+        WHERE e.src = $1 OR e.dst = $1
+        FOR SHARE OF e, src, dst
+        """,
+        [node_id]
+      )
+
+    Enum.each(rows, fn [
+                         edge_type,
+                         src_id,
+                         src_scope,
+                         src_type,
+                         src_key,
+                         dst_id,
+                         dst_scope,
+                         dst_type,
+                         dst_key
+                       ] ->
+      src_endpoint =
+        endpoint_with_renamed_key(src_id, src_scope, src_type, src_key, node_id, new_key)
+
+      dst_endpoint =
+        endpoint_with_renamed_key(dst_id, dst_scope, dst_type, dst_key, node_id, new_key)
+
+      case Contract.validate_relation_endpoints(edge_type, src_endpoint, dst_endpoint) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback({:contract, reason})
+      end
+    end)
+
+    :ok
+  end
+
+  defp endpoint_with_renamed_key(id, scope, type, key, renamed_id, new_key) do
+    %{id: id, scope: scope, type: type, key: if(id == renamed_id, do: new_key, else: key)}
+  end
+
   @spec existing_edge(integer(), String.t(), integer(), String.t()) :: integer() | nil
   defp existing_edge(src, type, dst, scope) do
     case Repo.query!(
@@ -575,19 +655,30 @@ defmodule Swarm.Graph.Store do
     end
   end
 
-  # Endpoint scopes for the visibility-invariant check (swarm ADR-4). One indexed
-  # read of both endpoints; a missing node yields a nil scope → rejected. `FOR
-  # SHARE` locks the endpoint rows for this transaction so a concurrent re-scope
-  # cannot widen an endpoint between this check and the edge insert (closes the
+  # Endpoint metadata for the visibility-invariant and governed-relation checks
+  # (swarm ADR-4 / structural spine). One indexed read of both endpoints; a
+  # missing node yields a nil endpoint → rejected by the scope check. `FOR SHARE`
+  # locks the endpoint rows for this transaction so a concurrent re-scope cannot
+  # widen an endpoint between this check and the edge insert (closes the
   # read-then-write TOCTOU window; later narrowing is a separate, documented gap).
-  @spec endpoint_scopes(integer(), integer()) :: {String.t() | nil, String.t() | nil}
-  defp endpoint_scopes(src, dst) do
+  @spec endpoint_metadata(integer(), integer()) :: {map() | nil, map() | nil}
+  defp endpoint_metadata(src, dst) do
     %{rows: rows} =
-      Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1) FOR SHARE", [[src, dst]])
+      Repo.query!("SELECT id, scope, type, key FROM node WHERE id = ANY($1) FOR SHARE", [
+        [src, dst]
+      ])
 
-    by_id = Map.new(rows, fn [id, scope] -> {id, scope} end)
+    by_id =
+      Map.new(rows, fn [id, scope, type, key] ->
+        {id, %{id: id, scope: scope, type: type, key: key}}
+      end)
+
     {Map.get(by_id, src), Map.get(by_id, dst)}
   end
+
+  @spec endpoint_scope(map() | nil) :: String.t() | nil
+  defp endpoint_scope(%{scope: scope}), do: scope
+  defp endpoint_scope(nil), do: nil
 
   # Insert the edge identity, or no-op onto the existing row; return its id. The
   # no-op `DO UPDATE` lets us RETURNING the id on conflict without clobbering

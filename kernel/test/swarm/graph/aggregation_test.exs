@@ -28,12 +28,12 @@ defmodule Swarm.Graph.AggregationTest do
 
   test "groups a subject's claims by canonical predicate" do
     claim!("Rancher", "is_a", "Kubernetes manager", "public")
-    claim!("Rancher", "managed_by", "Ansible", "public")
+    claim!("Rancher", "maintained_by", "Ansible", "public")
 
     profile = Aggregation.entity_profile("what is rancher", ["public"])
     preds = profile.groups |> Enum.filter(&(&1.subject == "Rancher")) |> Enum.map(& &1.predicate)
     assert "is a" in preds
-    assert "managed by" in preds
+    assert "maintained by" in preds
     g = Aggregation.to_grounding(profile)
     assert g =~ "## Rancher"
     assert g =~ "Kubernetes manager"

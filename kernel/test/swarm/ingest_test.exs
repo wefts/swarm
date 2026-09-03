@@ -113,6 +113,111 @@ defmodule Swarm.IngestTest do
     assert count("edge") == 1
   end
 
+  test "content pages may use source_ref as stable identity while keeping display title" do
+    base = %{
+      source: "confluence",
+      occurred_at: ~U[2026-09-02 09:00:00Z],
+      relations: []
+    }
+
+    assert {:ok, :written} =
+             Ingest.ingest(
+               Map.merge(base, %{
+                 provenance: "confluence:100",
+                 origin: "confluence:100",
+                 entities: [
+                   %{
+                     type: "article",
+                     key: "Duplicate Title",
+                     identity: "confluence:100",
+                     source_ref: "confluence:100",
+                     scope: "private",
+                     content: "first body"
+                   }
+                 ]
+               })
+             )
+
+    assert {:ok, :written} =
+             Ingest.ingest(
+               Map.merge(base, %{
+                 provenance: "confluence:200",
+                 origin: "confluence:200",
+                 entities: [
+                   %{
+                     type: "article",
+                     key: "Duplicate Title",
+                     identity: "confluence:200",
+                     source_ref: "confluence:200",
+                     scope: "private",
+                     content: "second body"
+                   }
+                 ]
+               })
+             )
+
+    assert Repo.query!("SELECT key FROM node WHERE type = 'article' ORDER BY key").rows == [
+             ["confluence:100"],
+             ["confluence:200"]
+           ]
+
+    assert Repo.query!("SELECT provenance->>'display_key' FROM node ORDER BY key").rows == [
+             ["Duplicate Title"],
+             ["Duplicate Title"]
+           ]
+
+    assert Repo.query!("SELECT source_ref FROM content ORDER BY source_ref").rows == [
+             ["confluence:100"],
+             ["confluence:200"]
+           ]
+  end
+
+  test "relations can resolve explicit endpoint identity refs when titles collide" do
+    assert {:ok, :written} =
+             Ingest.ingest(%{
+               source: "confluence",
+               provenance: "confluence:child",
+               origin: "confluence:child",
+               occurred_at: ~U[2026-09-02 09:00:00Z],
+               entities: [
+                 %{
+                   type: "article",
+                   key: "Overview",
+                   identity: "confluence:child",
+                   source_ref: "confluence:child",
+                   scope: "private",
+                   content: "child body"
+                 },
+                 %{
+                   type: "article",
+                   key: "Overview",
+                   identity: "confluence:parent",
+                   source_ref: "confluence:parent",
+                   scope: "private",
+                   content: ""
+                 }
+               ],
+               relations: [
+                 %{
+                   from: "Overview",
+                   from_ref: "confluence:child",
+                   to: "Overview",
+                   to_ref: "confluence:parent",
+                   type: "child_of"
+                 }
+               ]
+             })
+
+    assert count("node") == 2
+
+    assert Repo.query!("""
+           SELECT s.key, d.key, e.type
+             FROM edge e
+             JOIN node s ON s.id = e.src
+             JOIN node d ON d.id = e.dst
+           """).rows == [["confluence:child", "confluence:parent", "child_of"]]
+  end
+
   test "naive timestamp is rejected (never stamped as UTC) — quarantined (T10)" do
     assert {:error, {:quarantined, {:bad_timestamp, _}}} =
              Ingest.ingest(event("p1", occurred_at: ~N[2026-01-01 00:00:00]))

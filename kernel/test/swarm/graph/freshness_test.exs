@@ -10,6 +10,12 @@ defmodule Swarm.Graph.FreshnessTest do
     test "maps relations to freshness classes; unknown → configuration" do
       assert Freshness.class("contains") == :structural
       assert Freshness.class("has_address") == :configuration
+      assert Freshness.class("has_private_address") == :configuration
+      assert Freshness.class("has_public_address") == :configuration
+      assert Freshness.class("has_outbound_ip_address") == :configuration
+      assert Freshness.class("contained_by") == :structural
+      assert Freshness.class("routes_for") == :structural
+      assert Freshness.class("terminates_for") == :structural
       assert Freshness.class("is_a") == :identity
       assert Freshness.class("managed_by") == :configuration
       assert Freshness.class("totally_unknown_rel") == :configuration

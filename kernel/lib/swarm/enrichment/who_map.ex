@@ -260,61 +260,93 @@ defmodule Swarm.Enrichment.WhoMap do
   def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
+    qvec = query_vec(opts)
 
     qnorm =
       query |> String.downcase() |> String.replace(~r/[^\p{L}\p{N}]+/u, " ") |> String.trim()
 
-    if terms == [] do
-      []
-    else
-      %{rows: rows} =
-        Repo.query!(
-          """
-          WITH servable AS (
-            SELECT n.id, n.key,
-                   -- 3 tiers so the RIGHT node wins: an EXACT key-tail match (the node literally
-                   -- NAMED t — who:family:qa for "qa") DOMINATES (100), so naming a category/team
-                   -- beats a look-alike raw title matching several terms by substring (2 each) or a
-                   -- member's profile-content mention (1). So "who are the QA engineers" → the qa
-                   -- FAMILY (53), not the raw title "qa engineer 1" (1); "contractors" → the status.
-                   (SELECT coalesce(sum(
-                             CASE WHEN replace(split_part(lower(n.key), ':', 3), ' ', '') = t
-                                       -- inflection prefix (developers→developer) only for tails ≥ 4
-                                       -- chars, so a 3-char code (site "bor") can't grab "boremchuk"
-                                       OR (length(replace(split_part(lower(n.key), ':', 3), ' ', '')) >= 4
-                                           AND t LIKE replace(split_part(lower(n.key), ':', 3), ' ', '') || '%') THEN 100
-                                  WHEN replace(lower(n.key), ' ', '') LIKE '%' || t || '%' THEN 2
-                                  WHEN n.key LIKE 'who:person:%' AND EXISTS (
-                                         SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
-                                  ELSE 0 END), 0)
-                      FROM unnest($3::text[]) t)
-                   -- group phrase tier: the query CONTAINS a group name/alias PHRASE (≥ 2 words) →
-                   -- strong. Each alias is normalized the SAME way as $4 (qnorm: punctuation → space)
-                   -- so hyphenated aliases match, and matched on WORD boundaries (space-wrapped) so an
-                   -- alias like "aw ops" can't fire inside "jigsaw opsroom".
-                   + CASE WHEN n.key LIKE 'who:group:%' AND EXISTS (
-                            SELECT 1
-                              FROM content c,
-                                   unnest(string_to_array(replace(lower(c.body), 'group: ', ''), ' · ')) raw,
-                                   LATERAL (SELECT btrim(regexp_replace(raw, '[^a-z0-9]+', ' ', 'g')) AS phrase) np
-                             WHERE c.node_id = n.id AND length(np.phrase) > 3
-                               AND position(' ' in np.phrase) > 0
-                               AND position(' ' || np.phrase || ' ' in ' ' || $4 || ' ') > 0) THEN 300 ELSE 0 END
-                   AS overlap
-              FROM node n
-             WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
-          )
-          SELECT s.key, s.overlap FROM servable s
-           WHERE s.overlap > 0
-             AND EXISTS (SELECT 1 FROM edge e WHERE (e.src = s.id OR e.dst = s.id) AND e.type <> 'is_a' AND e.reward >= 0 AND e.visibility_scope = ANY($1))
-           ORDER BY s.overlap DESC, s.key
-           LIMIT $2
-          """,
-          [scopes, limit, terms, qnorm]
-        )
+    lexical =
+      if terms == [] do
+        []
+      else
+        lexical_candidates(terms, qnorm, scopes, limit)
+      end
 
-      Enum.map(rows, fn [key, _o] -> key end)
-    end
+    vector = if qvec, do: vector_candidates(qvec, scopes, limit), else: []
+    Enum.uniq(lexical ++ vector) |> Enum.take(limit)
+  end
+
+  defp lexical_candidates(terms, qnorm, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH servable AS (
+          SELECT n.id, n.key,
+                 -- 3 tiers so the RIGHT node wins: an EXACT key-tail match (the node literally
+                 -- NAMED t — who:family:qa for "qa") DOMINATES (100), so naming a category/team
+                 -- beats a look-alike raw title matching several terms by substring (2 each) or a
+                 -- member's profile-content mention (1). So "who are the QA engineers" → the qa
+                 -- FAMILY (53), not the raw title "qa engineer 1" (1); "contractors" → the status.
+                 (SELECT coalesce(sum(
+                           CASE WHEN replace(split_part(lower(n.key), ':', 3), ' ', '') = t
+                                     -- inflection prefix (developers→developer) only for tails ≥ 4
+                                     -- chars, so a 3-char code (site "bor") can't grab "boremchuk"
+                                     OR (length(replace(split_part(lower(n.key), ':', 3), ' ', '')) >= 4
+                                         AND t LIKE replace(split_part(lower(n.key), ':', 3), ' ', '') || '%') THEN 100
+                                WHEN replace(lower(n.key), ' ', '') LIKE '%' || t || '%' THEN 2
+                                WHEN n.key LIKE 'who:person:%' AND EXISTS (
+                                       SELECT 1 FROM content c WHERE c.node_id = n.id AND lower(c.body) LIKE '%' || t || '%') THEN 1
+                                ELSE 0 END), 0)
+                    FROM unnest($3::text[]) t)
+                 -- group phrase tier: the query CONTAINS a group name/alias PHRASE (≥ 2 words) →
+                 -- strong. Each alias is normalized the SAME way as $4 (qnorm: punctuation → space)
+                 -- so hyphenated aliases match, and matched on WORD boundaries (space-wrapped) so an
+                 -- alias like "aw ops" can't fire inside "jigsaw opsroom".
+                 + CASE WHEN n.key LIKE 'who:group:%' AND EXISTS (
+                          SELECT 1
+                            FROM content c,
+                                 unnest(string_to_array(replace(lower(c.body), 'group: ', ''), ' · ')) raw,
+                                 LATERAL (SELECT btrim(regexp_replace(raw, '[^a-z0-9]+', ' ', 'g')) AS phrase) np
+                           WHERE c.node_id = n.id AND length(np.phrase) > 3
+                             AND position(' ' in np.phrase) > 0
+                             AND position(' ' || np.phrase || ' ' in ' ' || $4 || ' ') > 0) THEN 300 ELSE 0 END
+                 AS overlap
+            FROM node n
+           WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
+        )
+        SELECT s.key, s.overlap FROM servable s
+         WHERE s.overlap > 0
+           AND EXISTS (SELECT 1 FROM edge e WHERE (e.src = s.id OR e.dst = s.id) AND e.type <> 'is_a' AND e.reward >= 0 AND e.visibility_scope = ANY($1))
+         ORDER BY s.overlap DESC, s.key
+         LIMIT $2
+        """,
+        [scopes, limit, terms, qnorm]
+      )
+
+    Enum.map(rows, fn [key, _o] -> key end)
+  end
+
+  defp vector_candidates(qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT n.key
+          FROM node n
+         WHERE n.key LIKE 'who:%' AND n.scope = ANY($1)
+           AND n.vec IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE (e.src = n.id OR e.dst = n.id)
+                AND e.type <> 'is_a' AND e.reward >= 0
+                AND e.visibility_scope = ANY($1)
+           )
+         ORDER BY n.vec <=> $3
+         LIMIT $2
+        """,
+        [scopes, limit, qvec]
+      )
+
+    Enum.map(rows, fn [key] -> key end)
   end
 
   @spec query_terms(String.t()) :: [String.t()]
@@ -337,6 +369,13 @@ defmodule Swarm.Enrichment.WhoMap do
     |> Enum.uniq()
   end
 
+  defp query_vec(opts) do
+    case Keyword.get(opts, :query_vec) do
+      [_ | _] = vec -> Pgvector.new(vec)
+      _ -> nil
+    end
+  end
+
   @doc """
   The who neighborhood of a subject `key` (a `who:<kind>:<canonical>` node): the org-directory facts
   directly incident to it, in BOTH directions — "who manages X" is X's OUTGOING `managed_by`; "who's
@@ -352,6 +391,8 @@ defmodule Swarm.Enrichment.WhoMap do
   def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
     min_corr = Keyword.get(opts, :min_corroboration, 1)
     freshness? = Keyword.get(opts, :freshness, true)
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
 
     # Both directions in one pass: `dir` marks whether `key` was the src (outgoing) or dst
     # (incoming); `other` is always the OTHER endpoint (the answer). `cn` is the other endpoint's
@@ -359,12 +400,19 @@ defmodule Swarm.Enrichment.WhoMap do
     %{rows: rows} =
       Repo.query!(
         """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
         SELECT e.type, other.key, e.seen_count, e.reliability::float8,
-               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec,
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec,
                substring(c.body from 'name: ([^\n]*)') AS cn,
                (e.src = self0.id) AS outgoing
           FROM node self0
           JOIN edge e ON (e.src = self0.id OR e.dst = self0.id)
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node other ON other.id = CASE WHEN e.src = self0.id THEN e.dst ELSE e.src END
           LEFT JOIN content c ON c.node_id = other.id
          WHERE self0.key = $1 AND e.type <> 'is_a' AND e.reward >= 0

@@ -73,6 +73,49 @@ defmodule Swarm.CoreConversationContextTest do
     assert Enum.any?(prompts, &(&1 =~ "what is Foo?" and &1 =~ "Foo is a service."))
   end
 
+  test "a supported answer openly corrects a prior assistant recommendation reversal" do
+    alice = provision("alice")
+    {:ok, c} = Conversations.create(alice.id, %{title: "t"})
+
+    {:ok, _} =
+      Conversations.add_message(alice.id, c.id, %{
+        role: "assistant",
+        body: "Use Beta Runner for general workloads and avoid Alpha Runner."
+      })
+
+    generator = fn _model, _prompt, opts ->
+      if Keyword.get(opts, :json),
+        do:
+          {:ok,
+           ~s({"answer": "Alpha Runner is recommended for general workloads.", "confidence": 0.8, "supported": true})},
+        else: {:ok, "panel take"}
+    end
+
+    opts =
+      [
+        scopes: ["public"],
+        prototypes: [%{intent: :recall, tier: :tier_tools, text: "T"}],
+        embedder: fn
+          "T" -> {:ok, [1.0, 0.0, 0.0]}
+          _ -> {:ok, [0.0, 0.0, 1.0]}
+        end,
+        bands: %Swarm.Gate.Bands{handle: 0.5},
+        fleet: %{panel: ["m1"], judge: "j"},
+        generator: generator,
+        retriever: fn _q, _s, _o -> {:ok, []} end,
+        viewer: alice.id,
+        conversation_id: c.id,
+        verified: true
+      ]
+
+    a = Swarm.Core.ask("but you said to avoid Alpha Runner?", opts)
+
+    assert a.tier == "escalate"
+    assert a.answer =~ "Correction:"
+    assert a.answer =~ "earlier answer was wrong"
+    assert a.answer =~ "Alpha Runner is recommended"
+  end
+
   test "no conversation_id ⇒ no history block (unchanged behavior)" do
     alice = provision("alice")
     {:ok, c} = Conversations.create(alice.id, %{title: "t"})

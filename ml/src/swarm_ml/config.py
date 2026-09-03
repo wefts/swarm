@@ -21,11 +21,10 @@ _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 # RESIDENT so an interactive ask never pays the 20-40s cold-load tax (the models fit in the
 # 128GB unified memory). "-1" = pin indefinitely (Ollama semantics). Overridable per deploy.
 _DEFAULT_OLLAMA_KEEP_ALIVE = "-1"
-# Output cap: bound a runaway generation, but generously — the fleet has THINKING models
-# (e.g. qwen3:14b) that reason for hundreds-to-thousands of tokens BEFORE the answer; a tight cap
-# (e.g. 512) truncates them mid-thought (`done_reason:length`, empty `response`) and breaks
-# extraction/judging. 4096 leaves room for thinking + a full answer while still capping true
-# runaways. 0 disables the cap (Ollama default). Tunable per deploy (OLLAMA_NUM_PREDICT).
+# Output cap: bound a runaway generation generously. The server disables model thinking for
+# intermediate processor calls, but the cap still protects extraction/judging from verbose or
+# malformed completions. 0 disables the cap (Ollama default). Tunable per deploy
+# (OLLAMA_NUM_PREDICT).
 _DEFAULT_OLLAMA_NUM_PREDICT = 4096
 # Context window for generation. A resident model allocates a KV cache sized to num_ctx, so a
 # model's huge DEFAULT context (e.g. gemma4:31b at 262144) wastes tens of GB when the escalation

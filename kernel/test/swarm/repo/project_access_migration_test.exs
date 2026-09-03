@@ -10,7 +10,7 @@ defmodule Swarm.Repo.ProjectAccessMigrationTest do
   """
   use Swarm.GraphCase, async: false
 
-  alias Swarm.Graph.Store
+  alias Swarm.Graph.{Contract, Store}
   alias Swarm.{Projects, Repo}
   alias Swarm.Repo.Migrations.ProjectAccess
 
@@ -28,10 +28,12 @@ defmodule Swarm.Repo.ProjectAccessMigrationTest do
       # first so the census cannot abort and pin the SHARED test DB at v10 (DDL survives TRUNCATE).
       try do
         ProjectAccess.apply_up!(Repo)
+        stamp_current_schema_version!()
       rescue
         _ ->
           Repo.query!("TRUNCATE app_user, access_group RESTART IDENTITY CASCADE")
           ProjectAccess.apply_up!(Repo)
+          stamp_current_schema_version!()
       end
 
       Swarm.IdentityCase.truncate_identity()
@@ -41,6 +43,12 @@ defmodule Swarm.Repo.ProjectAccessMigrationTest do
   end
 
   # ── the old shape (ADR-18 grants + ADR-19 groups), raw SQL only ─────────────
+
+  defp stamp_current_schema_version! do
+    Repo.query!("UPDATE graph_schema_meta SET version = $1 WHERE id = 1", [
+      Contract.schema_version()
+    ])
+  end
 
   defp seed_old_shape! do
     :ok = ProjectAccess.apply_down!(Repo)

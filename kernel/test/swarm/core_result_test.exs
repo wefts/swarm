@@ -9,6 +9,8 @@ defmodule Swarm.CoreResultTest do
 
   alias Swarm.Core
   alias Swarm.Gate.Bands
+  alias Swarm.Graph.Store
+  alias Swarm.Ingest.Content
 
   # Force tier_tools (the gate is injected) + an optional retriever override.
   defp tools_opts(extra \\ []) do
@@ -45,6 +47,133 @@ defmodule Swarm.CoreResultTest do
 
     assert a.status == :found
     assert a.citations != []
+  end
+
+  test "content citations include configured source URL when source_ref is linkable" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "https://docs.example.test/pages/{id}"
+    })
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Example.test AI Solution",
+           score: 0.9,
+           source_ref: "confluence:12345"
+         }
+       ]}
+    end
+
+    a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+    assert [%{source: "article", ref: "Example.test AI Solution", url: url}] = a.citations
+    assert url == "https://docs.example.test/pages/12345"
+  end
+
+  test "content citations stay plaintext when no template exists" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.delete_env(:swarm, :citation_url_templates)
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Example.test AI Solution",
+           score: 0.9,
+           source_ref: "confluence:12345"
+         }
+       ]}
+    end
+
+    a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+    assert [%{source: "article", ref: "Example.test AI Solution"} = citation] = a.citations
+    refute Map.has_key?(citation, :url)
+  end
+
+  test "content citations stay plaintext when source ref or template is malformed" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "not-a-url/{id}",
+      "mediawiki" => "javascript:{id}",
+      "valid" => "https://docs.example.test/pages/{id}"
+    })
+
+    for source_ref <- ["confluence:12345", "mediawiki:12345", "valid:"] do
+      retr = fn _q, _s, _o ->
+        {:ok,
+         [
+           %{
+             id: 1,
+             type: "article",
+             key: "Example.test AI Solution",
+             score: 0.9,
+             source_ref: source_ref
+           }
+         ]}
+      end
+
+      a = Core.ask("where is this written?", tools_opts(retriever: retr))
+
+      assert [%{source: "article", ref: "Example.test AI Solution"} = citation] = a.citations
+      refute Map.has_key?(citation, :url)
+    end
+  end
+
+  test "source-link follow-up uses visible active citation keys" do
+    original = Application.get_env(:swarm, :citation_url_templates)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:swarm, :citation_url_templates),
+        else: Application.put_env(:swarm, :citation_url_templates, original)
+    end)
+
+    Application.put_env(:swarm, :citation_url_templates, %{
+      "confluence" => "https://docs.example.test/pages/{id}"
+    })
+
+    id = Store.upsert_node("article", "Example.test AI Solution", scope: "public")
+    :ok = Content.put_body(id, "AI Solution source body.", source_ref: "confluence:12345")
+
+    a =
+      Core.ask(
+        "Could you share the wiki page link?",
+        tools_opts(active_keys: ["Example.test AI Solution"])
+      )
+
+    assert a.status == :found
+    assert a.tier == "tier_tools"
+    assert a.answer == "https://docs.example.test/pages/12345"
+    assert [%{source: "article", ref: "Example.test AI Solution", url: url}] = a.citations
+    assert url == "https://docs.example.test/pages/12345"
   end
 
   test "a transport failure → :error, DISTINCT from not_found, no raw leak, not silent" do
@@ -196,6 +325,76 @@ defmodule Swarm.CoreResultTest do
     assert prompt =~ "Public IP"
   end
 
+  test "escalation grounding orders admitted hits by relevance before applying the budget" do
+    test_pid = self()
+    filler = String.duplicate("broad context that mentions nebula but not the address\n", 220)
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "article",
+           key: "Nebula overview",
+           score: 0.5,
+           relevance: 0.5,
+           spans: [%{ordinal: 1, text: filler}]
+         },
+         %{
+           id: 2,
+           type: "article",
+           key: "Public IP",
+           score: 0.9,
+           relevance: 0.9,
+           spans: [%{ordinal: 1, text: "Nebula public IP is 203.0.113.7."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"203.0.113.7","confidence":0.8,"supported":true})},
+        else: {:ok, "203.0.113.7"}
+    end
+
+    a = Core.ask("what is the nebula public ip", escalate_opts(gen, retriever: retr))
+    assert a.tier == "escalate"
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Nebula public IP is 203.0.113.7."
+
+    assert :binary.match(prompt, "## article: Public IP") <
+             :binary.match(prompt, "## article: Nebula overview")
+  end
+
+  test "escalate follow-ups ground active citation keys as scoped passages" do
+    test_pid = self()
+    id = Store.upsert_node("article", "Runner Guidance", scope: "public")
+
+    :ok =
+      Content.put_body(
+        id,
+        "Runner guidance body: Alpha Runner should be avoided; Beta Runner is recommended.",
+        source_ref: "mediawiki:123"
+      )
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"Beta Runner is recommended.","confidence":0.8,"supported":true})},
+        else: {:ok, "panel take"}
+    end
+
+    a = Core.ask("why avoid Alpha?", escalate_opts(gen, active_keys: ["Runner Guidance"]))
+
+    assert a.tier == "escalate"
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Runner guidance body"
+  end
+
   # A title/identity key hit (no spans) still contributes its identity line — never
   # a fabricated passage — so identity/inventory grounding keeps working.
   test "escalate grounding falls back to the identity line for a span-less hit" do
@@ -213,6 +412,204 @@ defmodule Swarm.CoreResultTest do
     Core.ask("show ticket details", escalate_opts(gen, retriever: retr))
     assert_received {:grounding_prompt, prompt}
     assert prompt =~ "ticket: TCK-7"
+  end
+
+  test "escalate restricts grounding to an exact named-title hit before min-hit gating" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "Example.test AI Solution",
+           score: 0.79,
+           relevance: 0.79,
+           spans: [%{ordinal: 1, text: "Example.test AI Solution provides agent services."}]
+         },
+         %{
+           id: 2,
+           type: "page",
+           key: "Example.test Agentic AI",
+           score: 0.59,
+           relevance: 0.59,
+           spans: [%{ordinal: 1, text: "Agentic AI gives adjacent architecture context."}]
+         },
+         %{
+           id: 3,
+           type: "page",
+           key: "Install Example.test Certificate",
+           score: 0.58,
+           relevance: 0.58,
+           spans: [%{ordinal: 1, text: "Certificate authority material."}]
+         },
+         %{
+           id: 4,
+           type: "page",
+           key: "Example.test DevOps",
+           score: 0.0,
+           relevance: 0.0,
+           spans: [%{ordinal: 1, text: "Helpdesk, Docker and Podman installation notes."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do:
+          {:ok,
+           ~s({"answer":"Example.test AI Solution summary","confidence":0.8,"supported":true})},
+        else: {:ok, "Example.test AI Solution summary"}
+    end
+
+    a = Core.ask("розкажи про Example.test AI Solution", escalate_opts(gen, retriever: retr))
+    assert a.status == :found
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "Example.test AI Solution"
+    refute prompt =~ "Agentic AI"
+    refute prompt =~ "Certificate authority"
+    refute prompt =~ "Helpdesk"
+    refute prompt =~ "Docker"
+    refute prompt =~ "Podman"
+    assert Enum.map(a.citations, & &1.ref) == ["Example.test AI Solution"]
+  end
+
+  test "escalate gates broad query-term claim facts when passage grounding is present" do
+    s = add_node!(%{type: "entity", key: "ee.helpdesk@example.test", scope: "public"})
+    o = add_node!(%{type: "entity", key: "ee helpdesk", scope: "public"})
+    {:ok, _} = Graph.add_edge(s, o, "part_of", "p1", evidence_kind: "claim", scope: "public")
+
+    s2 = add_node!(%{type: "entity", key: "Experts at Smile", scope: "public"})
+    o2 = add_node!(%{type: "entity", key: "training paths", scope: "public"})
+
+    {:ok, _} =
+      Graph.add_edge(s2, o2, "created_by", "p1", evidence_kind: "claim", scope: "public")
+
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "AI Solution at Smile",
+           score: 0.79,
+           relevance: 0.79,
+           spans: [%{ordinal: 1, text: "AI Solution at Smile provides agent services."}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"AI Solution summary","confidence":0.8,"supported":true})},
+        else: {:ok, "AI Solution summary"}
+    end
+
+    a = Core.ask("розкажи про AI Solution at Smile", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    refute prompt =~ "ee.helpdesk"
+    refute prompt =~ "ee helpdesk"
+    refute prompt =~ "Experts at Smile"
+    refute prompt =~ "training paths"
+    refute Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "ee.helpdesk"))
+    refute Enum.any?(a.citations, &(&1.source == "claim" and &1.ref =~ "Experts at Smile"))
+  end
+
+  test "escalate keeps a minimum grounding set when all relevance is weak" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{id: 1, type: "page", key: "A", score: 0.1, relevance: 0.1, spans: [%{text: "A"}]},
+         %{id: 2, type: "page", key: "B", score: 0.02, relevance: 0.02, spans: [%{text: "B"}]},
+         %{id: 3, type: "page", key: "C", score: 0.01, relevance: 0.01, spans: [%{text: "C"}]},
+         %{id: 4, type: "page", key: "D", score: 0.0, relevance: 0.0, spans: [%{text: "D"}]}
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"broad summary","confidence":0.8,"supported":true})},
+        else: {:ok, "broad summary"}
+    end
+
+    Core.ask("broad summary", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "page: A"
+    assert prompt =~ "page: B"
+    assert prompt =~ "page: C"
+    refute prompt =~ "page: D"
+  end
+
+  test "broad example.test ask without exact title still keeps the minimum grounding set" do
+    test_pid = self()
+
+    retr = fn _q, _s, _o ->
+      {:ok,
+       [
+         %{
+           id: 1,
+           type: "page",
+           key: "Example.test Policy",
+           score: 0.1,
+           relevance: 0.1,
+           spans: [%{text: "Example.test policy overview"}]
+         },
+         %{
+           id: 2,
+           type: "page",
+           key: "Example.test Procedure",
+           score: 0.02,
+           relevance: 0.02,
+           spans: [%{text: "Example.test procedure overview"}]
+         },
+         %{
+           id: 3,
+           type: "page",
+           key: "Example.test Reference",
+           score: 0.01,
+           relevance: 0.01,
+           spans: [%{text: "Example.test reference overview"}]
+         },
+         %{
+           id: 4,
+           type: "page",
+           key: "Example.test Incident",
+           score: 0.0,
+           relevance: 0.0,
+           spans: [%{text: "Example.test incident overview"}]
+         }
+       ]}
+    end
+
+    gen = fn _model, prompt, opts ->
+      send(test_pid, {:grounding_prompt, prompt})
+
+      if Keyword.get(opts, :json),
+        do: {:ok, ~s({"answer":"broad example.test summary","confidence":0.8,"supported":true})},
+        else: {:ok, "broad example.test summary"}
+    end
+
+    Core.ask("tell me about Example.test", escalate_opts(gen, retriever: retr))
+
+    assert_received {:grounding_prompt, prompt}
+    assert prompt =~ "page: Example.test Policy"
+    assert prompt =~ "page: Example.test Procedure"
+    assert prompt =~ "page: Example.test Reference"
+    refute prompt =~ "page: Example.test Incident"
   end
 
   # C2 (confidence calibration, the lynchpin): a judge that ABSTAINS (supported=false)

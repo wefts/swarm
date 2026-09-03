@@ -132,8 +132,9 @@ class _FakeResp:
         return json.dumps(self._payload).encode("utf-8")
 
 
-def test_generate_body_pins_residency_and_caps_output(monkeypatch) -> None:
-    # ADR-17 #1: the generate body must carry keep_alive (residency) + options.num_predict
+def test_generate_body_pins_residency_disables_thinking_and_caps_output(monkeypatch) -> None:
+    # ADR-17 #1: the generate body must carry keep_alive (residency), think=false
+    # (intermediate processors are not chat surfaces), and options.num_predict
     # (output cap) so an interactive ask never cold-loads and never runs away.
     captured: dict = {}
 
@@ -149,6 +150,7 @@ def test_generate_body_pins_residency_and_caps_output(monkeypatch) -> None:
     # "-1" must reach Ollama as the NUMBER -1, not the string "-1" (a string "-1" is not a
     # valid Go duration → HTTP 400). A real duration string passes through unchanged.
     assert captured["body"]["keep_alive"] == -1
+    assert captured["body"]["think"] is False
     # num_ctx sizes the KV cache to the real need (resident-memory saving)
     assert captured["body"]["options"] == {"num_predict": 256, "num_ctx": 32768}
 
@@ -165,6 +167,7 @@ def test_generate_no_options_when_num_predict_zero(monkeypatch) -> None:
         "http://x", "m", "p", "", False, keep_alive="5m", num_predict=0
     )
     assert captured["body"]["keep_alive"] == "5m"  # a real duration passes through as a string
+    assert captured["body"]["think"] is False
     assert "options" not in captured["body"]
 
 

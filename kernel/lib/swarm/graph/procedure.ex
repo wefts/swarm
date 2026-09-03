@@ -60,33 +60,64 @@ defmodule Swarm.Graph.Procedure do
     type = Keyword.get(opts, :type, "entity")
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
+    qvec = query_vec(opts)
 
-    if terms == [] do
-      []
-    else
-      likes = Enum.map(terms, &("%" <> &1 <> "%"))
+    lexical =
+      if terms == [] do
+        []
+      else
+        lexical_candidates(type, terms, scopes, limit)
+      end
 
-      %{rows: rows} =
-        Repo.query!(
-          """
-          SELECT ent.key,
-                 (SELECT count(*) FROM unnest($4::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
-            FROM node ent
-           WHERE ent.type = $1 AND ent.scope = ANY($2)
-             AND lower(ent.key) LIKE ANY($4::text[])
-             AND EXISTS (
-               SELECT 1 FROM edge e
-                WHERE e.src = ent.id AND e.type = 'has_step' AND e.reward >= 0
-                  AND e.visibility_scope = ANY($2) AND e.step_ordinal IS NOT NULL
-             )
-           ORDER BY overlap DESC, ent.key
-           LIMIT $3
-          """,
-          [type, scopes, limit, likes]
-        )
+    vector = if qvec, do: vector_candidates(type, qvec, scopes, limit), else: []
+    Enum.uniq(lexical ++ vector) |> Enum.take(limit)
+  end
 
-      Enum.map(rows, fn [key, _overlap] -> key end)
-    end
+  defp lexical_candidates(type, terms, scopes, limit) do
+    likes = Enum.map(terms, &("%" <> &1 <> "%"))
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key,
+               (SELECT count(*) FROM unnest($4::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
+          FROM node ent
+         WHERE ent.type = $1 AND ent.scope = ANY($2)
+           AND lower(ent.key) LIKE ANY($4::text[])
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = 'has_step' AND e.reward >= 0
+                AND e.visibility_scope = ANY($2) AND e.step_ordinal IS NOT NULL
+           )
+         ORDER BY overlap DESC, ent.key
+         LIMIT $3
+        """,
+        [type, scopes, limit, likes]
+      )
+
+    Enum.map(rows, fn [key, _overlap] -> key end)
+  end
+
+  defp vector_candidates(type, qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key
+          FROM node ent
+         WHERE ent.type = $1 AND ent.scope = ANY($2)
+           AND ent.vec IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = 'has_step' AND e.reward >= 0
+                AND e.visibility_scope = ANY($2) AND e.step_ordinal IS NOT NULL
+           )
+         ORDER BY ent.vec <=> $4
+         LIMIT $3
+        """,
+        [type, scopes, limit, qvec]
+      )
+
+    Enum.map(rows, fn [key] -> key end)
   end
 
   # Significant query terms (lowercased, ≥3 chars, stopwords dropped) for key matching.
@@ -100,6 +131,13 @@ defmodule Swarm.Graph.Procedure do
     |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
     |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
     |> Enum.uniq()
+  end
+
+  defp query_vec(opts) do
+    case Keyword.get(opts, :query_vec) do
+      [_ | _] = vec -> Pgvector.new(vec)
+      _ -> nil
+    end
   end
 
   @doc """

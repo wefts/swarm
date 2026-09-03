@@ -58,7 +58,11 @@ defmodule Swarm.WorldMap.Gate.WhoCalibration do
       id: "serve-person-profile",
       query: "who is Jane Doe",
       subject: "Jane Doe",
-      facts: [{"has_title", "Senior Engineer"}, {"works_in", "Platform"}, {"managed_by", "Carol Lead"}],
+      facts: [
+        {"has_title", "Senior Engineer"},
+        {"works_in", "Platform"},
+        {"managed_by", "Carol Lead"}
+      ],
       serve: true
     },
     # SHOULD VETO — wrong relation / wrong person / a fact the grounding LACKS

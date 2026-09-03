@@ -94,16 +94,44 @@ defmodule Swarm.Graph.Network do
     end)
   end
 
+  @candidate_relations ~w(contains hosted_on routes_via egresses_via connects_site terminates_at protected_by alias_of carries has_address has_private_address has_public_address has_outbound_ip_address contained_by routes_for terminates_for)
+
+  @cardinality %{
+    "contains" => :many,
+    "hosted_on" => :single,
+    "routes_via" => :many,
+    "egresses_via" => :many,
+    "connects_site" => :many,
+    "terminates_at" => :many,
+    "protected_by" => :many,
+    "alias_of" => :many,
+    "carries" => :many,
+    "has_address" => :many,
+    "has_private_address" => :many,
+    "has_public_address" => :many,
+    "has_outbound_ip_address" => :many,
+    "contained_by" => :many,
+    "routes_for" => :many,
+    "terminates_for" => :many
+  }
+
+  @doc "Declared cardinality for network relations; unknown relations are many-valued."
+  @spec cardinality(String.t()) :: :single | :many
+  def cardinality(relation), do: Map.get(@cardinality, relation, :many)
+
   @stopwords ~w(the a an of to and or for with about how what which why who when where is are was
                 were do does did can could should would from your you my our this that these those
                 into out get set new list show tell me connected connect behind carried carry
-                carries contains contain hosted host route routes via terminates)
+                carries contains contain hosted host route routes via terminates public private
+                internal external address addresses ip ips)
 
   @doc """
-  Network-entity CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
-  in-scope `net:<kind>:<name>` entities whose name shares a significant term with the query AND
-  that carry ≥1 non-`is_a`, non-refuted relation edge. Ranked by term-overlap, bounded. The gate
-  probes these directly (like `Procedure.candidates/3`). `opts`: `:limit` (default 8).
+  Network-bearing CANDIDATE keys for a free-text query (for the tier-gate's `:network` path):
+  in-scope entities whose name shares a significant term with the query AND that carry ≥1 governed
+  network relation edge. Most are namespaced `net:<kind>:<name>` nodes, but document-extracted
+  service/runner entities can also own direct address facts (`has_outbound_ip_address`). Ranked by
+  term-overlap, bounded. The gate probes these directly (like `Procedure.candidates/3`). `opts`:
+  `:limit` (default 8).
   """
   @spec candidates(String.t(), [String.t()], keyword()) :: [String.t()]
   def candidates(query, scopes, opts \\ [])
@@ -112,35 +140,126 @@ defmodule Swarm.Graph.Network do
   def candidates(query, scopes, opts) when is_binary(query) and is_list(scopes) do
     limit = Keyword.get(opts, :limit, 8)
     terms = query_terms(query)
+    qvec = query_vec(opts)
 
-    if terms == [] do
+    lexical =
+      if terms == [] do
+        []
+      else
+        lexical_candidates(terms, scopes, limit)
+      end
+
+    exact = exact_literal_candidates(query, scopes, limit)
+    vector = if qvec, do: vector_candidates(qvec, scopes, limit), else: []
+    Enum.uniq(exact ++ lexical ++ vector) |> Enum.take(limit)
+  end
+
+  defp exact_literal_candidates(query, scopes, limit) do
+    literals =
+      query
+      |> network_literals()
+      |> Enum.flat_map(fn literal ->
+        ["net:address:#{literal}", "net:subnet:#{literal}", "net:gateway:#{literal}"]
+      end)
+      |> Enum.uniq()
+
+    if literals == [] do
       []
     else
-      # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
-      # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
-      likes = Enum.map(terms, &("%" <> &1 <> "%"))
-
       %{rows: rows} =
         Repo.query!(
           """
-          SELECT ent.key,
-                 (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap
-            FROM node ent
-           WHERE ent.type = 'entity' AND ent.scope = ANY($1) AND ent.key LIKE 'net:%'
-             AND lower(ent.key) LIKE ANY($3::text[])
-             AND EXISTS (
-               SELECT 1 FROM edge e
-                WHERE e.src = ent.id AND e.type <> 'is_a' AND e.reward >= 0
-                  AND e.visibility_scope = ANY($1)
-             )
-           ORDER BY overlap DESC, ent.key
-           LIMIT $2
+          SELECT n.key
+            FROM node n
+           WHERE n.type = 'entity'
+             AND n.scope = ANY($1)
+             AND n.key = ANY($2)
+           ORDER BY CASE
+                      WHEN n.key LIKE 'net:gateway:%' THEN 0
+                      WHEN n.key LIKE 'net:address:%' THEN 1
+                      ELSE 2
+                    END,
+                    n.key
+           LIMIT $3
           """,
-          [scopes, limit, likes]
+          [scopes, literals, limit]
         )
 
-      Enum.map(rows, fn [key, _o] -> key end)
+      Enum.map(rows, fn [key] -> key end)
     end
+  end
+
+  defp lexical_candidates(terms, scopes, limit) do
+    # match a term anywhere in the key (a mid-FQDN segment like "nebula" in
+    # net:host:apt.nebula.intranet has no preceding colon), so the best-overlap entity wins
+    likes = Enum.map(terms, &("%" <> &1 <> "%"))
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key,
+               (SELECT count(*) FROM unnest($3::text[]) t WHERE lower(ent.key) LIKE t) AS overlap,
+               CASE WHEN ent.key LIKE 'net:%' THEN 1 ELSE 0 END AS is_net
+          FROM node ent
+         WHERE ent.type = 'entity' AND ent.scope = ANY($1)
+           AND lower(ent.key) LIKE ANY($3::text[])
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = ANY($4) AND e.reward >= 0
+                AND e.visibility_scope = ANY($1)
+           )
+         ORDER BY overlap DESC, is_net ASC, ent.key
+         LIMIT $2
+        """,
+        [scopes, limit, likes, @candidate_relations]
+      )
+
+    Enum.map(rows, fn [key, _overlap, _is_net] -> key end)
+  end
+
+  defp vector_candidates(qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT ent.key
+          FROM node ent
+         WHERE ent.type = 'entity' AND ent.scope = ANY($1)
+           AND ent.vec IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM edge e
+              WHERE e.src = ent.id AND e.type = ANY($3) AND e.reward >= 0
+                AND e.visibility_scope = ANY($1)
+           )
+         ORDER BY ent.vec <=> $4
+         LIMIT $2
+        """,
+        [scopes, limit, @candidate_relations, qvec]
+      )
+
+    direct = Enum.map(rows, fn [key] -> key end)
+
+    seed_terms =
+      qvec
+      |> vector_seed_keys(scopes, min(limit, 6))
+      |> Enum.flat_map(&query_terms/1)
+
+    Enum.uniq(lexical_candidates(seed_terms, scopes, limit) ++ direct)
+  end
+
+  defp vector_seed_keys(qvec, scopes, limit) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT n.key
+          FROM node n
+         WHERE n.scope = ANY($1) AND n.vec IS NOT NULL
+         ORDER BY n.vec <=> $3
+         LIMIT $2
+        """,
+        [scopes, limit, qvec]
+      )
+
+    Enum.map(rows, fn [key] -> key end)
   end
 
   @doc """
@@ -149,8 +268,9 @@ defmodule Swarm.Graph.Network do
   `:min_corroboration` (default 1) — the tier-gate passes 2 to serve ONLY multi-source-confirmed
   topology; `:freshness` (default true) — S2: drop facts too STALE to serve (decay below the
   serve floor, per freshness class) and rank by `effective_reliability` (base × decay). Age is
-  measured against the graph's freshness FRONTIER (newest `last_seen`) so a stalled ingest can't
-  decay-then-escalate the whole graph. Returns `[%{relation, object, object_kind, corroboration,
+  measured against the relation's freshness-class FRONTIER (newest `last_seen` in that class) so a
+  stalled ingest can't decay-then-escalate the whole graph, and fresh structural derivations don't
+  stale-out older configuration facts. Returns `[%{relation, object, object_kind, corroboration,
   effective_reliability}]`, freshest-first.
   """
   @spec neighborhood(String.t(), [String.t()], keyword()) :: [map()]
@@ -161,39 +281,549 @@ defmodule Swarm.Graph.Network do
   def neighborhood(key, scopes, opts) when is_binary(key) and is_list(scopes) do
     min_corr = Keyword.get(opts, :min_corroboration, 1)
     freshness? = Keyword.get(opts, :freshness, true)
+    relation_filter = Keyword.get(opts, :relations)
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+    address_children = ~w(has_private_address has_public_address)
 
     %{rows: rows} =
       Repo.query!(
         """
-        SELECT e.type, d.key, e.seen_count, e.reliability::float8,
-               extract(epoch FROM ((SELECT max(last_seen) FROM edge) - e.last_seen))::float8 AS age_sec
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
+        SELECT e.type, d.key, d.net_address_class, e.seen_count, e.reliability::float8,
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
           FROM edge e
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node s ON s.id = e.src
           JOIN node d ON d.id = e.dst
          WHERE s.key = $1 AND e.type <> 'is_a' AND e.reward >= 0
            AND e.visibility_scope = ANY($2) AND d.scope = ANY($2) AND s.scope = ANY($2)
            AND e.seen_count >= $3
+           AND ($4::text[] IS NULL OR e.type = ANY($4))
+           AND ($4::text[] IS NOT NULL OR e.type <> ALL($5))
         """,
-        [key, scopes, min_corr]
+        [key, scopes, min_corr, relation_filter, address_children]
       )
 
-    rows
-    |> Enum.map(fn [type, dkey, seen, rel, age] ->
-      age = age || 0.0
-      %{
-        relation: type,
-        object: strip_ns(dkey),
-        object_kind: decode_key(dkey).kind,
-        corroboration: seen,
-        effective_reliability: Freshness.effective_reliability(rel || 0.0, age, type),
-        fresh?: Freshness.fresh?(age, type)
-      }
-    end)
+    facts =
+      rows
+      |> Enum.map(&fact_from_row/1)
+      |> Kernel.++(route_facts(key, scopes, min_corr, relation_filter))
+      |> Kernel.++(containment_facts(key, scopes, min_corr, relation_filter))
+      |> Kernel.++(reverse_gateway_facts(key, scopes, min_corr, relation_filter))
+      |> Kernel.++(reverse_gateway_route_facts(key, scopes, min_corr, relation_filter))
+      |> Kernel.++(reverse_termination_facts(key, scopes, min_corr, relation_filter))
+
+    facts
     # S2 serve gate: drop too-stale facts (fail-closed — below-cutoff escalates, not served).
     |> then(fn facts -> if freshness?, do: Enum.filter(facts, & &1.fresh?), else: facts end)
     # rank freshest/most-reliable first, then corroboration
     |> Enum.sort_by(&{&1.effective_reliability, &1.corroboration}, :desc)
     |> Enum.map(&Map.delete(&1, :fresh?))
+  end
+
+  defp route_facts("net:host:" <> _ = key, scopes, min_corr, relation_filter) do
+    if routes_via_filtered_out?(relation_filter) or min_corr > 1 do
+      []
+    else
+      route_facts_for_host(key, scopes)
+    end
+  end
+
+  defp route_facts(_key, _scopes, _min_corr, _relation_filter), do: []
+
+  defp routes_via_filtered_out?(relations) when is_list(relations),
+    do: "routes_via" not in relations
+
+  defp routes_via_filtered_out?(_), do: false
+
+  defp route_facts_for_host(key, scopes) do
+    addr_class = Freshness.sql_class_case("hae.type")
+    direct_range_class = Freshness.sql_class_case("gre.type")
+    tunnel_range_class = Freshness.sql_class_case("tre.type")
+    terminate_class = Freshness.sql_class_case("te.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        ),
+        host_addresses AS (
+          SELECT hae.id AS edge_id, hae.type, hae.reliability::float8 AS reliability,
+                 hae.evidence_kind, hae.last_seen, aff.last_seen AS frontier_seen,
+                 a.net_addr AS addr
+            FROM node h
+            JOIN edge hae ON hae.src = h.id
+            JOIN node a ON a.id = hae.dst
+            JOIN freshness_frontier aff ON aff.freshness_class = #{addr_class}
+           WHERE h.key = $1
+             AND h.scope = ANY($2)
+             AND hae.type IN ('has_address', 'has_private_address', 'has_public_address', 'has_outbound_ip_address')
+             AND hae.reward >= 0
+             AND hae.visibility_scope = ANY($2)
+             AND a.scope = ANY($2)
+             AND a.net_addr IS NOT NULL
+        ),
+        direct_gateway_ranges AS (
+          SELECT gre.id AS edge_id, gre.type, gre.reliability::float8 AS reliability,
+                 gre.evidence_kind, gre.last_seen, rff.last_seen AS frontier_seen,
+                 g.id AS gateway_id, g.key AS gateway_key, g.net_address_class, r.net_range AS range
+            FROM edge gre
+            JOIN node g ON g.id = gre.src
+            JOIN node r ON r.id = gre.dst
+            JOIN freshness_frontier rff ON rff.freshness_class = #{direct_range_class}
+           WHERE gre.type = 'carries'
+             AND gre.reward >= 0
+             AND gre.visibility_scope = ANY($2)
+             AND g.key LIKE 'net:gateway:%'
+             AND g.scope = ANY($2)
+             AND r.key LIKE 'net:subnet:%'
+             AND r.scope = ANY($2)
+             AND r.net_range IS NOT NULL
+        ),
+        tunnel_ranges AS (
+          SELECT tre.id AS edge_id, tre.type, tre.reliability::float8 AS reliability,
+                 tre.evidence_kind, tre.last_seen, rff.last_seen AS frontier_seen,
+                 t.id AS tunnel_id, r.net_range AS range
+            FROM edge tre
+            JOIN node t ON t.id = tre.src
+            JOIN node r ON r.id = tre.dst
+            JOIN freshness_frontier rff ON rff.freshness_class = #{tunnel_range_class}
+           WHERE tre.type = 'carries'
+             AND tre.reward >= 0
+             AND tre.visibility_scope = ANY($2)
+             AND t.key LIKE 'net:tunnel:%'
+             AND t.scope = ANY($2)
+             AND r.key LIKE 'net:subnet:%'
+             AND r.scope = ANY($2)
+             AND r.net_range IS NOT NULL
+        ),
+        tunnel_gateway_ranges AS (
+          SELECT tr.edge_id AS range_edge_id, tr.reliability AS range_reliability,
+                 tr.evidence_kind AS range_evidence_kind, tr.last_seen AS range_last_seen,
+                 tr.frontier_seen AS range_frontier_seen,
+                 te.id AS terminate_edge_id, te.reliability::float8 AS terminate_reliability,
+                 te.evidence_kind AS terminate_evidence_kind, te.last_seen AS terminate_last_seen,
+                 tff.last_seen AS terminate_frontier_seen,
+                 g.id AS gateway_id, g.key AS gateway_key, g.net_address_class, tr.range
+            FROM tunnel_ranges tr
+            JOIN edge te ON te.src = tr.tunnel_id
+            JOIN node g ON g.id = te.dst
+            JOIN freshness_frontier tff ON tff.freshness_class = #{terminate_class}
+           WHERE te.type = 'terminates_at'
+             AND te.reward >= 0
+             AND te.visibility_scope = ANY($2)
+             AND g.key LIKE 'net:gateway:%'
+             AND g.scope = ANY($2)
+        ),
+        gateway_ranges AS (
+          SELECT gateway_id, gateway_key, net_address_class, range,
+                 ARRAY[edge_id]::bigint[] AS edge_ids,
+                 ARRAY[reliability]::float8[] AS reliabilities,
+                 ARRAY[evidence_kind]::text[] AS evidence_kinds,
+                 extract(epoch FROM (frontier_seen - last_seen))::float8 AS age_sec
+            FROM direct_gateway_ranges
+          UNION ALL
+          SELECT gateway_id, gateway_key, net_address_class, range,
+                 ARRAY[range_edge_id, terminate_edge_id]::bigint[] AS edge_ids,
+                 ARRAY[range_reliability, terminate_reliability]::float8[] AS reliabilities,
+                 ARRAY[range_evidence_kind, terminate_evidence_kind]::text[] AS evidence_kinds,
+                 GREATEST(
+                   extract(epoch FROM (range_frontier_seen - range_last_seen)),
+                   extract(epoch FROM (terminate_frontier_seen - terminate_last_seen))
+                 )::float8 AS age_sec
+            FROM tunnel_gateway_ranges
+        ),
+        support AS (
+          SELECT gr.gateway_id, gr.gateway_key, gr.net_address_class,
+                 array_prepend(ha.edge_id, gr.edge_ids)::bigint[] AS edge_ids,
+                 array_prepend(ha.reliability, gr.reliabilities)::float8[] AS reliabilities,
+                 array_prepend(ha.evidence_kind, gr.evidence_kinds)::text[] AS evidence_kinds,
+                 GREATEST(
+                   extract(epoch FROM (ha.frontier_seen - ha.last_seen)),
+                   gr.age_sec
+                 )::float8 AS age_sec
+            FROM host_addresses ha
+            JOIN gateway_ranges gr ON ha.addr <<= gr.range
+        ),
+        support_with_origins AS (
+          SELECT s.gateway_id, s.gateway_key, s.net_address_class, s.reliabilities,
+                 s.evidence_kinds, s.age_sec,
+                 COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS origins
+            FROM support s
+            LEFT JOIN edge_provenance ep ON ep.edge_id = ANY(s.edge_ids)
+           GROUP BY s.gateway_id, s.gateway_key, s.net_address_class, s.reliabilities,
+                    s.evidence_kinds, s.age_sec
+        ),
+        support_summary AS (
+          SELECT s.gateway_id, s.gateway_key, s.net_address_class,
+                 bool_or(EXISTS (SELECT 1 FROM unnest(s.origins) AS origin WHERE origin LIKE 'iac:%')) AS has_iac,
+                 bool_or(EXISTS (SELECT 1 FROM unnest(s.evidence_kinds) AS kind WHERE kind = 'observation')) AS has_observation,
+                 max((SELECT max(r) FROM unnest(s.reliabilities) AS r))::float8 AS max_reliability,
+                 max(s.age_sec)::float8 AS age_sec
+            FROM support_with_origins s
+           GROUP BY s.gateway_id, s.gateway_key, s.net_address_class
+        )
+        SELECT 'routes_via'::text, s.gateway_key, s.net_address_class, 1 AS seen_count,
+               CASE
+                 WHEN s.has_iac OR s.has_observation
+                 THEN 0.82
+                 ELSE LEAST(s.max_reliability, 0.72)
+               END::float8 AS reliability,
+               s.age_sec
+          FROM support_summary s
+         WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM edge existing
+                  WHERE existing.src = (SELECT id FROM node WHERE key = $1 AND scope = ANY($2) LIMIT 1)
+                    AND existing.dst = s.gateway_id
+                    AND existing.type = 'routes_via'
+                    AND existing.reward >= 0
+                    AND existing.visibility_scope = ANY($2)
+               )
+         ORDER BY reliability DESC, s.gateway_key
+         LIMIT 30
+        """,
+        [key, scopes]
+      )
+
+    Enum.map(rows, &fact_from_row/1)
+  end
+
+  defp containment_facts(_key, _scopes, _min_corr, [_ | _]), do: []
+
+  defp containment_facts(key, scopes, min_corr, _relation_filter) do
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH subject AS (
+          SELECT id, key, net_addr, scope
+            FROM node
+           WHERE key = $1 AND scope = ANY($2) AND net_addr IS NOT NULL
+        ),
+        freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
+        SELECT 'contained_by'::text, subnet.key, subnet.net_address_class,
+               max(e.seen_count) AS seen_count, max(e.reliability)::float8 AS reliability,
+               extract(epoch FROM (max(ff.last_seen) - max(e.last_seen)))::float8 AS age_sec
+          FROM subject s
+          JOIN node subnet ON subnet.scope = ANY($2)
+                          AND subnet.key LIKE 'net:subnet:%'
+                          AND subnet.net_range IS NOT NULL
+                          AND s.net_addr <<= subnet.net_range
+          JOIN edge e ON e.dst = subnet.id
+                     AND e.reward >= 0
+                     AND e.visibility_scope = ANY($2)
+                     AND e.seen_count >= $3
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
+         GROUP BY subnet.key, subnet.net_address_class
+        """,
+        [key, scopes, min_corr]
+      )
+
+    Enum.map(rows, &fact_from_row/1)
+  end
+
+  defp reverse_gateway_facts("net:gateway:" <> _ = key, scopes, min_corr, relation_filter) do
+    if routes_for_filtered_out?(relation_filter) do
+      []
+    else
+      reverse_gateway_facts_for_gateway(key, scopes, min_corr)
+    end
+  end
+
+  defp reverse_gateway_facts(_key, _scopes, _min_corr, _relation_filter), do: []
+
+  defp reverse_gateway_route_facts("net:gateway:" <> _ = key, scopes, min_corr, relation_filter) do
+    if routes_for_filtered_out?(relation_filter) or min_corr > 1 do
+      []
+    else
+      reverse_gateway_route_facts_for_gateway(key, scopes)
+    end
+  end
+
+  defp reverse_gateway_route_facts(_key, _scopes, _min_corr, _relation_filter), do: []
+
+  defp routes_for_filtered_out?(relations) when is_list(relations),
+    do: "routes_for" not in relations
+
+  defp routes_for_filtered_out?(_), do: false
+
+  defp reverse_gateway_facts_for_gateway(key, scopes, min_corr) do
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
+        SELECT 'routes_for'::text, s.key, s.net_address_class, e.seen_count, e.reliability::float8,
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
+          FROM edge e
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
+          JOIN node s ON s.id = e.src
+          JOIN node d ON d.id = e.dst
+         WHERE d.key = $1
+           AND e.type = 'routes_via'
+           AND e.reward >= 0
+           AND e.visibility_scope = ANY($2)
+           AND s.scope = ANY($2)
+           AND d.scope = ANY($2)
+           AND e.seen_count >= $3
+         ORDER BY e.reliability DESC, s.key
+         LIMIT 30
+        """,
+        [key, scopes, min_corr]
+      )
+
+    Enum.map(rows, &fact_from_row/1)
+  end
+
+  defp reverse_gateway_route_facts_for_gateway(key, scopes) do
+    addr_class = Freshness.sql_class_case("hae.type")
+    direct_range_class = Freshness.sql_class_case("gre.type")
+    tunnel_range_class = Freshness.sql_class_case("tre.type")
+    terminate_class = Freshness.sql_class_case("te.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH gateway AS (
+          SELECT id
+            FROM node
+           WHERE key = $1 AND scope = ANY($2)
+        ),
+        freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        ),
+        direct_gateway_ranges AS (
+          SELECT gre.id AS edge_id, gre.type, gre.reliability::float8 AS reliability,
+                 gre.evidence_kind, gre.last_seen, rff.last_seen AS frontier_seen,
+                 r.net_range AS range
+            FROM gateway g
+            JOIN edge gre ON gre.src = g.id
+            JOIN node r ON r.id = gre.dst
+            JOIN freshness_frontier rff ON rff.freshness_class = #{direct_range_class}
+           WHERE gre.type = 'carries'
+             AND gre.reward >= 0
+             AND gre.visibility_scope = ANY($2)
+             AND r.key LIKE 'net:subnet:%'
+             AND r.scope = ANY($2)
+             AND r.net_range IS NOT NULL
+        ),
+        tunnel_ranges AS (
+          SELECT tre.id AS edge_id, tre.type, tre.reliability::float8 AS reliability,
+                 tre.evidence_kind, tre.last_seen, rff.last_seen AS frontier_seen,
+                 t.id AS tunnel_id, r.net_range AS range
+            FROM edge tre
+            JOIN node t ON t.id = tre.src
+            JOIN node r ON r.id = tre.dst
+            JOIN freshness_frontier rff ON rff.freshness_class = #{tunnel_range_class}
+           WHERE tre.type = 'carries'
+             AND tre.reward >= 0
+             AND tre.visibility_scope = ANY($2)
+             AND t.key LIKE 'net:tunnel:%'
+             AND t.scope = ANY($2)
+             AND r.key LIKE 'net:subnet:%'
+             AND r.scope = ANY($2)
+             AND r.net_range IS NOT NULL
+        ),
+        tunnel_gateway_ranges AS (
+          SELECT tr.edge_id AS range_edge_id, tr.reliability AS range_reliability,
+                 tr.evidence_kind AS range_evidence_kind, tr.last_seen AS range_last_seen,
+                 tr.frontier_seen AS range_frontier_seen,
+                 te.id AS terminate_edge_id, te.reliability::float8 AS terminate_reliability,
+                 te.evidence_kind AS terminate_evidence_kind, te.last_seen AS terminate_last_seen,
+                 tff.last_seen AS terminate_frontier_seen,
+                 tr.range
+            FROM gateway g
+            JOIN edge te ON te.dst = g.id
+            JOIN tunnel_ranges tr ON tr.tunnel_id = te.src
+            JOIN freshness_frontier tff ON tff.freshness_class = #{terminate_class}
+           WHERE te.type = 'terminates_at'
+             AND te.reward >= 0
+             AND te.visibility_scope = ANY($2)
+        ),
+        gateway_ranges AS (
+          SELECT range,
+                 ARRAY[edge_id]::bigint[] AS edge_ids,
+                 ARRAY[reliability]::float8[] AS reliabilities,
+                 ARRAY[evidence_kind]::text[] AS evidence_kinds,
+                 extract(epoch FROM (frontier_seen - last_seen))::float8 AS age_sec
+            FROM direct_gateway_ranges
+          UNION ALL
+          SELECT range,
+                 ARRAY[range_edge_id, terminate_edge_id]::bigint[] AS edge_ids,
+                 ARRAY[range_reliability, terminate_reliability]::float8[] AS reliabilities,
+                 ARRAY[range_evidence_kind, terminate_evidence_kind]::text[] AS evidence_kinds,
+                 GREATEST(
+                   extract(epoch FROM (range_frontier_seen - range_last_seen)),
+                   extract(epoch FROM (terminate_frontier_seen - terminate_last_seen))
+                 )::float8 AS age_sec
+            FROM tunnel_gateway_ranges
+        ),
+        host_addresses AS (
+          SELECT hae.id AS edge_id, hae.type, hae.reliability::float8 AS reliability,
+                 hae.evidence_kind, hae.last_seen, aff.last_seen AS frontier_seen,
+                 h.id AS host_id, h.key AS host_key, h.net_address_class, a.net_addr AS addr
+            FROM edge hae
+            JOIN node h ON h.id = hae.src
+            JOIN node a ON a.id = hae.dst
+            JOIN freshness_frontier aff ON aff.freshness_class = #{addr_class}
+           WHERE hae.type IN ('has_address', 'has_private_address', 'has_public_address', 'has_outbound_ip_address')
+             AND hae.reward >= 0
+             AND hae.visibility_scope = ANY($2)
+             AND h.key LIKE 'net:host:%'
+             AND h.scope = ANY($2)
+             AND a.scope = ANY($2)
+             AND a.net_addr IS NOT NULL
+        ),
+        support AS (
+          SELECT ha.host_id, ha.host_key, ha.net_address_class,
+                 array_prepend(ha.edge_id, gr.edge_ids)::bigint[] AS edge_ids,
+                 array_prepend(ha.reliability, gr.reliabilities)::float8[] AS reliabilities,
+                 array_prepend(ha.evidence_kind, gr.evidence_kinds)::text[] AS evidence_kinds,
+                 GREATEST(
+                   extract(epoch FROM (ha.frontier_seen - ha.last_seen)),
+                   gr.age_sec
+                 )::float8 AS age_sec
+            FROM gateway_ranges gr
+            JOIN host_addresses ha ON ha.addr <<= gr.range
+        ),
+        support_with_origins AS (
+          SELECT s.host_id, s.host_key, s.net_address_class, s.reliabilities,
+                 s.evidence_kinds, s.age_sec,
+                 COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS origins
+            FROM support s
+            LEFT JOIN edge_provenance ep ON ep.edge_id = ANY(s.edge_ids)
+           GROUP BY s.host_id, s.host_key, s.net_address_class, s.reliabilities,
+                    s.evidence_kinds, s.age_sec
+        ),
+        support_summary AS (
+          SELECT s.host_id, s.host_key, s.net_address_class,
+                 bool_or(EXISTS (SELECT 1 FROM unnest(s.origins) AS origin WHERE origin LIKE 'iac:%')) AS has_iac,
+                 bool_or(EXISTS (SELECT 1 FROM unnest(s.evidence_kinds) AS kind WHERE kind = 'observation')) AS has_observation,
+                 max((SELECT max(r) FROM unnest(s.reliabilities) AS r))::float8 AS max_reliability,
+                 max(s.age_sec)::float8 AS age_sec
+            FROM support_with_origins s
+           GROUP BY s.host_id, s.host_key, s.net_address_class
+        )
+        SELECT 'routes_for'::text, s.host_key, s.net_address_class, 1 AS seen_count,
+               CASE
+                 WHEN s.has_iac OR s.has_observation
+                 THEN 0.82
+                 ELSE LEAST(s.max_reliability, 0.72)
+               END::float8 AS reliability,
+               s.age_sec
+          FROM support_summary s
+         WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM gateway g
+                   JOIN edge existing ON existing.dst = g.id
+                  WHERE existing.src = s.host_id
+                    AND existing.type = 'routes_via'
+                    AND existing.reward >= 0
+                    AND existing.visibility_scope = ANY($2)
+               )
+         ORDER BY reliability DESC, s.host_key
+         LIMIT 30
+        """,
+        [key, scopes]
+      )
+
+    Enum.map(rows, &fact_from_row/1)
+  end
+
+  defp reverse_termination_facts("net:gateway:" <> _ = key, scopes, min_corr, relation_filter) do
+    if terminates_for_filtered_out?(relation_filter) do
+      []
+    else
+      reverse_termination_facts_for_gateway(key, scopes, min_corr)
+    end
+  end
+
+  defp reverse_termination_facts(_key, _scopes, _min_corr, _relation_filter), do: []
+
+  defp terminates_for_filtered_out?(relations) when is_list(relations),
+    do: "terminates_for" not in relations
+
+  defp terminates_for_filtered_out?(_), do: false
+
+  defp reverse_termination_facts_for_gateway(key, scopes, min_corr) do
+    edge_class = Freshness.sql_class_case("e.type")
+    frontier_class = Freshness.sql_class_case("ef.type")
+
+    %{rows: rows} =
+      Repo.query!(
+        """
+        WITH freshness_frontier AS (
+          SELECT #{frontier_class} AS freshness_class,
+                 max(ef.last_seen) AS last_seen
+            FROM edge ef
+           GROUP BY 1
+        )
+        SELECT 'terminates_for'::text, s.key, s.net_address_class, e.seen_count,
+               e.reliability::float8,
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
+          FROM edge e
+          JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
+          JOIN node s ON s.id = e.src
+          JOIN node d ON d.id = e.dst
+         WHERE d.key = $1
+           AND e.type = 'terminates_at'
+           AND e.reward >= 0
+           AND e.visibility_scope = ANY($2)
+           AND s.scope = ANY($2)
+           AND d.scope = ANY($2)
+           AND e.seen_count >= $3
+         ORDER BY e.reliability DESC, s.key
+         LIMIT 30
+        """,
+        [key, scopes, min_corr]
+      )
+
+    Enum.map(rows, &fact_from_row/1)
+  end
+
+  defp fact_from_row([type, dkey, address_class, seen, rel, age]) do
+    age = age || 0.0
+
+    %{
+      relation: type,
+      object: strip_ns(dkey),
+      object_kind: decode_key(dkey).kind,
+      address_class: address_class,
+      cardinality: cardinality(type),
+      corroboration: seen,
+      effective_reliability: Freshness.effective_reliability(rel || 0.0, age, type),
+      fresh?: Freshness.fresh?(age, type)
+    }
   end
 
   @spec query_terms(String.t()) :: [String.t()]
@@ -202,6 +832,22 @@ defmodule Swarm.Graph.Network do
     |> String.downcase()
     |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
     |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+  end
+
+  defp query_vec(opts) do
+    case Keyword.get(opts, :query_vec) do
+      [_ | _] = vec -> Pgvector.new(vec)
+      _ -> nil
+    end
+  end
+
+  defp network_literals(query) do
+    ipv4 = ~r/\b(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?\b/
+    ipv6 = ~r/\b[0-9a-f]{0,4}:[0-9a-f:]+(?:\/\d{1,3})?\b/i
+
+    (Regex.scan(ipv4, query) ++ Regex.scan(ipv6, query))
+    |> List.flatten()
     |> Enum.uniq()
   end
 

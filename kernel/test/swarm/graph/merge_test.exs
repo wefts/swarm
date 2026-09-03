@@ -274,5 +274,73 @@ defmodule Swarm.Graph.MergeTest do
       assert {:ok, %{result: r}} = Store.merge_nodes("entity", "srv-1-dup", "srv-1")
       assert r in [:merged, :renamed]
     end
+
+    test "merge refuses to repoint a governed edge onto an illegal endpoint kind" do
+      alias_host = Store.upsert_node("entity", "net:host:app-a.example.test", scope: "public")
+
+      canonical_address = Store.upsert_node("entity", "net:address:192.0.2.45", scope: "public")
+
+      address = Store.upsert_node("entity", "net:address:192.0.2.44", scope: "public")
+
+      {:ok, %{id: edge_id}} =
+        Store.add_edge(alias_host, address, "has_public_address", "example.test:addr",
+          scope: "public",
+          origin: "example.test:addr",
+          evidence_kind: "observation"
+        )
+
+      assert {:error,
+              {:contract,
+               {:relation_endpoint_kinds_mismatch,
+                %{relation: "has_public_address", subject_kinds: subject_kinds}}}} =
+               Store.merge_nodes(
+                 "entity",
+                 "net:host:app-a.example.test",
+                 "net:address:192.0.2.45"
+               )
+
+      assert "address" in subject_kinds
+      assert Repo.query!("SELECT id FROM node WHERE id = $1", [alias_host]).rows == [[alias_host]]
+
+      assert Repo.query!("SELECT id FROM node WHERE id = $1", [canonical_address]).rows == [
+               [canonical_address]
+             ]
+
+      assert Repo.query!("SELECT src, dst FROM edge WHERE id = $1", [edge_id]).rows == [
+               [alias_host, address]
+             ]
+    end
+
+    test "merge refuses to rename a governed endpoint into an illegal kind" do
+      host = Store.upsert_node("entity", "net:host:app-b.example.test", scope: "public")
+      address = Store.upsert_node("entity", "net:address:192.0.2.46", scope: "public")
+
+      {:ok, %{id: edge_id}} =
+        Store.add_edge(host, address, "has_public_address", "example.test:addr",
+          scope: "public",
+          origin: "example.test:addr",
+          evidence_kind: "observation"
+        )
+
+      assert {:error,
+              {:contract,
+               {:relation_endpoint_kinds_mismatch,
+                %{relation: "has_public_address", subject_kinds: subject_kinds}}}} =
+               Store.merge_nodes(
+                 "entity",
+                 "net:host:app-b.example.test",
+                 "net:address:192.0.2.47"
+               )
+
+      assert "address" in subject_kinds
+
+      assert Repo.query!("SELECT key FROM node WHERE id = $1", [host]).rows == [
+               ["net:host:app-b.example.test"]
+             ]
+
+      assert Repo.query!("SELECT src, dst FROM edge WHERE id = $1", [edge_id]).rows == [
+               [host, address]
+             ]
+    end
   end
 end

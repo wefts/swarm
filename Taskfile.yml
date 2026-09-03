@@ -26,15 +26,26 @@ tasks:
   lint:
     desc: Format/lint/type-check markdown, Python (ml + cli), and Elixir.
     cmds:
+      - task: lint:leaks
       - task: lint:md
       - task: lint:py
       - task: lint:cli
       - task: lint:ex
 
+  lint:leaks:
+    desc: Scan tracked files and unpushed commits for private material.
+    cmds:
+      - bash scripts/leak_scan.sh
+
   lint:md:
     desc: Lint the markdown we own from the repo root (where .markdownlint.yaml lives).
+    # CHANGELOG.md is excluded because git-cliff generates it from commit
+    # bodies: authoring rules like MD033 police prose we wrote, and a commit
+    # that legitimately mentions <uuid> is not a documentation defect.
     cmds:
-      - npx --no-install markdownlint-cli2 "*.md" "docs/**/*.md" ".claude/**/*.md"
+      - >-
+        npx --no-install markdownlint-cli2
+        "*.md" "!CHANGELOG.md" "docs/**/*.md" ".claude/**/*.md"
 
   lint:py:
     desc: Ruff lint + format check + ty type check (uv-only).

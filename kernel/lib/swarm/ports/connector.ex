@@ -33,8 +33,10 @@ defmodule Swarm.Ports.Connector do
   @type cursor :: term()
 
   @typedoc """
-  One page of a paginated pull. `events` are this page's events; `cursor` is the
-  next cursor (or `:done` at exhaustion); `truncated?` is true iff the source
+  One page of a paginated pull. `events` are this page's events; optional `skips`
+  are source items intentionally filtered before ingest, each carrying
+  `source_ref`, `reason`, and `occurred_at` without titles/prose/URLs. `cursor` is
+  the next cursor (or `:done` at exhaustion); `truncated?` is true iff the source
   imposed a ceiling on THIS page (the kernel logs it — no silent cap).
   """
   @type page :: %{events: [event()], cursor: cursor() | :done, truncated?: boolean()}

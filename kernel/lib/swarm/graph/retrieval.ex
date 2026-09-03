@@ -27,6 +27,7 @@ defmodule Swarm.Graph.Retrieval do
   """
 
   alias Swarm.Graph.Corroboration
+  alias Swarm.Graph.DocumentKind
   alias Swarm.Graph.Traverse
   alias Swarm.ML.Embeddings
   alias Swarm.Repo
@@ -43,6 +44,9 @@ defmodule Swarm.Graph.Retrieval do
           score: float(),
           relevance: float(),
           confidence: float(),
+          document_kind: DocumentKind.kind(),
+          structural_evidence: [String.t()],
+          source_ref: String.t() | nil,
           spans: [%{ordinal: integer(), text: String.t()}]
         }
 
@@ -109,8 +113,9 @@ defmodule Swarm.Graph.Retrieval do
       |> fused_chunks(scopes, candidates, k, qvec, lex_w, dense_w)
       |> group_by_node(spans, floor, k, title_w)
       |> Enum.sort_by(& &1.score, :desc)
-      |> Enum.take(limit)
       |> attach_identity(scopes)
+      |> rerank_by_document_kind(query)
+      |> Enum.take(limit)
 
     expanded =
       if Keyword.get(opts, :expand, true),
@@ -199,7 +204,7 @@ defmodule Swarm.Graph.Retrieval do
   @bm25_scope_filter "paradedb.term_set(terms => (SELECT array_agg(paradedb.term('scope', s)) FROM unnest($6::text[]) AS s))"
   @bm25_query "paradedb.boolean(must => ARRAY[#{@bm25_scope_filter}, paradedb.boolean(should => ARRAY[paradedb.match('text', $1), paradedb.boost(factor => $7::real, query => paradedb.match('title', $1))])])"
 
-  # The native title arm CTE (ts_rank_cd over node.key, scope-filtered, ordered+LIMITed),
+  # The native title arm CTE (ts_rank_cd over display title, scope-filtered, ordered+LIMITed),
   # reused verbatim in bm25 mode so title-lookups keep the aggressive per-node boost.
   # `titled_q` is the tsvector query param index, `scope_p` the scopes[] param index.
   defp titled_cte(titled_q, scope_p) do
@@ -207,15 +212,18 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC, node_id) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), to_tsquery('simple', $#{titled_q})) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), to_tsquery('simple', $#{titled_q})) AS trank
         FROM node n
-        WHERE n.scope = ANY($#{scope_p}) AND to_tsvector('simple', n.key) @@ to_tsquery('simple', $#{titled_q})
+        WHERE n.scope = ANY($#{scope_p}) AND to_tsvector('simple', #{display_key_sql("n")}) @@ to_tsquery('simple', $#{titled_q})
         ORDER BY trank DESC, n.id
         LIMIT $3
       ) tn
     )
     """
   end
+
+  defp display_key_sql(alias_name),
+    do: "coalesce(nullif(#{alias_name}.provenance->>'display_key', ''), #{alias_name}.key)"
 
   defp fused_bm25(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     sql = """
@@ -302,7 +310,7 @@ defmodule Swarm.Graph.Retrieval do
   defp fused_native(query, scopes, candidates, k, nil, lex_w, _dense_w) do
     # Lexical-only (no query vector): a body-keyword match is the only per-chunk
     # signal, so `cos` is unknown (nil). The **title arm** (ADR-0016) is the
-    # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over `node.key` — LEFT
+    # `titled` CTE — in-scope nodes ranked by `ts_rank_cd` over the display title — LEFT
     # JOINed so each surviving chunk learns its node's title rank; the per-node
     # title boost is applied ONCE in `group_by_node` (never multiplied by chunk
     # count). Scope is enforced on BOTH the body arm and `titled` (no-leak). The
@@ -314,9 +322,9 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), (SELECT tsq FROM q)) AS trank
         FROM node n
-        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', #{display_key_sql("n")}) @@ (SELECT tsq FROM q)
         ORDER BY trank DESC
         LIMIT $3
       ) tn
@@ -354,7 +362,7 @@ defmodule Swarm.Graph.Retrieval do
     # **Weighted RRF** (Card 7): the lexical term is scaled by `$6`, the dense term
     # by `$7`, so an exact keyword hit resists demotion by a multi-chunk dense
     # "magnet"; PARAPHRASE ranking is untouched. The **title arm** (ADR-0016) is the
-    # `titled` CTE (in-scope nodes ranked by `ts_rank_cd` over `node.key`), LEFT
+    # `titled` CTE (in-scope nodes ranked by `ts_rank_cd` over the display title), LEFT
     # JOINed so each chunk learns its node's title rank; the per-node title boost is
     # added ONCE in `group_by_node`, so a page whose title IS the query floats over
     # body-only mentions WITHOUT a chunk-count multiplier and WITHOUT bypassing the
@@ -367,9 +375,9 @@ defmodule Swarm.Graph.Retrieval do
     titled AS (
       SELECT node_id, row_number() OVER (ORDER BY trank DESC) AS rnk
       FROM (
-        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', n.key), (SELECT tsq FROM q)) AS trank
+        SELECT n.id AS node_id, ts_rank_cd(to_tsvector('simple', #{display_key_sql("n")}), (SELECT tsq FROM q)) AS trank
         FROM node n
-        WHERE n.scope = ANY($2) AND to_tsvector('simple', n.key) @@ (SELECT tsq FROM q)
+        WHERE n.scope = ANY($2) AND to_tsvector('simple', #{display_key_sql("n")}) @@ (SELECT tsq FROM q)
         ORDER BY trank DESC
         LIMIT $3
       ) tn
@@ -532,14 +540,23 @@ defmodule Swarm.Graph.Retrieval do
     ids = Enum.map(memories, & &1.node_id)
 
     meta =
-      Repo.query!("SELECT id, type, key, reliability FROM node WHERE id = ANY($1)", [ids])
+      Repo.query!(
+        """
+        SELECT n.id, n.type, coalesce(nullif(n.provenance->>'display_key', ''), n.key), n.reliability, c.source_ref
+        FROM node n
+        LEFT JOIN content c ON c.node_id = n.id
+        WHERE n.id = ANY($1)
+        """,
+        [ids]
+      )
       |> Map.get(:rows)
-      |> Map.new(fn [id, type, key, rel] -> {id, {type, key, rel}} end)
+      |> Map.new(fn [id, type, key, rel, source_ref] -> {id, {type, key, rel, source_ref}} end)
 
     corr = Corroboration.for_nodes(ids, scopes: scopes)
+    evidence = structural_evidence(ids, scopes)
 
     Enum.map(memories, fn m ->
-      {type, key, rel} = Map.get(meta, m.node_id, {nil, nil, 0.0})
+      {type, key, rel, source_ref} = Map.get(meta, m.node_id, {nil, nil, 0.0, nil})
       # Corroboration when the node carries independent typed evidence; otherwise
       # fall back to intrinsic reliability (an un-enriched node is not penalised).
       confidence = Map.get(corr, m.node_id, rel)
@@ -548,10 +565,47 @@ defmodule Swarm.Graph.Retrieval do
         type: type,
         key: key,
         confidence: confidence,
+        structural_evidence: Map.get(evidence, m.node_id, []),
+        source_ref: source_ref,
         relevance: Float.round(m.relevance, 4)
       })
     end)
   end
+
+  defp structural_evidence(ids, scopes) do
+    Repo.query!(
+      """
+      SELECT src, array_agg(DISTINCT type ORDER BY type)
+      FROM edge
+      WHERE src = ANY($1) AND visibility_scope = ANY($2) AND type = ANY($3)
+      GROUP BY src
+      """,
+      [ids, scopes, ["has_step"]]
+    )
+    |> Map.get(:rows)
+    |> Map.new(fn [node_id, relations] -> {node_id, relations} end)
+  end
+
+  # Ontology small-slice: kind is a retrieval-time hint, not a graph label. It only reorders the
+  # already scope-filtered, already relevant memory set; it never admits or filters rows.
+  defp rerank_by_document_kind(memories, query) do
+    query_kind = DocumentKind.query_kind(query)
+
+    memories
+    |> Enum.map(fn memory ->
+      kind = DocumentKind.classify(memory)
+
+      memory
+      |> Map.put(:document_kind, kind)
+      |> Map.update!(:score, &(&1 * kind_factor(query_kind, kind)))
+    end)
+    |> Enum.sort_by(& &1.score, :desc)
+  end
+
+  defp kind_factor(:unknown, _kind), do: 1.0
+  defp kind_factor(kind, kind), do: 1.15
+  defp kind_factor(:policy, :procedure), do: 0.75
+  defp kind_factor(_query_kind, _doc_kind), do: 1.0
 
   # --- stage 2: traversal expansion -----------------------------------------
 
