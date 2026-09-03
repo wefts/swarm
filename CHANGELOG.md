@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.9.1](https://github.com/wefts/swarm/compare/v0.9.0..v0.9.1) - 2026-09-03
+
+### Bug Fixes
+
+- **(core)** never pad grounding with zero-relevance hits - ([57eb896](https://github.com/wefts/swarm/commit/57eb8969a86222acde92fc6be99548f81801bcfd)) - Serhii BOREMCHUK
+
+---
 ## [0.9.0](https://github.com/wefts/swarm/compare/v0.8.3..v0.9.0) - 2026-09-03
 
 ### Bug Fixes
