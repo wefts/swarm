@@ -13,6 +13,7 @@ defmodule Swarm.Graph.Store do
 
   alias Swarm.Graph.Contract
   alias Swarm.Graph.Node
+  alias Swarm.Graph.Temporal
   alias Swarm.Repo
 
   @typedoc "Result of `add_edge`: the edge id, its current distinct-origin count, and whether this call reinforced it (introduced a new origin)."
@@ -293,7 +294,7 @@ defmodule Swarm.Graph.Store do
           n = repoint_edges(alias_id, into_id)
           # schema v13: validity intervals key supersession by endpoint ids — repointed edges
           # must be re-keyed or later supersession misses them.
-          Swarm.Graph.Temporal.rekey_node(into_id)
+          Temporal.rekey_node(into_id)
           union_chunks(alias_id, into_id)
           survive_content(alias_id, into_id)
           purge_source_edges(alias_id)
@@ -578,7 +579,7 @@ defmodule Swarm.Graph.Store do
 
         # schema v13: the alias edge's validity intervals are history, not provenance — carry
         # them onto the survivor (CASCADE would silently delete them with the edge).
-        Swarm.Graph.Temporal.move_intervals(eid, target)
+        Temporal.move_intervals(eid, target)
         Repo.query!("DELETE FROM edge WHERE id = $1", [eid])
         :ok
 

@@ -36,6 +36,7 @@ defmodule Swarm.Ingest do
   alias Swarm.Ingest.Content
   alias Swarm.Ingest.DeadLetter
   alias Swarm.Ingest.Dedup
+  alias Swarm.Repo
 
   require Logger
 
@@ -295,7 +296,7 @@ defmodule Swarm.Ingest do
 
   defp stored_scopes(node_ids) do
     %{rows: rows} =
-      Swarm.Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1)", [Enum.uniq(node_ids)])
+      Repo.query!("SELECT id, scope FROM node WHERE id = ANY($1)", [Enum.uniq(node_ids)])
 
     Map.new(rows, fn [id, scope] -> {id, scope} end)
   end
