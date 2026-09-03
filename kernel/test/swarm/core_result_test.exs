@@ -479,7 +479,7 @@ defmodule Swarm.CoreResultTest do
   end
 
   test "escalate gates broad query-term claim facts when passage grounding is present" do
-    s = add_node!(%{type: "entity", key: "ee.helpdesk@smile.fr", scope: "public"})
+    s = add_node!(%{type: "entity", key: "ee.helpdesk@example.test", scope: "public"})
     o = add_node!(%{type: "entity", key: "ee helpdesk", scope: "public"})
     {:ok, _} = Graph.add_edge(s, o, "part_of", "p1", evidence_kind: "claim", scope: "public")
 
