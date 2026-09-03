@@ -952,10 +952,16 @@ defmodule Swarm.Core do
   # Grounding needs its own relative gate so lexical/title tails cannot hand
   # zero-relevance documents to the consilium while broad questions still retain
   # enough context to answer.
+  #
+  # The minimum-keep pad exists so a broad question keeps a few context pages; it
+  # must never pad with ZERO-relevance hits. Those are lexical/title tails (sibling
+  # "…procédure de mise à jour" pages for other products), and handing them to the
+  # consilium is what produced blended, over-broad procedures (GLPI eval 70148).
+  @doc false
   @spec gate_grounding_hits(String.t(), [hit()]) :: [hit()]
-  defp gate_grounding_hits(_query, []), do: []
+  def gate_grounding_hits(_query, []), do: []
 
-  defp gate_grounding_hits(query, hits) do
+  def gate_grounding_hits(query, hits) do
     hits = restrict_to_named_subject_hits(query, hits)
     {scored, unscored} = Enum.split_with(hits, &(hit_relevance(&1) != nil))
 
@@ -971,6 +977,7 @@ defmodule Swarm.Core do
 
           min_keep =
             scored
+            |> Enum.reject(&(hit_relevance(&1) <= 0.0))
             |> Enum.sort_by(&hit_relevance/1, :desc)
             |> Enum.take(@grounding_min_hits)
 
