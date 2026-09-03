@@ -18,6 +18,7 @@ native title arm rides on top of the bm25 body arm) BM25 is **non-regressive on 
 0.271 vs 0.206, leads 2 vs 1) → a final **decorrelated council (codex + llama3.3:70b) GO-WITH-CONDITIONS**.
 
 **Accepted-with-conditions** (council 2026-07-01, adopted):
+
 - **The kernel redeploy to `:bm25` in production must be observability-gated** (watch answerability /
   latency / no-leak on the live stack); the `SWARM_LEXICAL_ENGINE=native` rollback stays documented +
   the native path stays unit-tested.
@@ -110,7 +111,7 @@ just-shipped native lexical arm (Phase 1; for this gold set the dense arm adds n
 lexical-only is the complete A/B). 7-question labeled gold ("what is X", group scope, recall@10):
 
 | arm | recall@10 | MRR | leads | notes |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | native (ts_rank body + title-arm boost, tw=30) | 0.857 | 0.519 | 3/7 | Kubernetes page unreachable at any title weight |
 | BM25 body+title, boost=2 | **1.000** | **0.732** | **4/7** | recovers the Kubernetes title-only page (rank 8) |
 | BM25 boost=4 / 8 | 0.857 | 0.714 / 0.690 | 4/7 | MRR win robust across boost; recall@10=1.0 is boost-fragile |
@@ -131,6 +132,7 @@ precisely the native title-bypass that Phase 1 DEFERRED** — so the honest comp
 cheap native bypass recovers Kubernetes and performs near BM25, the extension is hard to justify.
 
 **Conditions before flipping to Accepted (all must pass):**
+
 1. **Repaired-native comparison first** — add the deferred native title-bypass arm and re-run; only if
    BM25 still clearly beats *that* is the extension justified.
 2. Larger **frozen holdout** labeled set (diverse, not only title-lookups; near-dup titles; scope
