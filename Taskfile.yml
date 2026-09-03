@@ -26,10 +26,16 @@ tasks:
   lint:
     desc: Format/lint/type-check markdown, Python (ml + cli), and Elixir.
     cmds:
+      - task: lint:leaks
       - task: lint:md
       - task: lint:py
       - task: lint:cli
       - task: lint:ex
+
+  lint:leaks:
+    desc: Scan tracked files and unpushed commits for private material.
+    cmds:
+      - bash scripts/leak_scan.sh
 
   lint:md:
     desc: Lint the markdown we own from the repo root (where .markdownlint.yaml lives).
