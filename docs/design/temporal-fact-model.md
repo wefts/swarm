@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: implemented (storage, write rules, reads); Core.ask exposure and derivation rules open
 owner: swarm
 ---
 
@@ -135,16 +135,66 @@ Readers must distinguish current-state asks from history asks.
 Scope filtering still happens before temporal selection. A viewer cannot derive
 or see a current state from premises they cannot see.
 
+## Implementation Record (2026-09-03, ADR-21 slice 3)
+
+Built with the Proxmox connector, the first source whose answer is a fact at a
+known instant. Gemini served as decorrelated critic on the storage shape
+(verdict: accept with changes; all adopted, one adapted — see below).
+
+**Where intervals live: a separate `edge_validity` table (schema v13).** Not
+columns on `edge` — one fact can be true in several disjoint intervals (a VM
+that moves A→B→A), and the natural key plus the corroboration machinery must
+stay untouched. Not `edge_provenance` — a provenance row is an observation of
+the fact, not of its closure; supersession and closure-by-absence need a row of
+their own. Rows partition by the asserting `source` (a site-qualified run
+identity such as `proxmox:casa`) so absence reconciliation closes only what
+that source asserted, while supersession works on the world-level
+`supersession_key` across sources.
+
+Columns: `valid_from` (NULL = unknown start), `valid_to` (NULL = open),
+`observed_at` (latest source time the fact was asserted; NULL = undated),
+`source`, `origin`, `supersession_key` (denormalised, re-keyed on node merge),
+`closed_reason` (`superseded` | `absent` | `manual`), `absent_at` (the run
+instant that observed the absence), `recorded_at` / `closed_at` (transaction
+time). A GiST exclusion constraint forbids overlapping intervals per
+`(edge, source)`; a transactional advisory lock on the supersession key
+serialises writers to one logical state. No `superseded_by` pointer —
+causality is reconstructed at read time.
+
+Rules as built (`Swarm.Graph.Temporal`): a dated assertion opens or extends an
+interval and closes other open intervals on its key (undated ones
+unconditionally, dated ones only if they started at or before it); a
+late-arriving dated assertion is filed as closed history and never touches
+current state; an undated assertion opens an unknown-start interval and closes
+nothing. Closure by absence sets `valid_to` to the LAST observation of the
+fact, not the run instant (the critic's correction: nothing is asserted true
+past the evidence), and keeps the run instant as `absent_at`. Callers gate it on
+a complete run. Legacy edges with no interval rows read as undated.
+
+Registry: `Swarm.WorldMap.Domain` declares `temporal` and `supersession`
+(`:subject_relation` for single-valued, `:subject_relation_object` for
+many-valued) for every governed relation; an undeclared relation fails
+compilation. Transport: the connector `Event` gained an optional `valid_time`
+(proto3 additive, protocol v1). Reads: `current/3`, `history/3`, `check/4`
+resolve subject and object through `alias_of` identity edges.
+
+Deliberately not done here: prose sources (wiki revision time) still emit no
+`valid_time`, so a stale page edit cannot flip-flop an authoritative
+observation until source-reliability is part of supersession; the dated-vs-
+undated selection is per supersession key (per object for many-valued
+relations), so a live source that lists members A and B says nothing about a
+documented member C — refuting C needs a coverage notion the live source does
+not yet declare.
+
 ## Open Implementation Questions
 
-- Whether temporal intervals live on `edge`, `edge_provenance`, or a separate
-  fact assertion table.
 - How to expose historical answers through `Core.ask` without overloading the
   existing structured answer shape.
-- Which existing relations should be classified first. Network address and
-  route relations are the highest-value `state` candidates; document-kind and
-  technology property relations are likely `invariant`; migration and incident
-  records are `event`.
+- Which prose-derived relations may carry a page-revision `valid_time`, and
+  whether supersession must weigh source reliability once they do.
+- A coverage declaration for live sources (`proxmox:SITE` covers
+  `net:cluster:SITE contains *`) so an undated documented member the live
+  source does not return can be marked unconfirmed rather than merely undated.
 
 ## Acceptance For Implementation
 
