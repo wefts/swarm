@@ -373,6 +373,29 @@ defmodule Swarm.Graph.TemporalTest do
       assert [[@t2, nil, @t2, nil, nil, _]] = intervals(e2)
       assert length(Temporal.current("net:cluster:casa", "contains")) == 2
     end
+
+    test "a dated member does not demote an undated claim about a DIFFERENT member" do
+      cluster = entity("net:cluster:casa")
+      live = entity("net:host:casa/pve-a")
+      documented = entity("net:host:casa/pve-legacy")
+      e_live = edge!(cluster, live, "contains", "obs-1")
+      _e_doc = edge!(cluster, documented, "contains", "iac:inventory")
+
+      {:ok, :opened} = Temporal.assert(e_live, valid_time: @t1, source: @site)
+
+      # both members are current: the live one dated, the documented one undated (unconfirmed)
+      assert [
+               %{object: "net:host:casa/pve-a", dated?: true},
+               %{object: "net:host:casa/pve-legacy", dated?: false}
+             ] =
+               Temporal.current("net:cluster:casa", "contains")
+
+      assert %{status: :undated} =
+               Temporal.check("net:cluster:casa", "contains", "net:host:casa/pve-legacy")
+
+      assert %{status: :current} =
+               Temporal.check("net:cluster:casa", "contains", "net:host:casa/pve-a")
+    end
   end
 
   describe "ingest boundary" do

@@ -232,6 +232,22 @@ defmodule Swarm.Graph.Temporal do
 
     facts = Enum.map(rows, &row_to_fact/1)
 
+    # Dated evidence outranks undated evidence WITHIN one supersession key: for a single-valued
+    # relation that is the whole (subject, relation); for a many-valued one each object is its own
+    # state, so a dated "contains A" says nothing about an undated "contains B".
+    case Domain.temporal(relation) do
+      %{supersession: :subject_relation_object} ->
+        facts
+        |> Enum.group_by(& &1.object_id)
+        |> Enum.flat_map(fn {_object, group} -> prefer_dated(group) end)
+        |> Enum.sort_by(&{is_nil(&1.observed_at), &1.object})
+
+      _ ->
+        prefer_dated(facts)
+    end
+  end
+
+  defp prefer_dated(facts) do
     case Enum.filter(facts, & &1.dated?) do
       [] -> facts
       dated -> dated
