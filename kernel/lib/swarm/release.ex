@@ -30,6 +30,24 @@ defmodule Swarm.Release do
     {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :down, to: version))
   end
 
+  @doc "Run one scheduled ADR-21 connector ingest through the localhost gRPC port."
+  def ingest_connector do
+    case Swarm.Connector.IngestRunner.run_from_env() do
+      {:ok, report} ->
+        IO.puts("connector_ingest.report=" <> inspect(report))
+
+        if report.complete? do
+          :ok
+        else
+          System.halt(1)
+        end
+
+      {:error, reason} ->
+        IO.puts(:stderr, "connector_ingest.error=" <> inspect(reason))
+        System.halt(1)
+    end
+  end
+
   defp repos, do: Application.fetch_env!(@app, :ecto_repos)
 
   defp load_app, do: Application.load(@app)
