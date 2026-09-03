@@ -59,6 +59,11 @@ message Event {
   string occurred_at = 5; // ISO-8601 timestamp with offset.
   repeated Entity entities = 6;
   repeated Relation relations = 7;
+  // Source truth time of the event's state relations (temporal fact model): the
+  // instant a live API was observed, a commit time, an explicit dated assertion.
+  // ISO-8601 with offset. Empty = undated (the relations are asserted with an
+  // unknown start and never stamped with ingest time). Additive, protocol v1.
+  string valid_time = 8;
 }
 
 message Entity {

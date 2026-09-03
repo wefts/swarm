@@ -45,8 +45,30 @@ defmodule Swarm.Connector.GrpcCodecTest do
     assert page.truncated?
     assert page.total == 17
 
-    assert [%{origin: "mediawiki:11", occurred_at: "2024-03-02T10:15:30Z"}] = page.events
+    assert [%{origin: "mediawiki:11", occurred_at: "2024-03-02T10:15:30Z", valid_time: nil}] =
+             page.events
+
     assert [%{reason: "namespace_filtered", source_ref: "mediawiki:99"}] = page.skips
+  end
+
+  test "carries the optional valid_time (temporal model) and leaves it nil when absent" do
+    timed = %{
+      provenance: "proxmox:casa:vm:101@2026-09-03T10:00:00Z",
+      origin: "proxmox:casa:vm:101",
+      source: "proxmox:casa",
+      occurred_at: ~U[2026-09-03 10:00:00Z],
+      valid_time: ~U[2026-09-03 10:00:00Z],
+      entities: [],
+      relations: []
+    }
+
+    response = %FetchResponse{
+      status: FetchStatus.value(:FETCH_OK),
+      page: GrpcCodec.encode_page(%{events: [timed], cursor: :done})
+    }
+
+    assert {:ok, %{events: [%{valid_time: "2026-09-03T10:00:00Z", source: "proxmox:casa"}]}} =
+             GrpcCodec.page(response)
   end
 
   test "accepts protobuf enum atoms from decoded grpc responses" do

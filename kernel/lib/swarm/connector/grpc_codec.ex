@@ -26,7 +26,8 @@ defmodule Swarm.Connector.GrpcCodec do
   end
 
   @spec page(FetchResponse.t()) :: {:ok, map()} | {:error, term()}
-  def page(%FetchResponse{status: status, page: %Page{} = page}) when status in [@fetch_ok, :FETCH_OK] do
+  def page(%FetchResponse{status: status, page: %Page{} = page})
+      when status in [@fetch_ok, :FETCH_OK] do
     {:ok, decode_page(page)}
   end
 
@@ -140,6 +141,7 @@ defmodule Swarm.Connector.GrpcCodec do
       source: string(event, :source),
       source_ref: string(event, :source_ref),
       occurred_at: occurred_at(event),
+      valid_time: iso(Map.get(event, :valid_time)),
       entities: Enum.map(Map.get(event, :entities, []), &encode_entity/1),
       relations: Enum.map(Map.get(event, :relations, []), &encode_relation/1)
     }
@@ -152,6 +154,7 @@ defmodule Swarm.Connector.GrpcCodec do
       source: event.source,
       source_ref: event.source_ref,
       occurred_at: event.occurred_at,
+      valid_time: blank_nil(event.valid_time),
       entities: Enum.map(event.entities, &decode_entity/1),
       relations: Enum.map(event.relations, &decode_relation/1)
     }
@@ -232,13 +235,11 @@ defmodule Swarm.Connector.GrpcCodec do
     end
   end
 
-  defp occurred_at(map) do
-    case Map.get(map, :occurred_at) do
-      %DateTime{} = dt -> DateTime.to_iso8601(dt)
-      nil -> ""
-      value -> to_string(value)
-    end
-  end
+  defp occurred_at(map), do: iso(Map.get(map, :occurred_at))
+
+  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp iso(nil), do: ""
+  defp iso(value), do: to_string(value)
 
   defp blank_nil(""), do: nil
   defp blank_nil(value), do: value
