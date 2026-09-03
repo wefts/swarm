@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.8.2](https://github.com/wefts/swarm/compare/v0.8.1..v0.8.2) - 2026-09-03
+
+### Bug Fixes
+
+- **(core)** prioritize relevant grounding before budget - ([0e3c6b8](https://github.com/wefts/swarm/commit/0e3c6b810ba2363d2bb790f4086076da636b4d57)) - Serhii BOREMCHUK
+
+---
 ## [0.8.1](https://github.com/wefts/swarm/compare/v0.8.0..v0.8.1) - 2026-09-02
 
 ### Bug Fixes
