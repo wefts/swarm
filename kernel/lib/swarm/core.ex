@@ -62,6 +62,16 @@ defmodule Swarm.Core do
           :tier => String.t(),
           :status => status(),
           :citations => [citation()],
+          # What the answer was built from, machine-readable. Present on a structured
+          # serve and on a grounded escalation; absent on tier-0, errors and not-found.
+          optional(:provenance) => %{
+            kind: String.t(),
+            intent: atom() | nil,
+            domain: atom() | nil,
+            subject_key: String.t() | nil,
+            facts: [map()],
+            passages: [map()]
+          },
           # Set only on an escalation that retained a deliberation for a
           # non-anonymous asker (ADR-15); absent otherwise.
           optional(:ask_ref) => String.t()
@@ -764,7 +774,37 @@ defmodule Swarm.Core do
       tier: "structured",
       status: :found,
       citations:
-        key_citation ++ Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0})
+        key_citation ++ Enum.map(a.citations, &%{source: "structured", ref: &1, confidence: 1.0}),
+      provenance: %{
+        kind: "structured",
+        intent: a.intent,
+        domain: a.domain,
+        subject_key: a.key,
+        facts: Enum.map(a.facts, &provenance_fact/1),
+        passages: []
+      }
+    }
+  end
+
+  # What the answer was BUILT FROM, in machine-readable form. Answer text cannot show
+  # whether a fact came from the graph or from a document that happened to mention it --
+  # no analysis of prose can (hive/docs/design/learner-eval-grading.md, fixture
+  # L1-concordance-ceiling). The serve path knows; this is it saying so. Shapes differ by
+  # intent (neighborhood facts, procedure steps, claim groups), so keep only the keys
+  # that identify the object and never invent the ones a shape lacks.
+  @provenance_fact_keys [:relation, :object, :predicate, :subject, :corroboration, :ordinal, :key]
+  @spec provenance_fact(map()) :: map()
+  defp provenance_fact(fact) when is_map(fact), do: Map.take(fact, @provenance_fact_keys)
+  defp provenance_fact(other), do: %{value: inspect(other)}
+
+  @spec provenance_passage(hit()) :: map()
+  defp provenance_passage(hit) do
+    %{
+      node_id: Map.get(hit, :id),
+      type: Map.get(hit, :type),
+      key: Map.get(hit, :key),
+      source_ref: Map.get(hit, :source_ref),
+      spans: hit |> Map.get(:spans, []) |> length()
     }
   end
 
@@ -869,7 +909,18 @@ defmodule Swarm.Core do
         # answer — so a claim-only answer (no retrieval hits) is still explainable.
         citations: Enum.map(hits, &cite/1) ++ Enum.map(profile.facts, &fact_cite/1),
         ask_ref: ask_ref,
-        agreement: agreement(verdict.disagreement)
+        agreement: agreement(verdict.disagreement),
+        # The grounding that was actually assembled for THIS ask: the facts that survived
+        # the profile gate and the passages that survived the relevance floor. Not the
+        # whole corpus, not the whole profile -- what went into the prompt.
+        provenance: %{
+          kind: "consilium",
+          intent: nil,
+          domain: nil,
+          subject_key: nil,
+          facts: Enum.map(profile.facts, &provenance_fact/1),
+          passages: Enum.map(hits, &provenance_passage/1)
+        }
       }
     else
       # The judge marked the answer NOT grounded (an abstention) — honest `:not_found`,

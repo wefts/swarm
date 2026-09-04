@@ -75,7 +75,7 @@ defmodule Swarm.WorldMap.Gate do
   defmodule Answer do
     @moduledoc "The evidence-closed served answer (rendered from a `%Validated{}` only)."
     @enforce_keys [:text, :citations, :intent]
-    defstruct [:text, :citations, :intent, :domain, :key, confidence: 0.85]
+    defstruct [:text, :citations, :intent, :domain, :key, confidence: 0.85, facts: []]
 
     @type t :: %__MODULE__{
             text: String.t(),
@@ -89,7 +89,14 @@ defmodule Swarm.WorldMap.Gate do
             # threaded to Core so a served answer's citations can seed the NEXT turn's
             # `active_keys` (chat-thread epic 2) — without it, a pronoun follow-up after a
             # structured-served turn had nothing but opaque labels to echo back.
-            key: String.t() | nil
+            key: String.t() | nil,
+            # The validated atoms this answer was rendered FROM -- the graph objects the
+            # serve path actually read. Threaded out so a measurement can check that an
+            # answer came from the inventory instead of inferring it from the prose: no
+            # analysis of answer text can separate a join from a coincidence
+            # (hive/docs/design/learner-eval-grading.md). Evidence-closed still holds --
+            # these are the same atoms `render/1` consumed, never raw hits or origins.
+            facts: [map()]
           }
   end
 
@@ -272,7 +279,15 @@ defmodule Swarm.WorldMap.Gate do
   def render(%Validated{intent: :procedure, atoms: steps, citations: cits, name: name}) do
     body = steps |> Enum.map_join("\n", fn s -> "#{s.ordinal}. #{s.key}" end)
     head = if name, do: "#{name}:\n", else: "Steps:\n"
-    %Answer{text: head <> body, citations: cits, intent: :procedure, key: name, confidence: 0.85}
+
+    %Answer{
+      text: head <> body,
+      citations: cits,
+      intent: :procedure,
+      key: name,
+      confidence: 0.85,
+      facts: steps
+    }
   end
 
   def render(%Validated{intent: :entity_profile, atoms: groups, citations: cits}) do
@@ -282,7 +297,13 @@ defmodule Swarm.WorldMap.Gate do
         "#{g.predicate}: #{objs}"
       end)
 
-    %Answer{text: body, citations: cits, intent: :entity_profile, confidence: confidence(groups)}
+    %Answer{
+      text: body,
+      citations: cits,
+      intent: :entity_profile,
+      confidence: confidence(groups),
+      facts: groups
+    }
   end
 
   def render(%Validated{
@@ -302,7 +323,8 @@ defmodule Swarm.WorldMap.Gate do
       intent: :neighborhood,
       domain: domain_key,
       key: key,
-      confidence: confidence(facts)
+      confidence: confidence(facts),
+      facts: facts
     }
   end
 

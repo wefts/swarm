@@ -164,6 +164,14 @@ defmodule Swarm.CoreTest do
       # opaque citation only — never the raw origin
       assert Enum.all?(a.citations, &(&1.source == "structured"))
       refute a.answer =~ "wiki"
+
+      # ...and a machine-readable record of what it was built FROM. A measurement
+      # cannot tell a real lookup from a coincidence by reading answer text; the
+      # serve path knows which objects it read, so it says so.
+      assert a.provenance.kind == "structured"
+      assert a.provenance.intent == :procedure
+      assert a.provenance.facts != []
+      assert a.provenance.passages == []
       # chat-thread epic 2: the served entity's real key rides along in citations (not
       # just the gate's opaque "corroboration:N" labels) — a channel echoing THESE refs
       # back as the next turn's active_keys must be able to re-hit this same procedure.

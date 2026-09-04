@@ -12,6 +12,7 @@ defmodule Swarm.WorldMap.GateTest do
   alias Swarm.WorldMap.Gate
   alias Swarm.WorldMap.Gate.Answer
   alias Swarm.WorldMap.Gate.Audit
+  alias Swarm.WorldMap.Coverage.Validated
 
   defp proc_fun(variants), do: fn _k, _s, _o -> variants end
 
@@ -154,6 +155,40 @@ defmodule Swarm.WorldMap.GateTest do
 
       assert {:escalate, %Audit{blockers: [:empty_scopes]}} =
                Gate.sufficient?(d, entail_fun: always(true))
+    end
+  end
+
+  describe "served answers carry machine-readable provenance" do
+    # A grader cannot tell a join from a coincidence by reading answer TEXT
+    # (hive/docs/design/learner-eval-grading.md, fixture L1-concordance-ceiling). The
+    # serve path already knows which graph objects it read; it just never said so.
+    test "a neighborhood serve names the facts it was rendered from" do
+      validated = %Validated{
+        query: "which node runs app-01",
+        intent: :neighborhood,
+        domain: :network,
+        name: "app-01",
+        key: "net:host:site/app-01",
+        atoms: [%{relation: "hosted_on", object: "hv-01", corroboration: 2}],
+        citations: ["corroboration:2"]
+      }
+
+      answer = Gate.render(validated)
+
+      assert answer.key == "net:host:site/app-01"
+      assert answer.facts == validated.atoms
+    end
+
+    test "a procedure serve carries its steps as facts too" do
+      validated = %Validated{
+        query: "how do I rotate the key",
+        intent: :procedure,
+        name: "rotate the key",
+        atoms: [%{ordinal: 1, key: "open the console"}],
+        citations: ["source:1"]
+      }
+
+      assert Gate.render(validated).facts == validated.atoms
     end
   end
 
