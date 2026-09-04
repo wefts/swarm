@@ -21,12 +21,14 @@ defmodule Swarm.WorldMap.Domain do
   > is no known leak; the danger is that someone writing a NEW reader from this
   > documentation would believe the chokepoint protects them and ship it unguarded.
   >
-  > It cannot simply be called: `policy_filter/2` is default-deny on a missing `:scope`,
-  > and reader facts carry no `:scope` key at all (`Network.fact_from_row/1`), so wiring
-  > it today would drop every atom and break every structured serve. The prerequisite is
-  > that readers emit the scope of the row each fact came from. Carded:
-  > `board/todo/policy-filter-not-wired.md`; pinned by
-  > "reader-shaped atoms are all dropped" in `domain_test.exs`.
+  > **The prerequisite is now met, and wiring is the remaining work.** It used to be that
+  > `policy_filter/2` is default-deny on a missing `:scope` and reader facts carried no
+  > `:scope` key at all, so calling it would drop every atom and break every structured
+  > serve. `Network.fact_from_row/1` now emits `:scope`, `:scopes`, `:observed_at` and
+  > `:sources` (ADR-20 attribution triple), and `network_test.exs` pins that a real served
+  > fact passes this filter under its own scope and is dropped under another. Network
+  > facts are ready; `WhoMap` and `Technology` build facts of their own and still are not.
+  > Carded: `board/todo/policy-filter-not-wired.md`.
   """
 
   @enforce_keys [:key, :cue, :entail_system, :min_corroboration]

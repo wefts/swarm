@@ -296,7 +296,9 @@ defmodule Swarm.Graph.Network do
            GROUP BY 1
         )
         SELECT e.type, d.key, d.net_address_class, e.seen_count, e.reliability::float8,
-               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec,
+               ARRAY[e.visibility_scope]::text[] AS scopes, e.last_seen AS observed_at,
+               #{origins_sql("e.id")} AS sources
           FROM edge e
           JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node s ON s.id = e.src
@@ -473,6 +475,22 @@ defmodule Swarm.Graph.Network do
                  max(s.age_sec)::float8 AS age_sec
             FROM support_with_origins s
            GROUP BY s.gateway_id, s.gateway_key, s.net_address_class
+        ),
+        -- Attribution for a DERIVED fact: this route is not one edge but a chain (host
+        -- address ⊂ range carried by a gateway, sometimes through a tunnel). So its
+        -- sources are the union over the whole chain, and its scope is only defined if
+        -- every link agrees -- `fact_from_row/1` nils it otherwise and the chokepoint
+        -- drops the fact.
+        support_sources AS (
+          SELECT s.gateway_id,
+                 COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS sources,
+                 COALESCE(array_agg(DISTINCT ce.visibility_scope), '{}') AS scopes,
+                 max(ce.last_seen) AS observed_at
+            FROM support s
+            CROSS JOIN unnest(s.edge_ids) AS eid
+            JOIN edge ce ON ce.id = eid
+            LEFT JOIN edge_provenance ep ON ep.edge_id = eid
+           GROUP BY s.gateway_id
         )
         SELECT 'routes_via'::text, s.gateway_key, s.net_address_class, 1 AS seen_count,
                CASE
@@ -480,8 +498,9 @@ defmodule Swarm.Graph.Network do
                  THEN 0.82
                  ELSE LEAST(s.max_reliability, 0.72)
                END::float8 AS reliability,
-               s.age_sec
+               s.age_sec, ss.scopes, ss.observed_at, ss.sources
           FROM support_summary s
+          JOIN support_sources ss ON ss.gateway_id = s.gateway_id
          WHERE NOT EXISTS (
                  SELECT 1
                    FROM edge existing
@@ -522,7 +541,10 @@ defmodule Swarm.Graph.Network do
         )
         SELECT 'contained_by'::text, subnet.key, subnet.net_address_class,
                max(e.seen_count) AS seen_count, max(e.reliability)::float8 AS reliability,
-               extract(epoch FROM (max(ff.last_seen) - max(e.last_seen)))::float8 AS age_sec
+               extract(epoch FROM (max(ff.last_seen) - max(e.last_seen)))::float8 AS age_sec,
+               array_agg(DISTINCT e.visibility_scope) AS scopes,
+               max(e.last_seen) AS observed_at,
+               COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS sources
           FROM subject s
           JOIN node subnet ON subnet.scope = ANY($2)
                           AND subnet.key LIKE 'net:subnet:%'
@@ -533,6 +555,9 @@ defmodule Swarm.Graph.Network do
                      AND e.visibility_scope = ANY($2)
                      AND e.seen_count >= $3
           JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
+          -- Attribution only. Every aggregate above is a max() or a DISTINCT, so the row
+          -- fan-out this join causes cannot move seen_count, reliability or age.
+          LEFT JOIN edge_provenance ep ON ep.edge_id = e.id
          GROUP BY subnet.key, subnet.net_address_class
         """,
         [key, scopes, min_corr]
@@ -580,7 +605,9 @@ defmodule Swarm.Graph.Network do
            GROUP BY 1
         )
         SELECT 'routes_for'::text, s.key, s.net_address_class, e.seen_count, e.reliability::float8,
-               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec,
+               ARRAY[e.visibility_scope]::text[] AS scopes, e.last_seen AS observed_at,
+               #{origins_sql("e.id")} AS sources
           FROM edge e
           JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node s ON s.id = e.src
@@ -733,6 +760,18 @@ defmodule Swarm.Graph.Network do
                  max(s.age_sec)::float8 AS age_sec
             FROM support_with_origins s
            GROUP BY s.host_id, s.host_key, s.net_address_class
+        ),
+        -- Same derived-fact attribution as the forward direction, keyed by host.
+        support_sources AS (
+          SELECT s.host_id,
+                 COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') AS sources,
+                 COALESCE(array_agg(DISTINCT ce.visibility_scope), '{}') AS scopes,
+                 max(ce.last_seen) AS observed_at
+            FROM support s
+            CROSS JOIN unnest(s.edge_ids) AS eid
+            JOIN edge ce ON ce.id = eid
+            LEFT JOIN edge_provenance ep ON ep.edge_id = eid
+           GROUP BY s.host_id
         )
         SELECT 'routes_for'::text, s.host_key, s.net_address_class, 1 AS seen_count,
                CASE
@@ -740,8 +779,9 @@ defmodule Swarm.Graph.Network do
                  THEN 0.82
                  ELSE LEAST(s.max_reliability, 0.72)
                END::float8 AS reliability,
-               s.age_sec
+               s.age_sec, ss.scopes, ss.observed_at, ss.sources
           FROM support_summary s
+          JOIN support_sources ss ON ss.host_id = s.host_id
          WHERE NOT EXISTS (
                  SELECT 1
                    FROM gateway g
@@ -790,7 +830,9 @@ defmodule Swarm.Graph.Network do
         )
         SELECT 'terminates_for'::text, s.key, s.net_address_class, e.seen_count,
                e.reliability::float8,
-               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec
+               extract(epoch FROM (ff.last_seen - e.last_seen))::float8 AS age_sec,
+               ARRAY[e.visibility_scope]::text[] AS scopes, e.last_seen AS observed_at,
+               #{origins_sql("e.id")} AS sources
           FROM edge e
           JOIN freshness_frontier ff ON ff.freshness_class = #{edge_class}
           JOIN node s ON s.id = e.src
@@ -811,8 +853,30 @@ defmodule Swarm.Graph.Network do
     Enum.map(rows, &fact_from_row/1)
   end
 
-  defp fact_from_row([type, dkey, address_class, seen, rel, age]) do
+  # The distinct evidential ORIGINS behind an edge (ADR-13): the source identity a
+  # connector derives from content, stable across re-emissions of the same fact. This is
+  # what makes a served fact attributable, and what lets a JOIN — two sources attesting one
+  # fact — be told apart from a COINCIDENCE — one source, two phrasings — without reading
+  # answer text. No analysis of the answer can make that distinction; this can.
+  #
+  # Deliberately NOT `edge_provenance.provenance`: that is the per-event dedup key and can
+  # carry a raw document id or URL. Legacy rows (origin NULL) contribute nothing rather
+  # than leaking their dedup key, so `length(sources)` may be below `corroboration`, and
+  # `corroboration` counts distinct LINEAGE, which is coarser than origin by design.
+  #
+  # `edge_ref` is always a literal column reference written here, never caller input.
+  @spec origins_sql(String.t()) :: String.t()
+  defp origins_sql(edge_ref) do
+    "(SELECT COALESCE(array_agg(DISTINCT ep.origin) FILTER (WHERE ep.origin IS NOT NULL), '{}') " <>
+      "FROM edge_provenance ep WHERE ep.edge_id = #{edge_ref})"
+  end
+
+  # Every neighborhood reader returns this row shape. The last three columns are the ADR-20
+  # attribution triple, and they are POSITIONAL on purpose: a reader that forgets one fails
+  # to match this clause loudly instead of silently serving an unattributable fact.
+  defp fact_from_row([type, dkey, address_class, seen, rel, age, scopes, observed_at, sources]) do
     age = age || 0.0
+    scopes = scopes |> List.wrap() |> Enum.reject(&is_nil/1) |> Enum.uniq() |> Enum.sort()
 
     %{
       relation: type,
@@ -822,9 +886,23 @@ defmodule Swarm.Graph.Network do
       cardinality: cardinality(type),
       corroboration: seen,
       effective_reliability: Freshness.effective_reliability(rel || 0.0, age, type),
+      # The scope of the row the fact came from, for `Domain.policy_filter/2`. A DERIVED
+      # fact spans several edges; when those disagree there is no single scope this fact
+      # belongs to, so `:scope` is nil and the default-deny chokepoint drops it. Fail-closed
+      # by construction — picking one of the scopes would be a guess wearing a fact's shape.
+      scope: single_scope(scopes),
+      scopes: scopes,
+      # When the graph last saw this, absolute. `effective_reliability` already carries age
+      # RELATIVE to the freshness frontier; an absolute stamp is what an authority contract
+      # needs to say "the authoritative source has not spoken since T".
+      observed_at: observed_at,
+      sources: sources |> List.wrap() |> Enum.reject(&is_nil/1) |> Enum.uniq() |> Enum.sort(),
       fresh?: Freshness.fresh?(age, type)
     }
   end
+
+  defp single_scope([scope]), do: scope
+  defp single_scope(_), do: nil
 
   @spec query_terms(String.t()) :: [String.t()]
   defp query_terms(query) do

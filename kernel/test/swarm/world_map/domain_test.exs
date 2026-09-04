@@ -120,11 +120,14 @@ defmodule Swarm.WorldMap.DomainTest do
   end
 
   describe "policy_filter/2 — the chokepoint that is NOT wired" do
-    test "reader-shaped atoms are all dropped, which is why it has no caller" do
-      # The exact shape Swarm.Graph.Network.neighborhood/3 returns: no `:scope` key.
-      # policy_filter is default-deny on a missing scope, so calling it in the serve path
-      # today would drop every atom and break every structured serve. This pins the
-      # blocker so the docstring cannot drift back to claiming the filter is wired.
+    test "an atom with no scope is dropped — default-deny, which is why wiring needed the fields first" do
+      # This used to pin the BLOCKER: Network.neighborhood/3 returned exactly this shape,
+      # with no `:scope`, so calling the filter would have dropped every atom. The reader
+      # now emits `:scope` (see "the served fact is now accepted by the default-deny policy
+      # chokepoint" in network_test.exs, which asserts it against the real reader and a
+      # real database). What this still pins is the default-deny itself: a fact-shaped map
+      # that arrives WITHOUT a scope — from WhoMap, Technology, or a reader written
+      # tomorrow — is refused rather than served.
       reader_facts = [
         %{relation: "hosted_on", object: "hv-01", object_kind: "host", corroboration: 2},
         %{relation: "has_status", object: "running", object_kind: "status", corroboration: 2}
@@ -132,7 +135,7 @@ defmodule Swarm.WorldMap.DomainTest do
 
       assert Domain.policy_filter(reader_facts, ["public", Swarm.GraphCase.test_src()]) == []
 
-      # ...and with the scope the prerequisite would add, the same atoms pass.
+      # ...and with the scope the reader now supplies, the same atoms pass.
       scoped = Enum.map(reader_facts, &Map.put(&1, :scope, Swarm.GraphCase.test_src()))
       assert Domain.policy_filter(scoped, [Swarm.GraphCase.test_src()]) == scoped
     end

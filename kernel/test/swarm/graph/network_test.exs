@@ -702,4 +702,147 @@ defmodule Swarm.Graph.NetworkTest do
     assert [%{relation: "carries", corroboration: 2}] =
              Network.neighborhood("net:tunnel:orbit", [@net_scope], min_corroboration: 2)
   end
+
+  describe "ADR-20 attribution: every served fact says where it came from" do
+    test "a direct fact carries its sources, its scope and an absolute observed_at" do
+      # The gap this closes: until now a served fact carried a corroboration COUNT and
+      # nothing about WHO attested it. No analysis of the answer text can tell a join (two
+      # sources agreeing) from a coincidence (one source, two phrasings) -- so the
+      # distinction has to be carried out of the reader or it does not exist.
+      node = src_node(@net_scope)
+
+      facts = [
+        %{
+          subject: "attr-vm",
+          subject_kind: "host",
+          relation: "hosted_on",
+          object: "attr-hv",
+          object_kind: "host"
+        }
+      ]
+
+      NetworkMap.write(node, facts, "prov-a", origin: "proxmox:forge")
+      NetworkMap.write(node, facts, "prov-b", origin: "confluence:page:42")
+
+      [fact] =
+        Network.neighborhood("net:host:attr-vm", [@net_scope],
+          min_corroboration: 1,
+          relations: ["hosted_on"]
+        )
+
+      assert fact.sources == ["confluence:page:42", "proxmox:forge"]
+      assert fact.scope == @net_scope
+      assert fact.scopes == [@net_scope]
+      assert %DateTime{} = fact.observed_at
+
+      # Two independent sources agreeing IS the join, and it is now visible as one.
+      assert fact.corroboration == 2
+      assert length(fact.sources) == fact.corroboration
+    end
+
+    test "one source attesting twice is one source — the count and the sources agree" do
+      node = src_node(@net_scope)
+
+      facts = [
+        %{
+          subject: "solo-vm",
+          subject_kind: "host",
+          relation: "hosted_on",
+          object: "solo-hv",
+          object_kind: "host"
+        }
+      ]
+
+      NetworkMap.write(node, facts, "prov-1", origin: "proxmox:forge")
+      NetworkMap.write(node, facts, "prov-2", origin: "proxmox:forge")
+
+      [fact] =
+        Network.neighborhood("net:host:solo-vm", [@net_scope],
+          min_corroboration: 1,
+          relations: ["hosted_on"]
+        )
+
+      # This is the pair the whole measurement rests on: same fact, twice, one source.
+      # A count alone cannot say which of the two cases it is; `sources` can.
+      assert fact.sources == ["proxmox:forge"]
+      assert fact.corroboration == 1
+    end
+
+    test "the served fact is now accepted by the default-deny policy chokepoint" do
+      # `Domain.policy_filter/2` was unwireable because reader facts had no `:scope`; a
+      # test in domain_test.exs pinned that as the blocker. This is the other side of it.
+      node = src_node(@net_scope)
+
+      NetworkMap.write(
+        node,
+        [
+          %{
+            subject: "chokepoint-vm",
+            subject_kind: "host",
+            relation: "hosted_on",
+            object: "chokepoint-hv",
+            object_kind: "host"
+          }
+        ],
+        "prov-c",
+        origin: "proxmox:forge"
+      )
+
+      facts = Network.neighborhood("net:host:chokepoint-vm", [@net_scope], min_corroboration: 1)
+
+      refute facts == []
+      assert Swarm.WorldMap.Domain.policy_filter(facts, [@net_scope]) == facts
+      assert Swarm.WorldMap.Domain.policy_filter(facts, ["public"]) == []
+    end
+
+    test "a derived multi-edge fact is attributed across its whole chain" do
+      node = src_node(@net_scope)
+
+      NetworkMap.write(
+        node,
+        [
+          %{
+            subject: "routed-host",
+            subject_kind: "host",
+            relation: "has_address",
+            object: "10.44.0.9",
+            object_kind: "address"
+          }
+        ],
+        "prov-addr",
+        origin: "proxmox:forge"
+      )
+
+      NetworkMap.write(
+        node,
+        [
+          %{
+            subject: "gw-attr",
+            subject_kind: "gateway",
+            relation: "carries",
+            object: "10.44.0.0/16",
+            object_kind: "subnet"
+          }
+        ],
+        "prov-range",
+        origin: "iac:netrepo"
+      )
+
+      facts = Network.neighborhood("net:host:routed-host", [@net_scope], min_corroboration: 1)
+      routes = Enum.filter(facts, &(&1.relation == "routes_via"))
+
+      refute routes == []
+
+      for fact <- routes do
+        # A route is not one edge: it is address ⊂ range carried by a gateway. Its
+        # attribution is the UNION over that chain, so both links show up -- and neither
+        # alone would have licensed the fact.
+        assert "proxmox:forge" in fact.sources
+        assert "iac:netrepo" in fact.sources
+        # Every link is in one scope here, so the fact has a single well-defined scope.
+        assert fact.scope == @net_scope
+        assert %DateTime{} = fact.observed_at
+      end
+    end
+  end
 end

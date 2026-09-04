@@ -792,7 +792,22 @@ defmodule Swarm.Core do
   # L1-concordance-ceiling). The serve path knows; this is it saying so. Shapes differ by
   # intent (neighborhood facts, procedure steps, claim groups), so keep only the keys
   # that identify the object and never invent the ones a shape lacks.
-  @provenance_fact_keys [:relation, :object, :predicate, :subject, :corroboration, :ordinal, :key]
+  # `:sources` is the whole point of the record for the join question: a corroboration
+  # COUNT of 2 is equally consistent with two sources agreeing (a join) and one source
+  # phrased twice (a coincidence). The origins tell them apart. `:observed_at` is absolute,
+  # so staleness is checkable without knowing the freshness frontier. Shapes that lack
+  # either key simply do not carry it -- `Map.take/2` never invents.
+  @provenance_fact_keys [
+    :relation,
+    :object,
+    :predicate,
+    :subject,
+    :corroboration,
+    :ordinal,
+    :key,
+    :sources,
+    :observed_at
+  ]
   @spec provenance_fact(map()) :: map()
   defp provenance_fact(fact) when is_map(fact), do: Map.take(fact, @provenance_fact_keys)
   defp provenance_fact(other), do: %{value: inspect(other)}
