@@ -51,7 +51,16 @@ defmodule Swarm.WorldMap.Domain do
         }
 
   # --- the NETWORK domain (first contract instance; extracted from Coverage/Gate) ------------
-  @network_cue ~r/(?:\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|(public|private|internal|external|outbound|egress)\s+ips?)\b|(?<![\p{L}\p{N}_])(публічн[\p{L}]*\s+(ip|айпі|адрес[\p{L}]*)|(ip|айпі)[-\s]?адрес[\p{L}]*|підмереж[\p{L}]*|тунел[\p{L}]*|шлюз[\p{L}]*|фаєрвол[\p{L}]*|кластер[\p{L}]*|маршрут[\p{L}]*|маршрутиз[\p{L}]*|тополог[\p{L}]*|підключен[\p{L}]*|з'єднан[\p{L}]*|хостить[\p{L}]*|хоститься|розміщен[\p{L}]*)(?![\p{L}\p{N}_]))/iu
+  # PLACEMENT is a distinct ask from topology and needs its own vocabulary. The cue was
+  # a list of topology nouns (subnet, tunnel, gateway, …) with no word for "where does
+  # this machine run": the learner-eval trace found 13 of 18 placement controls never
+  # reaching Stage 1, and the one question that did served only because it happened to
+  # contain "hosted". A cue is necessary, never sufficient — Stage 1 still needs a bound
+  # subject with corroborated facts and Stage 2 still vetoes — so widening it costs an
+  # escalation at worst, never a false serve.
+  @placement_cue ~S<\b(?:hypervisors?|proxmox)\b|\b(?:which|what)\s+(?:proxmox\s+)?nodes?\b|\bon\s+which\s+(?:node|hypervisor|host|machine|server)\b|\b(?:runs?|running|located|placed|sits?|resides?)\s+on\b|\bnodes?\s+(?:runs?|hosts?|is\s+running)\b|(?<![\p{L}\p{N}_])(?:sur\s+quel\s+(?:h[oô]te|hyperviseur|n[œoe]ud|serveur)|h[ée]berg[\p{L}]*|quel\s+hyperviseur|гіпервізор[\p{L}]*|на\s+якому\s+(?:вузл[\p{L}]*|хост[\p{L}]*))(?![\p{L}\p{N}_])>
+
+  @network_cue ~r/(?:#{@placement_cue}|\b(subnets?|tunnels?|gateways?|firewalls?|clusters?|vlans?|ipsec|vpn|carr(y|ies)|routed?|routes?|behind|connected|terminates?|hosted|topology|peers?|addresse?s?|ip\s+address|(public|private|internal|external|outbound|egress)\s+ips?)\b|(?<![\p{L}\p{N}_])(публічн[\p{L}]*\s+(ip|айпі|адрес[\p{L}]*)|(ip|айпі)[-\s]?адрес[\p{L}]*|підмереж[\p{L}]*|тунел[\p{L}]*|шлюз[\p{L}]*|фаєрвол[\p{L}]*|кластер[\p{L}]*|маршрут[\p{L}]*|маршрутиз[\p{L}]*|тополог[\p{L}]*|підключен[\p{L}]*|з'єднан[\p{L}]*|хостить[\p{L}]*|хоститься|розміщен[\p{L}]*)(?![\p{L}\p{N}_]))/iu
 
   @network_entail_system ~s|You decide if NETWORK TOPOLOGY FACTS answer the user QUESTION. Answer | <>
                            ~s|sufficient=true ONLY if the facts state the SPECIFIC relation the | <>

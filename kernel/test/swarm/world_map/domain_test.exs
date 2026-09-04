@@ -25,6 +25,35 @@ defmodule Swarm.WorldMap.DomainTest do
       assert "terminates_for" in d.relations
     end
 
+    test "the network cue recognises PLACEMENT asks, not only topology nouns" do
+      d = Domain.network()
+
+      # The learner-eval trace (board/journal.md 2026-09-04): 13 of 18 placement
+      # controls never reached Stage 1 because the cue was a vocabulary of topology
+      # nouns with no word for placement. `hosted` was the single word that let one
+      # question through, which is why exactly one row served.
+      assert Regex.match?(d.cue, "Which Proxmox node runs gitlab?")
+      assert Regex.match?(d.cue, "Which Proxmox node is currently running ssp?")
+      assert Regex.match?(d.cue, "Which hypervisor runs sec-ng?")
+      assert Regex.match?(d.cue, "Which hypervisor is hosting auth.galaxy.intranet?")
+      assert Regex.match?(d.cue, "On which node is mailbox running?")
+      assert Regex.match?(d.cue, "On which hypervisor is forge-prod located?")
+      assert Regex.match?(d.cue, "What node hosts the mattermost machine?")
+
+      # French and Ukrainian: the cost of a missing cue in another language is
+      # already paid for once (board/todo/network-cue-french-host-asks.md).
+      assert Regex.match?(d.cue, "Sur quel hyperviseur tourne helpdesk ?")
+      assert Regex.match?(d.cue, "Sur quel hôte est hébergé le service ?")
+      assert Regex.match?(d.cue, "На якому гіпервізорі працює netserv?")
+      assert Regex.match?(d.cue, "На якому вузлі розміщено mailbox?")
+
+      # Still not a network ask. A how-to keeps its procedure intent (the procedure
+      # branch is checked first anyway), and an org question is not placement.
+      refute Regex.match?(d.cue, "how do I reset my password")
+      refute Regex.match?(d.cue, "who manages the platform team")
+      refute Regex.match?(d.cue, "what is the deployment policy for preprod")
+    end
+
     test "the who (org-directory) domain declares its serve knobs" do
       d = Domain.who()
       assert d.key == :who
