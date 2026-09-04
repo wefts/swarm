@@ -73,7 +73,14 @@ defmodule Swarm.WorldMap.Domain do
                            ~s|private/internal IP ask; `has_address` answers an unqualified | <>
                            ~s|address ask; `contained_by` answers which subnet contains an | <>
                            ~s|address; `routes_for` answers which hosts route via a gateway; | <>
-                           ~s|`terminates_for` answers which tunnels terminate at a gateway. Answer | <>
+                           ~s|`terminates_for` answers which tunnels terminate at a gateway. | <>
+                           ~s|`hosted_on` answers a PLACEMENT ask — which hypervisor, node, host | <>
+                           ~s|machine or server something runs on, is hosted by, sits on, or is | <>
+                           ~s|located on. Those phrasings are the SAME ask: "which hypervisor runs | <>
+                           ~s|X", "which node runs X" and "on which hypervisor is X located" are | <>
+                           ~s|all answered by `hosted_on` for X. `hosted_on` does NOT answer who | <>
+                           ~s|owns, maintains or is responsible for something, and never answers | <>
+                           ~s|about a DIFFERENT machine than the one asked about. Answer | <>
                            ~s|sufficient=false if the facts are | <>
                            ~s|about a DIFFERENT entity or a DIFFERENT relation than asked, or do | <>
                            ~s|not contain the asked fact (e.g. asks a public IP, facts give only | <>

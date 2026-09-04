@@ -54,7 +54,44 @@ defmodule Swarm.WorldMap.Gate.NetworkCalibration do
       facts: [{"protected_by", "firewall edge-fw"}],
       serve: true
     },
+    # PLACEMENT — "where does this machine run". Added 2026-09-04 after the learner eval
+    # found the Stage-2 entail vetoing well-formed `hosted_on` groundings: swapping only
+    # the word for the machine (hypervisor <-> proxmox node) flipped 16 of 18 verdicts on
+    # identical facts. The prompt enumerated relations and `hosted_on` was not among them.
+    # Both phrasings are the SAME ask and must both serve.
+    %{
+      id: "serve-hosted-on-node-wording",
+      query: "which proxmox node runs app-01",
+      subject: "host app-01",
+      facts: [{"hosted_on", "host hv-01"}],
+      serve: true
+    },
+    %{
+      id: "serve-hosted-on-hypervisor-wording",
+      query: "which hypervisor runs app-01",
+      subject: "host app-01",
+      facts: [{"hosted_on", "host hv-01"}],
+      serve: true
+    },
+    %{
+      id: "serve-hosted-on-located-wording",
+      query: "on which hypervisor is app-01 located",
+      subject: "host app-01",
+      facts: [{"hosted_on", "host hv-01"}],
+      serve: true
+    },
     # SHOULD VETO — wrong entity / wrong relation / a fact the grounding LACKS
+    #
+    # The placement clause must NOT become a licence: `hosted_on` answers WHERE something
+    # runs, never WHO owns it (`veto-ownership-vs-hosting`, already in this set), and never
+    # about a different machine.
+    %{
+      id: "veto-placement-wrong-entity",
+      query: "which hypervisor runs app-02",
+      subject: "host app-01",
+      facts: [{"hosted_on", "host hv-01"}],
+      serve: false
+    },
     %{
       id: "veto-public-ip-vs-subnets",
       query: "what is the nebula public IP",
