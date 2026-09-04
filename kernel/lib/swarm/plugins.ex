@@ -37,7 +37,7 @@ defmodule Swarm.Plugins do
       plugins_dir
       |> Path.join("*/*.ex")
       |> Path.wildcard()
-      |> Enum.flat_map(&compile_file/1)
+      |> compile_all()
       |> Enum.filter(&connector?/1)
       |> Enum.map(&entry/1)
     else
@@ -46,12 +46,32 @@ defmodule Swarm.Plugins do
     end
   end
 
-  @spec compile_file(String.t()) :: [module()]
-  defp compile_file(path) do
-    path |> Code.compile_file() |> Enum.map(fn {module, _bin} -> module end)
+  # ALL files in one compilation unit, not one `Code.compile_file/1` per file in wildcard
+  # order. A plugin is normally several modules -- an observer, its transports, its
+  # connector -- and they reference each other. Compiled one at a time alphabetically,
+  # `k8s_client_kubectl.ex` reaches for a behaviour that `k8s_observer.ex` has not defined
+  # yet: every build emitted "@behaviour Hive.K8s.Observer.Client does not exist" and
+  # "Hive.Posix.Observer.classes/0 is undefined". The warnings were false -- the modules do
+  # exist -- but a plugin whose load order happened to matter would have failed for real.
+  #
+  # `Kernel.ParallelCompiler.compile/1` resolves the dependency graph itself, so order
+  # stops being something a plugin author has to think about. A failure still degrades to
+  # a logged error and an empty list: one bad plugin must not take the kernel down.
+  @spec compile_all([String.t()]) :: [module()]
+  defp compile_all([]), do: []
+
+  defp compile_all(paths) do
+    case Kernel.ParallelCompiler.compile(paths) do
+      {:ok, modules, _warnings} ->
+        modules
+
+      {:error, errors, _warnings} ->
+        Logger.error("plugin compile failed: #{inspect(errors)}")
+        []
+    end
   rescue
     error ->
-      Logger.error("plugin compile failed for #{path}: #{Exception.message(error)}")
+      Logger.error("plugin compile raised: #{Exception.message(error)}")
       []
   end
 
