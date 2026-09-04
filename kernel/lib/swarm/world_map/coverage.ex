@@ -46,6 +46,7 @@ defmodule Swarm.WorldMap.Coverage do
           | :ambiguous_variants
           | :generation_collision
           | :no_corroboration
+          | :ambiguous_subject
 
   # Query cue for a procedure ask ("how do I X", "steps to Y", "reset Z"). A cue is
   # necessary but NOT sufficient — a clean procedure variant must also exist in structure.
@@ -324,7 +325,25 @@ defmodule Swarm.WorldMap.Coverage do
 
     relation_opts = neighborhood_relation_opts(query, dom)
 
-    case first_neighborhood(keys, scopes, fun, min_corr, dom.subject_fun, relation_opts) do
+    named = named_candidates(query, keys)
+
+    # Prefer what the question named; fall back to the given order when it named nothing.
+    ordered = if named == [], do: keys, else: named
+
+    if length(distinct_subjects(named)) > 1 do
+      %Descriptor{
+        query: query,
+        intent: :neighborhood,
+        domain: dom.key,
+        blockers: [:ambiguous_subject]
+      }
+    else
+      neighborhood_from(query, dom, scopes, ordered, keys, fun, min_corr, relation_opts)
+    end
+  end
+
+  defp neighborhood_from(query, dom, scopes, ordered, keys, fun, min_corr, relation_opts) do
+    case first_neighborhood(ordered, scopes, fun, min_corr, dom.subject_fun, relation_opts) do
       {subject, key, facts} ->
         %Descriptor{
           query: query,
@@ -364,6 +383,60 @@ defmodule Swarm.WorldMap.Coverage do
       [] -> first_neighborhood(rest, scopes, fun, min_corr, subject_fun, relation_opts)
       facts -> {subject_fun.(key), key, facts}
     end
+  end
+
+  # Candidates the QUESTION actually names, longest name first.
+  #
+  # Taking the first candidate with a non-empty neighborhood binds by list order, which
+  # is not the same as binding the subject that was asked about: the learner-eval trace
+  # caught it answering about `auth-dev` when the question said `auth`, and answering
+  # about `sbom-analyzer` when the question named two subjects. When the question names
+  # exactly one candidate that one wins; when it names several the ask is genuinely
+  # ambiguous and belongs to the consilium, not to a coin toss; when it names none,
+  # nothing here can do better than the previous order (a role-named ask like "which
+  # hypervisor is hosting Keycloak?" needs the document link, which this layer has not
+  # got) so the old behaviour stands.
+  @spec named_candidates(String.t(), [String.t()]) :: [String.t()]
+  defp named_candidates(query, keys) do
+    keys
+    |> Enum.filter(&query_names?(query, &1))
+    |> Enum.sort_by(&{site_qualified?(&1), String.length(subject_name(&1))}, :desc)
+  end
+
+  # Ambiguity is between distinct SUBJECTS, not distinct keys. The same machine exists
+  # under two keys wherever the site-qualified Proxmox identity was never reconciled with
+  # the network map's unqualified one (159 such machines today —
+  # board/todo/proxmox-identity-not-reconciled.md), and calling that ambiguous would let
+  # an identity defect block an answer with only one real subject. Group by the stem, and
+  # prefer the site-qualified key: it is the more precise identity, not merely the longer.
+  @spec distinct_subjects([String.t()]) :: [String.t()]
+  defp distinct_subjects(keys) do
+    keys
+    |> Enum.map(&(subject_name(&1) |> String.split(".") |> List.first() |> String.downcase()))
+    |> Enum.uniq()
+  end
+
+  defp site_qualified?(key), do: String.contains?(key, "/")
+
+  # The last path segment is the subject's own name (`net:host:<site>/<name>`); for keys
+  # with no site segment it is the key's final `:` component.
+  defp subject_name(key) do
+    key |> String.split("/") |> List.last() |> String.split(":") |> List.last()
+  end
+
+  defp query_names?(query, key) do
+    name = subject_name(key)
+    stem = name |> String.split(".") |> List.first()
+
+    String.length(stem) >= 3 and
+      (token_present?(query, name) or token_present?(query, stem))
+  end
+
+  defp token_present?(query, needle) do
+    Regex.match?(
+      ~r/(^|[^\p{L}\p{N}_-])#{Regex.escape(needle)}([^\p{L}\p{N}_-]|$)/iu,
+      query
+    )
   end
 
   defp neighborhood_relation_opts(query, %Domain{key: :network}) do

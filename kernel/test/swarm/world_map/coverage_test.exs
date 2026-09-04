@@ -282,6 +282,43 @@ defmodule Swarm.WorldMap.CoverageTest do
       assert d.intent == :unknown
     end
 
+    test "two KEYS for one machine are not two subjects — prefer the site-qualified one" do
+      # `net:host:galaxy/netserv.galaxy.intranet` (Proxmox, site-qualified) and
+      # `net:host:netserv` (the network map's unqualified twin) are the SAME machine
+      # under two keys — 159 of them exist, see
+      # board/todo/proxmox-identity-not-reconciled.md. Calling that ambiguous would let
+      # an unreconciled identity block an answer that has only one real subject.
+      facts = [net_fact("hosted_on", "hv-01")]
+
+      d =
+        Coverage.describe("Which Proxmox node runs netserv?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:netserv", "net:host:galaxy/netserv.galaxy.intranet"],
+          network_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.blockers == []
+      assert d.neighborhood_key == "net:host:galaxy/netserv.galaxy.intranet"
+    end
+
+    test "when the question names no candidate, binding is unchanged (first with facts)" do
+      # A role-named join ("which hypervisor is hosting Keycloak?") has no candidate
+      # name in its text at all. Nothing here can resolve that without the document
+      # link, so behaviour must not change: first candidate with facts, as before.
+      facts = [net_fact("hosted_on", "hv-01")]
+
+      d =
+        Coverage.describe("Which hypervisor is hosting Keycloak?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:site/auth.galaxy.example", "net:host:site/other.galaxy.example"],
+          network_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.neighborhood_key == "net:host:site/auth.galaxy.example"
+    end
+
     test "serves a corroborated neighborhood when network_serve is on" do
       facts = [net_fact("carries", "10.128.0.0/16"), net_fact("carries", "10.129.0.0/16")]
 
