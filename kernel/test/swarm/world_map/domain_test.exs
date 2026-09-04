@@ -35,7 +35,7 @@ defmodule Swarm.WorldMap.DomainTest do
       assert Regex.match?(d.cue, "Which Proxmox node runs gitlab?")
       assert Regex.match?(d.cue, "Which Proxmox node is currently running ssp?")
       assert Regex.match?(d.cue, "Which hypervisor runs sec-ng?")
-      assert Regex.match?(d.cue, "Which hypervisor is hosting auth.galaxy.intranet?")
+      assert Regex.match?(d.cue, "Which hypervisor is hosting auth.example.test?")
       assert Regex.match?(d.cue, "On which node is mailbox running?")
       assert Regex.match?(d.cue, "On which hypervisor is forge-prod located?")
       assert Regex.match?(d.cue, "What node hosts the mattermost machine?")

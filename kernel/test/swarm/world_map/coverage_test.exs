@@ -347,7 +347,7 @@ defmodule Swarm.WorldMap.CoverageTest do
     end
 
     test "two KEYS for one machine are not two subjects — prefer the site-qualified one" do
-      # `net:host:galaxy/netserv.galaxy.intranet` (Proxmox, site-qualified) and
+      # `net:host:site/netserv.example.test` (Proxmox, site-qualified FQDN) and
       # `net:host:netserv` (the network map's unqualified twin) are the SAME machine
       # under two keys — 159 of them exist, see
       # board/todo/proxmox-identity-not-reconciled.md. Calling that ambiguous would let
@@ -357,13 +357,13 @@ defmodule Swarm.WorldMap.CoverageTest do
       d =
         Coverage.describe("Which Proxmox node runs netserv?", [@network_scope],
           network_serve: true,
-          network_keys: ["net:host:netserv", "net:host:galaxy/netserv.galaxy.intranet"],
+          network_keys: ["net:host:netserv", "net:host:site/netserv.example.test"],
           network_fun: net_fun(facts)
         )
 
       assert d.intent == :neighborhood
       assert d.blockers == []
-      assert d.neighborhood_key == "net:host:galaxy/netserv.galaxy.intranet"
+      assert d.neighborhood_key == "net:host:site/netserv.example.test"
     end
 
     test "when the question names no candidate, binding is unchanged (first with facts)" do

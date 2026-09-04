@@ -805,7 +805,7 @@ defmodule Swarm.Graph.NetworkTest do
             subject: "routed-host",
             subject_kind: "host",
             relation: "has_address",
-            object: "10.44.0.9",
+            object: "192.0.2.9",
             object_kind: "address"
           }
         ],
@@ -820,7 +820,7 @@ defmodule Swarm.Graph.NetworkTest do
             subject: "gw-attr",
             subject_kind: "gateway",
             relation: "carries",
-            object: "10.44.0.0/16",
+            object: "192.0.2.0/24",
             object_kind: "subnet"
           }
         ],
