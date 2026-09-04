@@ -186,11 +186,18 @@ defmodule Swarm.WorldMap.Coverage do
   @spec active_neighborhood(String.t(), keyword()) :: Domain.t() | nil
   defp active_neighborhood(query, opts) do
     semantic_route = Keyword.get(opts, :semantic_route, :none)
+    enabled = Enum.filter(Domain.neighborhood_domains(), &Keyword.get(opts, &1.serve_opt, false))
 
-    Enum.find(Domain.neighborhood_domains(), fn dom ->
-      Keyword.get(opts, dom.serve_opt, false) and
-        (Regex.match?(dom.cue, query) or semantic_route == {:neighborhood, dom.key})
-    end)
+    # PRECEDENCE IS A DECISION, NOT AN ORDERING ACCIDENT. Previously the first enabled
+    # domain that matched by EITHER route won, so an embedding guess could take a query
+    # whose text plainly belongs to another domain — the learner-eval trace caught two
+    # placement questions routed to :who and bound to a 679-fact people neighborhood
+    # while :network never got a turn. A cue is evidence from the query text; a semantic
+    # route is a guess about it. The text wins, and only when no cue matches does the
+    # semantic route choose. Within each group the registry order still decides.
+    cued = Enum.find(enabled, &Regex.match?(&1.cue, query))
+
+    cued || Enum.find(enabled, &(semantic_route == {:neighborhood, &1.key}))
   end
 
   @doc """

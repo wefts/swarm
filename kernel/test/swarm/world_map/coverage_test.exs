@@ -282,6 +282,65 @@ defmodule Swarm.WorldMap.CoverageTest do
       assert d.intent == :unknown
     end
 
+    test "an explicit cue beats a semantic route that names a different domain" do
+      # domain.ex takes the FIRST enabled domain that matches, so precedence was an
+      # ordering accident. The learner-eval trace caught two placement questions routed
+      # to :who by the semantic router and bound to who:family:developer (679 people
+      # facts) while :network never got a turn. A cue is evidence from the query text;
+      # a semantic route is an embedding guess, so the text wins.
+      facts = [net_fact("hosted_on", "hv-01")]
+
+      d =
+        Coverage.describe("Which hypervisor runs helpdesk-dev?", [@network_scope],
+          semantic_route: {:neighborhood, :who},
+          network_serve: true,
+          who_serve: true,
+          network_keys: ["net:host:site/helpdesk-dev"],
+          network_fun: net_fun(facts),
+          who_keys: ["who:family:developer"],
+          who_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.domain == :network
+    end
+
+    test "binds the candidate the QUESTION names, not the first one with facts" do
+      # coverage.ex first_neighborhood took the first candidate with a non-empty
+      # neighborhood. The learner-eval trace caught it binding `auth-dev` for a question
+      # about `auth` (board/journal.md 2026-09-04, frozen-012): a wrong-subject answer
+      # that Stage 2 then had to catch.
+      facts = [net_fact("hosted_on", "hv-01")]
+
+      d =
+        Coverage.describe("Which hypervisor is hosting auth.galaxy.example?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:site/auth-dev.galaxy.example", "net:host:site/auth.galaxy.example"],
+          network_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.neighborhood_key == "net:host:site/auth.galaxy.example"
+    end
+
+    test "two candidates named in one question are AMBIGUOUS, not a coin toss" do
+      # "DependencyTrack & SBOM Analyzer" bound sbom-analyzer and Stage 2 accepted,
+      # because that string really is in the question. Binding one of two named
+      # subjects is a false serve; the consilium reconciles instead.
+      facts = [net_fact("hosted_on", "hv-01")]
+
+      d =
+        Coverage.describe("Which hypervisor runs dependency-track and sbom-analyzer?", [@network_scope],
+          network_serve: true,
+          network_keys: ["net:host:site/dependency-track", "net:host:site/sbom-analyzer"],
+          network_fun: net_fun(facts)
+        )
+
+      assert d.intent == :neighborhood
+      assert d.blockers == [:ambiguous_subject]
+      assert {:error, [:ambiguous_subject]} = Coverage.validate(d)
+    end
+
     test "two KEYS for one machine are not two subjects — prefer the site-qualified one" do
       # `net:host:galaxy/netserv.galaxy.intranet` (Proxmox, site-qualified) and
       # `net:host:netserv` (the network map's unqualified twin) are the SAME machine
