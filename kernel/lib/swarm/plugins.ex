@@ -61,7 +61,10 @@ defmodule Swarm.Plugins do
   defp compile_all([]), do: []
 
   defp compile_all(paths) do
-    case Kernel.ParallelCompiler.compile(paths) do
+    # `return_diagnostics: true` is required from Elixir 1.19 — without it the call still
+    # works but warns on every plugin load, which would have traded four false warnings for
+    # one real one. Both return shapes stay 3-tuples, so the clauses below are unchanged.
+    case Kernel.ParallelCompiler.compile(paths, return_diagnostics: true) do
       {:ok, modules, _warnings} ->
         modules
 
