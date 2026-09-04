@@ -315,7 +315,10 @@ defmodule Swarm.WorldMap.CoverageTest do
       d =
         Coverage.describe("Which hypervisor is hosting auth.galaxy.example?", [@network_scope],
           network_serve: true,
-          network_keys: ["net:host:site/auth-dev.galaxy.example", "net:host:site/auth.galaxy.example"],
+          network_keys: [
+            "net:host:site/auth-dev.galaxy.example",
+            "net:host:site/auth.galaxy.example"
+          ],
           network_fun: net_fun(facts)
         )
 
@@ -330,7 +333,9 @@ defmodule Swarm.WorldMap.CoverageTest do
       facts = [net_fact("hosted_on", "hv-01")]
 
       d =
-        Coverage.describe("Which hypervisor runs dependency-track and sbom-analyzer?", [@network_scope],
+        Coverage.describe(
+          "Which hypervisor runs dependency-track and sbom-analyzer?",
+          [@network_scope],
           network_serve: true,
           network_keys: ["net:host:site/dependency-track", "net:host:site/sbom-analyzer"],
           network_fun: net_fun(facts)
@@ -370,7 +375,10 @@ defmodule Swarm.WorldMap.CoverageTest do
       d =
         Coverage.describe("Which hypervisor is hosting Keycloak?", [@network_scope],
           network_serve: true,
-          network_keys: ["net:host:site/auth.galaxy.example", "net:host:site/other.galaxy.example"],
+          network_keys: [
+            "net:host:site/auth.galaxy.example",
+            "net:host:site/other.galaxy.example"
+          ],
           network_fun: net_fun(facts)
         )
 
