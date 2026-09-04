@@ -119,6 +119,25 @@ defmodule Swarm.WorldMap.DomainTest do
     end
   end
 
+  describe "policy_filter/2 — the chokepoint that is NOT wired" do
+    test "reader-shaped atoms are all dropped, which is why it has no caller" do
+      # The exact shape Swarm.Graph.Network.neighborhood/3 returns: no `:scope` key.
+      # policy_filter is default-deny on a missing scope, so calling it in the serve path
+      # today would drop every atom and break every structured serve. This pins the
+      # blocker so the docstring cannot drift back to claiming the filter is wired.
+      reader_facts = [
+        %{relation: "hosted_on", object: "hv-01", object_kind: "host", corroboration: 2},
+        %{relation: "has_status", object: "running", object_kind: "status", corroboration: 2}
+      ]
+
+      assert Domain.policy_filter(reader_facts, ["public", Swarm.GraphCase.test_src()]) == []
+
+      # ...and with the scope the prerequisite would add, the same atoms pass.
+      scoped = Enum.map(reader_facts, &Map.put(&1, :scope, Swarm.GraphCase.test_src()))
+      assert Domain.policy_filter(scoped, [Swarm.GraphCase.test_src()]) == scoped
+    end
+  end
+
   describe "policy_filter/2 — global answer-time privacy chokepoint" do
     test "keeps only atoms the viewer's scopes allow" do
       atoms = [

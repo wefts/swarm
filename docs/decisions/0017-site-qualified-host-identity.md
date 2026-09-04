@@ -7,11 +7,89 @@ shape, never identity). Cross-references to "ADR-N (workspace)" point at
 
 ## Status
 
-Proposed — decided from measurement, not yet reviewed by a decorrelated critic.
+**REJECTED — 2026-09-04.** Decorrelated critic returned FLAWED. Not accepted, not
+built, and **no alias has been written to any graph**. The implementation drafted
+against it (`Swarm.Graph.HostIdentity` and its tests) was reverted rather than left
+in the tree: a module implementing a rejected decision invites someone to run it.
+
+The problem this ADR names is real and still open. The decision it proposed is not
+the fix. Superseding work is carded at
+`board/todo/host-identity-reconciliation-lifecycle.md`.
+
+## Why it was rejected
+
+### 1. The evidence was circular — the disqualifying one
+
+The ADR argued from *"159 of 159 names resolve to exactly one site, 0 collisions"*.
+That measures **how often the name-equality rule applies**, not whether it is
+**correct**, because those 159 identities were *selected by that same name
+equality*. A tautology dressed as a validation — and the third time in this
+campaign a population described by the rule under test was read as support for it.
+
+Nothing independent was consulted: no IP, no UUID, no IaC reference, no source
+declaration, no sampled human check. ADR-13 reserves aliases for **known or
+source-declared** equivalence; this substituted lexical coincidence.
+
+The counterexample that kills it is **name reuse across time**. A wiki fact about
+`db01` may describe a machine retired two years ago. The rule attaches it,
+confidently, to today's `db01` — and the result looks exactly like two sources
+corroborating each other.
+
+### 2. The collision branch was called a future guard. It is not
+
+Milestone 6 had *already* found `Gitlab` and `Nextcloud` resolving to hosts at two
+sites. Calling ambiguity hypothetical was contradicted by this campaign's own
+record from the day before.
+
+And the rule was write-time only: it declines to write on ambiguity, and says
+nothing about an alias that was valid yesterday and becomes ambiguous when a new
+site appears or a hostname is recycled. There is no revocation path.
+
+### 3. The 2.4% result gives no evidence for the alias basis
+
+`learner_eval_link_evidence.decide/2` has **no alias branch** — all 15 licensed
+links are `title_equality`, so the analyzer never exercised ADR-17 at all and the
+document/host measurement is silent about it. Only **2 of 19** frozen join subjects
+have even a licensed title link. On the evidence actually gathered, this is not the
+next join fix.
+
+### 4. A mutable site label is not durable canonical identity
+
+The ADR made `net:host:<site>/<name>` canonical with no immutable site id and no
+rename or merge behaviour. Renaming a site creates a new keyspace: it breaks
+temporal continuity for every fact under the old label and orphans every alias
+pointing into it.
+
+## What survives
+
+- The **problem statement** in the Context below, unchanged and still measured: 159
+  machines under two graph keys, 0 aliases, 0 edges between them, and no Proxmox
+  edge corroborated by documentation about the same machine
+  (`board/todo/proxmox-identity-not-reconciled.md`).
+- One constraint learned while building the rejected version: `Store.upsert_node/3`
+  consults the alias table *before minting*, so an alias changes only where the
+  **next** write lands. A real fix must converge the nodes and edges that already
+  exist — redirection alone leaves the split it was meant to heal.
+
+## What a correct decision must establish
+
+1. **Equivalence from something other than the name** — an IP, a UUID, an IaC
+   declaration, a source assertion, or sampled human confirmation — with a measured
+   error rate on a sample the rule did *not* select.
+2. **Convergence, not redirection.** Existing nodes and edges must end on one
+   subject.
+3. **A lifecycle.** Aliases revocable and remappable, atomically, when uniqueness
+   changes: a new site, a recycled hostname, a rename.
+4. **Durable identity.** An immutable site identifier with defined rename and merge
+   behaviour, before any key shape is called canonical.
+5. **Scope safety throughout.** The two keys sit in different `src:` scopes;
+   reconciliation must never widen visibility.
 
 ## Record Completeness
 
-Complete for the decision; the migration's exact batching is left to the build.
+Complete as a rejected proposal. The Context below is retained because the problem
+it documents is still open; the Decision and Consequences are retained so the wrong
+turn stays legible, and are **not** to be implemented.
 
 ## Context
 
@@ -20,11 +98,10 @@ other.
 
 The Proxmox connector site-qualifies every subject on purpose, so that a `web-01`
 in one datacentre never merges with a `web-01` in another:
-`net:host:<site>/<name>`. That is correct and is the more precise identity. The
-network map, built earlier from wiki prose and IaC repositories, uses the
-unqualified `net:host:<name>`.
+`net:host:<site>/<name>`. The network map, built earlier from wiki prose and IaC
+repositories, uses the unqualified `net:host:<name>`.
 
-Counted on staging, 2026-09-04 (`board/todo/proxmox-identity-not-reconciled.md`):
+Counted on staging, 2026-09-04:
 
 | count | what |
 | --- | --- |
@@ -35,81 +112,19 @@ Counted on staging, 2026-09-04 (`board/todo/proxmox-identity-not-reconciled.md`)
 | **0** | edges between a `net:host:%` node and any document-derived entity |
 | 1508 | edges touching a Proxmox host node — every one origin-family `proxmox` |
 
-Three consequences, all observed rather than predicted:
+Consequences of the split, all observed:
 
 1. **Corroboration cannot fire.** ADR-13 supersession compares claims about the
-   *same subject*. To the graph these are different subjects, so not one of the
-   1508 Proxmox edges is corroborated by the wiki or IaC facts about the same
-   machine.
-2. **It corrupts subject binding.** The tier-gate's candidate binding had to grow
-   a special case: when the question named `netserv`, both keys matched and the
-   gate declared the ask ambiguous, refusing an answer that had exactly one real
-   subject. The current mitigation groups candidates by stem and prefers the
-   site-qualified key — a workaround at the read layer for a defect in the write
-   layer.
-3. **It is invisible.** Nothing surfaces it. It was found by counting, after a
-   measurement had already been distorted by it.
+   *same subject*; to the graph these are different subjects.
+2. **It corrupts subject binding.** The tier-gate's candidate binding had to group
+   candidates by stem and prefer the site-qualified key — a read-layer workaround
+   for a write-layer defect.
+3. **It is invisible.** It was found by counting, after a measurement had already
+   been distorted by it.
 
-## Decision
+## Decision (rejected — retained for the record, not to be implemented)
 
-**Reconcile with alias rows, and keep the site qualifier as canonical.**
-
-- `node_alias(type, alias_key, canonical_key)` gains a row per reconciled machine:
-  `alias_key = net:host:<name>`, `canonical_key = net:host:<site>/<name>`. The
-  seam ADR-13 already built is the right one; it has simply never been used for
-  this.
-- **The site-qualified key is canonical, always.** It carries strictly more
-  identity. The unqualified key is the alias, never the target.
-- **Refuse the ambiguous ones rather than guess.** A row is written only when the
-  unqualified name resolves to exactly one site. Where a name exists at two sites,
-  no alias is written and the ambiguity is recorded for an operator decision. A
-  wrong merge here silently fuses two machines; a missing alias merely leaves
-  today's behaviour.
-
-  Measured on staging 2026-09-04: of the **159** network-map names that match a
-  Proxmox host, **159 resolve to exactly one site and 0 are ambiguous**. So the
-  exact rule covers the whole current population and the refuse branch is empty
-  today. It is kept as a guard, not as an expected path — `forge` and `galaxy`
-  happen to use disjoint naming conventions, and a third site need not.
-- **Reconciliation is a pass, not an ingest-time coupling.** The connector keeps
-  emitting exactly what it observes. Nothing about site qualification changes.
-
-### Alternatives, and why not
-
-- **Entity-resolution `same_as` proposals (ADR-13 layer 2).** The heavier
-  machinery — polysemy guards, scope guards, an LLM confirm — earns its cost when
-  identity is *uncertain*. Here it is not: an exact stem match against a
-  single-site name is deterministic. Reserve ER for the cases the exact rule
-  refuses.
-- **Qualify the network map at ingest.** The best identity and the largest change,
-  and it needs a site attribution the wiki prose often does not carry. It would
-  also rewrite history for facts already asserted. Revisit if the wiki gains
-  reliable site attribution.
-- **Do nothing and let the read layer cope.** Rejected: the binding workaround is
-  already a read-layer patch for a write-layer defect, and every future reader
-  would need the same patch. That is how a defect becomes an idiom.
-
-## Consequences
-
-- Corroboration becomes possible for 159 machines: wiki/IaC claims and Proxmox
-  observations land on one subject and ADR-13 supersession applies. Expect some
-  contradictions to surface immediately — that is the point, and they will need
-  the authority contract (`board/doing/placement-retrace.md`, step 4) to resolve:
-  an observation from the hypervisor outranks a documented claim *about placement*,
-  and does not outrank documentation about purpose.
-- Cross-source scope: the two keys sit in different `src:` scopes, so an alias
-  spans them. Aliasing must not widen visibility — resolution happens before the
-  scope predicate, never instead of it, and the ADR-18 (workspace) F3 clamp stands.
-- The binding workaround in `Coverage` stays. It is independently correct: two keys
-  for one machine is not the only way a question can name one subject twice, and
-  the read layer should be robust to it whether or not the write layer is clean.
-- Reversible: deleting the alias rows restores today's behaviour exactly. No node
-  is merged, no edge is rewritten.
-
-## What must be true before this is Accepted
-
-1. A decorrelated critic reviews it — specifically the claim that exact stem match
-   against a single-site name is safe enough to skip ER.
-2. ~~The ambiguous set is counted.~~ **Done** — 159 of 159 unambiguous, 0 collisions
-   (query in `board/todo/proxmox-identity-not-reconciled.md`). The refuse branch is
-   a guard against future sites, not the common path.
+Reconcile with `node_alias` rows, site-qualified key canonical, written only where
+the unqualified name resolves to exactly one site; refuse otherwise. Rejected for
+the four reasons above — principally that name equality is not evidence of
+identity.

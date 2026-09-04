@@ -12,10 +12,21 @@ defmodule Swarm.WorldMap.Domain do
   generalization of the serve pipeline — that is master-plan E2b, done once ≥3 real domains exist
   (rule of three). Here we centralize the per-domain KNOBS and the answer-time policy chokepoint.
 
-  Also home to the **global answer-time privacy/policy filter** (`policy_filter/2`): the review's
-  requirement that privacy be enforced GLOBALLY at serve time — not inside one domain's code — so a
-  cross-domain join can never surface a fact outside the viewer's scope. Every served answer's atoms
-  pass through it before entailment + citation.
+  Also home to `policy_filter/2`, the INTENDED global answer-time privacy chokepoint.
+
+  > **It is not wired into the serve path, and this docstring used to say it was.**
+  > Nothing in `lib/` calls it; only its tests do. Scope enforcement today is per-reader,
+  > in SQL — `Swarm.Graph.Network.neighborhood/3` and the other neighborhood readers
+  > filter on `node.scope` and `edge.visibility_scope` before a fact is ever built. There
+  > is no known leak; the danger is that someone writing a NEW reader from this
+  > documentation would believe the chokepoint protects them and ship it unguarded.
+  >
+  > It cannot simply be called: `policy_filter/2` is default-deny on a missing `:scope`,
+  > and reader facts carry no `:scope` key at all (`Network.fact_from_row/1`), so wiring
+  > it today would drop every atom and break every structured serve. The prerequisite is
+  > that readers emit the scope of the row each fact came from. Carded:
+  > `board/todo/policy-filter-not-wired.md`; pinned by
+  > "reader-shaped atoms are all dropped" in `domain_test.exs`.
   """
 
   @enforce_keys [:key, :cue, :entail_system, :min_corroboration]
